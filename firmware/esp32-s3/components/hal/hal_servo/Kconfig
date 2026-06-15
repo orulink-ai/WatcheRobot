@@ -1,0 +1,27 @@
+menu "Watcher HAL Servo"
+
+    comment "GPIO19/GPIO20 are owned by the mcu_link runtime UART in v2"
+
+    config WATCHER_SERVO_MOTION_ENABLE
+        bool "Enable coprocessor servo motion output"
+        default n
+        help
+            Enable forwarding servo commands to the STM32 coprocessor motion
+            service. Leave disabled while testing voice wake word detection to
+            avoid MCU_MOTION traffic and servo movement.
+
+    config WATCHER_SERVO_Y_MIN_DEG
+        int "Servo Y axis minimum angle (degrees)"
+        default 100
+        range 0 180
+        help
+            Mechanical protection lower limit for Y axis (prevents hardware damage).
+
+    config WATCHER_SERVO_Y_MAX_DEG
+        int "Servo Y axis maximum angle (degrees)"
+        default 140
+        range 0 180
+        help
+            Mechanical protection upper limit for Y axis.
+
+endmenu

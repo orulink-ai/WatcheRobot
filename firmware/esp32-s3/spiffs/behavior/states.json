@@ -1,0 +1,251 @@
+{
+  "version": "1.0",
+  "default_state": "standby",
+  "states": {
+    "boot": {
+      "loop": false,
+      "motion": [
+        { "at_ms": 0, "x_deg": 90, "y_deg": 120, "duration_ms": 200 }
+      ],
+      "expression": [
+        { "at_ms": 0, "anim": "happy", "text": "Booting...", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "boot" }
+      ]
+    },
+    "standby": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "standby", "text": "", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "standby" }
+      ]
+    },
+    "listening": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "listening", "text": "Listening...", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "look" }
+      ]
+    },
+    "thinking": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "thinking", "text": "Thinking...", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "thinking" }
+      ]
+    },
+    "processing": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "processing", "text": "Processing...", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "speaking": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "speaking", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "happy": {
+      "loop": false,
+      "hold_until_replaced": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "happy", "text": "", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "happy" }
+      ]
+    },
+    "error": {
+      "loop": false,
+      "hold_until_replaced": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "error", "text": "", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "error" }
+      ]
+    },
+    "custom1": {
+      "loop": true,
+      "motion": [
+        { "at_ms": 0, "x_deg": 90, "y_deg": 120, "duration_ms": 300 }
+      ],
+      "expression": [
+        { "at_ms": 0, "anim": "custom1", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "bluetooth": {
+      "loop": false,
+      "motion": [
+        { "at_ms": 0, "x_deg": 90, "y_deg": 90, "duration_ms": 300 }
+      ],
+      "expression": [
+        { "at_ms": 0, "anim": "bluetooth", "text": "", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "bluetooth" }
+      ]
+    },
+    "custom2": {
+      "loop": true,
+      "motion": [
+        { "at_ms": 0, "x_deg": 90, "y_deg": 120, "duration_ms": 300 }
+      ],
+      "expression": [
+        { "at_ms": 0, "anim": "custom2", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "custom3": {
+      "loop": true,
+      "motion": [
+        { "at_ms": 0, "x_deg": 90, "y_deg": 120, "duration_ms": 300 }
+      ],
+      "expression": [
+        { "at_ms": 0, "anim": "custom3", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "creator_mode": {
+      "loop": false,
+      "hold_until_replaced": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "standby", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "disconnect": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "disconnect", "text": "", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "disconnect" }
+      ]
+    },
+    "shock": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "shock", "text": "", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "shock" }
+      ]
+    },
+    "sunglasses": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "sunglasses", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "sad": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "sad", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "get": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "get", "text": "", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "get" }
+      ]
+    },
+    "smile": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "smile", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "recharge": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "recharge", "text": "", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "recharge" }
+      ]
+    },
+    "speechless": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "speechless", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "concentration": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "concentration", "text": "", "font_size": 24 }
+      ],
+      "sound": [
+        { "at_ms": 0, "sound_id": "concentration" }
+      ]
+    },
+    "fondle_love": {
+      "loop": false,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "fondle_love", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "fondle_anger": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "fondle_anger", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "blink": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "blink", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    },
+    "upgrade": {
+      "loop": true,
+      "motion": [],
+      "expression": [
+        { "at_ms": 0, "anim": "upgrade", "text": "", "font_size": 24 }
+      ],
+      "sound": []
+    }
+  }
+}

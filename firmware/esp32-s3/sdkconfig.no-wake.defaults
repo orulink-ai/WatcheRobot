@@ -1,0 +1,8 @@
+# Build overlay for firmware variants without the local WakeNet wake-word module.
+# Keep button-triggered recording and cloud audio paths enabled.
+# CONFIG_ENABLE_WAKE_WORD is not set
+# CONFIG_USE_WAKENET is not set
+# CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS is not set
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_VOICE_TASK_STACK_SIZE=4096
+CONFIG_VOICE_AUDIO_STATS_LOG_INTERVAL_FRAMES=60

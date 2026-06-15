@@ -1,0 +1,85 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "arm-default",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake"
+        },
+        {
+            "name": "host-default",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}"
+        },
+        {
+            "name": "Debug",
+            "inherits": "arm-default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "WATCHER_BUILD_FIRMWARE": "ON",
+                "WATCHER_BUILD_HOST_TESTS": "OFF",
+                "WATCHER_STRESS_BUILD": "OFF"
+            }
+        },
+        {
+            "name": "Release",
+            "inherits": "arm-default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "WATCHER_BUILD_FIRMWARE": "ON",
+                "WATCHER_BUILD_HOST_TESTS": "OFF",
+                "WATCHER_STRESS_BUILD": "OFF"
+            }
+        },
+        {
+            "name": "Stress",
+            "inherits": "arm-default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "WATCHER_BUILD_FIRMWARE": "ON",
+                "WATCHER_BUILD_HOST_TESTS": "OFF",
+                "WATCHER_STRESS_BUILD": "ON"
+            }
+        },
+        {
+            "name": "HostDebug",
+            "inherits": "host-default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "WATCHER_BUILD_FIRMWARE": "OFF",
+                "WATCHER_BUILD_HOST_TESTS": "ON",
+                "WATCHER_STRESS_BUILD": "OFF"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "Debug",
+            "configurePreset": "Debug"
+        },
+        {
+            "name": "Release",
+            "configurePreset": "Release"
+        },
+        {
+            "name": "Stress",
+            "configurePreset": "Stress"
+        },
+        {
+            "name": "HostDebug",
+            "configurePreset": "HostDebug"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "HostDebug",
+            "configurePreset": "HostDebug",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

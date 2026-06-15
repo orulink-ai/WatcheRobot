@@ -1,0 +1,244 @@
+#include "mcu_motion_service.h"
+
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+
+typedef struct {
+    uint8_t msg_class;
+    uint8_t msg_id;
+    uint8_t flags;
+    uint8_t payload[128];
+    uint16_t payload_len;
+    uint32_t seq;
+    size_t wire_len;
+    unsigned send_count;
+} captured_frame_t;
+
+static mcu_link_t s_link = {0};
+static bool s_ready = true;
+static captured_frame_t s_captured;
+static captured_frame_t s_history[8];
+static unsigned s_history_count;
+
+mcu_link_t *mcu_link_bootstrap_get_link(void)
+{
+    return &s_link;
+}
+
+bool mcu_link_bootstrap_is_ready(void)
+{
+    return s_ready;
+}
+
+esp_err_t mcu_link_send_frame(mcu_link_t *link,
+                              uint8_t msg_class,
+                              uint8_t msg_id,
+                              uint8_t flags,
+                              const uint8_t *payload,
+                              uint16_t payload_len,
+                              uint32_t *out_seq,
+                              size_t *out_wire_len)
+{
+    assert(link == &s_link);
+    assert(payload_len <= sizeof(s_captured.payload));
+
+    s_captured.msg_class = msg_class;
+    s_captured.msg_id = msg_id;
+    s_captured.flags = flags;
+    s_captured.payload_len = payload_len;
+    memcpy(s_captured.payload, payload, payload_len);
+    s_captured.seq = 42u;
+    s_captured.wire_len = payload_len + 8u;
+    s_captured.send_count++;
+    if (s_history_count < (sizeof(s_history) / sizeof(s_history[0]))) {
+        s_history[s_history_count] = s_captured;
+        s_history[s_history_count].send_count = 1u;
+        s_history_count++;
+    }
+
+    if (out_seq != NULL) {
+        *out_seq = (uint32_t)(42u + s_captured.send_count - 1u);
+        s_captured.seq = *out_seq;
+        if (s_history_count > 0u) {
+            s_history[s_history_count - 1u].seq = *out_seq;
+        }
+    }
+    if (out_wire_len != NULL) {
+        *out_wire_len = s_captured.wire_len;
+    }
+    return ESP_OK;
+}
+
+static void reset_capture(void)
+{
+    memset(&s_captured, 0, sizeof(s_captured));
+    memset(s_history, 0, sizeof(s_history));
+    s_history_count = 0u;
+    s_ready = true;
+}
+
+static void test_stop_clears_pending_motion_queue(void)
+{
+    reset_capture();
+
+    assert(mcu_motion_stop(MCU_MOTION_SOURCE_WS) == ESP_OK);
+    assert(s_captured.send_count == 1u);
+    assert(s_captured.msg_class == MCU_FRAME_CLASS_MOTION);
+    assert(s_captured.msg_id == MCU_MOTION_MSG_SERVO_STOP);
+    assert(s_captured.flags == MCU_FRAME_FLAG_ACK_REQ);
+    assert(s_captured.payload_len == 2u);
+    assert(s_captured.payload[0] == 1u);
+    assert(s_captured.payload[1] == (uint8_t)MCU_MOTION_SOURCE_WS);
+}
+
+static void test_sequence_encodes_segments_into_single_frame(void)
+{
+    uint32_t seq = 0u;
+    mcu_motion_sequence_t sequence = {
+        .source = MCU_MOTION_SOURCE_BEHAVIOR,
+        .segment_count = 2u,
+        .segments = {
+            {
+                .axis_mask = MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y,
+                .x_deg_x10 = 1000,
+                .y_deg_x10 = 1200,
+                .duration_ms = 50u,
+                .motion_profile = MCU_MOTION_PROFILE_LINEAR,
+            },
+            {
+                .axis_mask = MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y,
+                .x_deg_x10 = 800,
+                .y_deg_x10 = 900,
+                .duration_ms = 70u,
+                .motion_profile = MCU_MOTION_PROFILE_EASE_IN_OUT,
+            },
+        },
+    };
+
+    reset_capture();
+
+    assert(mcu_motion_submit_sequence_with_seq(&sequence, &seq) == ESP_OK);
+    assert(seq == 42u);
+    assert(s_captured.send_count == 1u);
+    assert(s_captured.msg_class == MCU_FRAME_CLASS_MOTION);
+    assert(s_captured.msg_id == MCU_MOTION_MSG_SERVO_SEQUENCE);
+    assert(s_captured.flags == MCU_FRAME_FLAG_ACK_REQ);
+    assert(s_captured.payload_len == 18u);
+    assert(s_captured.payload[0] == (uint8_t)MCU_MOTION_SOURCE_BEHAVIOR);
+    assert(s_captured.payload[1] == 2u);
+    assert(s_captured.payload[2] == (MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y));
+    assert(s_captured.payload[3] == 0xE8u);
+    assert(s_captured.payload[4] == 0x03u);
+    assert(s_captured.payload[5] == 0xB0u);
+    assert(s_captured.payload[6] == 0x04u);
+    assert(s_captured.payload[7] == 0x32u);
+    assert(s_captured.payload[8] == 0x00u);
+    assert(s_captured.payload[9] == MCU_MOTION_PROFILE_LINEAR);
+    assert(s_captured.payload[10] == (MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y));
+    assert(s_captured.payload[11] == 0x20u);
+    assert(s_captured.payload[12] == 0x03u);
+    assert(s_captured.payload[13] == 0x84u);
+    assert(s_captured.payload[14] == 0x03u);
+    assert(s_captured.payload[15] == 0x46u);
+    assert(s_captured.payload[16] == 0x00u);
+    assert(s_captured.payload[17] == MCU_MOTION_PROFILE_EASE_IN_OUT);
+}
+
+static void test_sequence_rejects_invalid_segment_without_send(void)
+{
+    mcu_motion_sequence_t sequence = {
+        .source = MCU_MOTION_SOURCE_BEHAVIOR,
+        .segment_count = 1u,
+        .segments = {
+            {
+                .axis_mask = MCU_MOTION_AXIS_X,
+                .x_deg_x10 = 1900,
+                .duration_ms = 50u,
+                .motion_profile = MCU_MOTION_PROFILE_LINEAR,
+            },
+        },
+    };
+
+    reset_capture();
+
+    assert(mcu_motion_submit_sequence(&sequence) == ESP_ERR_INVALID_ARG);
+    assert(s_captured.send_count == 0u);
+}
+
+static void test_sequence_accepts_max_single_frame_segments(void)
+{
+    mcu_motion_sequence_t sequence = {
+        .source = MCU_MOTION_SOURCE_BEHAVIOR,
+        .segment_count = MCU_MOTION_SEQUENCE_MAX_SEGMENTS,
+    };
+
+    reset_capture();
+    for (uint8_t index = 0u; index < MCU_MOTION_SEQUENCE_MAX_SEGMENTS; index++) {
+        sequence.segments[index].axis_mask = MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y;
+        sequence.segments[index].x_deg_x10 = 900;
+        sequence.segments[index].y_deg_x10 = 900;
+        sequence.segments[index].duration_ms = 1u;
+        sequence.segments[index].motion_profile = MCU_MOTION_PROFILE_LINEAR;
+    }
+
+    assert(mcu_motion_submit_sequence(&sequence) == ESP_OK);
+    assert(s_captured.send_count == 1u);
+    assert(s_captured.msg_id == MCU_MOTION_MSG_SERVO_SEQUENCE);
+    assert(s_captured.payload_len == (uint16_t)(2u + (MCU_MOTION_SEQUENCE_MAX_SEGMENTS * 8u)));
+    assert(s_captured.payload_len <= 128u);
+    assert(s_captured.payload[1] == MCU_MOTION_SEQUENCE_MAX_SEGMENTS);
+}
+
+static void test_chunked_sequence_sends_begin_chunks_and_end(void)
+{
+    uint32_t end_seq = 0u;
+    mcu_motion_chunked_sequence_t sequence = {
+        .sequence_id = 0x1234u,
+        .source = MCU_MOTION_SOURCE_BEHAVIOR,
+        .segment_count = 16u,
+    };
+
+    reset_capture();
+    for (uint8_t index = 0u; index < sequence.segment_count; index++) {
+        sequence.segments[index].axis_mask = MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y;
+        sequence.segments[index].x_deg_x10 = 900;
+        sequence.segments[index].y_deg_x10 = 900;
+        sequence.segments[index].duration_ms = 1u;
+        sequence.segments[index].motion_profile = MCU_MOTION_PROFILE_LINEAR;
+    }
+
+    assert(mcu_motion_submit_chunked_sequence_with_seq(&sequence, &end_seq) == ESP_OK);
+    assert(end_seq == 45u);
+    assert(s_captured.send_count == 4u);
+    assert(s_history_count == 4u);
+    assert(s_history[0].msg_id == MCU_MOTION_MSG_SERVO_SEQUENCE_BEGIN);
+    assert(s_history[0].payload_len == 4u);
+    assert(s_history[0].payload[0] == 0x34u);
+    assert(s_history[0].payload[1] == 0x12u);
+    assert(s_history[0].payload[2] == (uint8_t)MCU_MOTION_SOURCE_BEHAVIOR);
+    assert(s_history[0].payload[3] == 16u);
+    assert(s_history[1].msg_id == MCU_MOTION_MSG_SERVO_SEQUENCE_CHUNK);
+    assert(s_history[1].payload_len == 124u);
+    assert(s_history[1].payload[2] == 0u);
+    assert(s_history[1].payload[3] == MCU_MOTION_SEQUENCE_CHUNK_MAX_SEGMENTS);
+    assert(s_history[2].msg_id == MCU_MOTION_MSG_SERVO_SEQUENCE_CHUNK);
+    assert(s_history[2].payload_len == 12u);
+    assert(s_history[2].payload[2] == MCU_MOTION_SEQUENCE_CHUNK_MAX_SEGMENTS);
+    assert(s_history[2].payload[3] == 1u);
+    assert(s_history[3].msg_id == MCU_MOTION_MSG_SERVO_SEQUENCE_END);
+    assert(s_history[3].payload_len == 2u);
+    assert(s_history[3].payload[0] == 0x34u);
+    assert(s_history[3].payload[1] == 0x12u);
+}
+
+int main(void)
+{
+    test_stop_clears_pending_motion_queue();
+    test_sequence_encodes_segments_into_single_frame();
+    test_sequence_rejects_invalid_segment_without_send();
+    test_sequence_accepts_max_single_frame_segments();
+    test_chunked_sequence_sends_begin_chunks_and_end();
+    return 0;
+}

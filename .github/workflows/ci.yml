@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  policy:
+    name: Repository policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check repository boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -d releases
+          test ! -d hardware/releases
+          if git ls-files | grep -E '(^|/)(WatcheRobot_app|WatcheRobot_server|WatcheRobot_client)(/|$)'; then
+            echo "Closed-source component source directories must not be committed."
+            exit 1
+          fi
+          if git ls-files | grep -Ei '\.(apk|aab|exe|msi|dmg|zip|bin)$'; then
+            echo "Release artifacts must be uploaded to GitHub Releases, not committed to Git."
+            exit 1
+          fi
+          for dir in hardware/V*; do
+            [ -d "$dir" ] || continue
+            test -f "$dir/3d-models/README.md"
+          done
+      - name: Check public link hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=build \
+            --exclude='ci.yml' \
+            'Ro-In-AI|ERRORIGHT-AI|D:\\|COM37|COM57' .; then
+            echo "Found old organization links, local paths, or private COM-port notes."
+            exit 1
+          fi
+      - name: Basic secret pattern scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=build \
+            --exclude='ci.yml' \
+            '(AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-|BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY|api[_-]?key[=:][^[:space:]]+|token[=:][^[:space:]]+|password[=:][^[:space:]]+)' .; then
+            echo "Potential secret detected."
+            exit 1
+          fi
+
+  esp32:
+    name: ESP32-S3 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build ESP32-S3 firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.2.1
+          target: esp32s3
+          path: firmware/esp32-s3
+          command: python3 -m pip install Pillow && idf.py build
+
+  stm32-host:
+    name: STM32 host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install native build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build gcc
+      - name: Configure
+        working-directory: firmware/stm32-f103
+        run: cmake --preset HostDebug
+      - name: Build
+        working-directory: firmware/stm32-f103
+        run: cmake --build --preset HostDebug
+      - name: Test
+        working-directory: firmware/stm32-f103
+        run: ctest --preset HostDebug

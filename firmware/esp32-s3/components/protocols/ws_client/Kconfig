@@ -1,0 +1,66 @@
+menu "Watcher WebSocket Client"
+
+    config WATCHER_WS_AUDIO_QUEUE_DEPTH
+        int "Audio upload queue depth"
+        default 4
+        range 2 8
+        help
+            Number of 1920-byte audio upload frames staged in PSRAM. The
+            protocol fragments payloads, so four frames keeps jitter tolerance
+            while reducing always-reserved PSRAM.
+
+    config WATCHER_WS_AUDIO_STATS_LOG_INTERVAL_FRAMES
+        int "Audio upload stats log interval"
+        default 60
+        range 0 1000
+        help
+            Emit one websocket audio upload stats log every N sent frames.
+            Set to 0 to disable periodic audio upload stats logs.
+
+    config WATCHER_WS_TTS_QUEUE_DEPTH
+        int "TTS playback queue depth"
+        default 32
+        range 2 32
+        help
+            Number of 4096-byte TTS frames staged in PSRAM before playback.
+            Thirty-two frames provide about 2.7 seconds of playback buffering
+            at 24kHz 16-bit mono. The frame pool is placed in PSRAM, so this
+            absorbs desktop/server TTS bursts without spending scarce
+            internal DMA-capable memory.
+
+    config WATCHER_WS_TTS_MAX_PAYLOAD_BYTES
+        int "Maximum inbound TTS payload bytes"
+        default 32768
+        range 4096 65536
+        help
+            Maximum accepted WSPK audio payload from the desktop/server in one
+            WebSocket message. Larger payloads are rejected before they can
+            flood the playback queue.
+
+    config WATCHER_WS_TTS_ENQUEUE_TIMEOUT_MS
+        int "TTS enqueue backpressure timeout (ms)"
+        default 1500
+        range 100 5000
+        help
+            Maximum time a websocket receive callback waits for a free TTS
+            playback slot before dropping the current inbound TTS chunk. The
+            wait applies TCP backpressure when server-side TTS delivery is
+            faster than local I2S playback.
+
+    config WATCHER_WS_TTS_RX_LOG_INTERVAL_FRAMES
+        int "TTS receive log interval"
+        default 12
+        range 0 1000
+        help
+            Emit one TTS receive log every N inbound audio messages, plus the
+            first and last message. Set to 0 to log only first/last messages.
+
+    config WATCHER_WS_TEXT_MAX_PAYLOAD_BYTES
+        int "Maximum inbound text message bytes"
+        default 8192
+        range 1024 32768
+        help
+            Maximum accepted WebSocket text message size before JSON routing.
+            Larger messages are rejected before allocating a full text buffer.
+
+endmenu

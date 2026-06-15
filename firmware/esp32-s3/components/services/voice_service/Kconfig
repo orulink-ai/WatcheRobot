@@ -1,0 +1,82 @@
+menu "Watcher Voice Service"
+
+    config ENABLE_WAKE_WORD
+        bool "Enable ESP-SR WakeNet wake word detection"
+        default y
+        depends on IDF_TARGET_ESP32S3 && SPIRAM
+        help
+            Enable local offline wake word detection through ESP-SR WakeNet.
+            Audio is captured at 16 kHz mono while the recorder is idle.
+
+    config VAD_SILENCE_TIMEOUT_MS
+        int "Wake-word recording silence timeout"
+        default 1200
+        depends on ENABLE_WAKE_WORD
+        help
+            Stop a wake-word-triggered recording after this much silence.
+
+    config VAD_RMS_THRESHOLD
+        int "Wake-word recording RMS silence threshold"
+        default 450
+        depends on ENABLE_WAKE_WORD
+        help
+            Frames below this RMS value are treated as silence.
+
+    config VAD_MIN_SPEECH_MS
+        int "Wake-word recording minimum speech duration"
+        default 600
+        depends on ENABLE_WAKE_WORD
+        help
+            Require this much detected speech before VAD can stop recording.
+
+    config VOICE_TASK_STACK_SIZE
+        int "Voice recorder task stack size"
+        default 8192 if ENABLE_WAKE_WORD
+        default 4096
+        help
+            Stack size for the voice recorder task. Wake word mode uses a
+            larger stack and allocates it from PSRAM when available.
+
+    config WAKE_WORD_TASK_STACK_SIZE
+        int "Wake word detection task stack size"
+        default 4096
+        depends on ENABLE_WAKE_WORD
+
+    config WAKE_WORD_TASK_PRIORITY
+        int "Wake word detection task priority"
+        default 6
+        depends on ENABLE_WAKE_WORD
+
+    config VOICE_AUDIO_STATS_LOG_INTERVAL_FRAMES
+        int "Recording audio stats log interval"
+        default 60
+        range 0 1000
+        help
+            Emit one recording audio stats log every N encoded frames. Set to
+            0 to disable periodic recording audio stats logs.
+
+    config WAKE_IDLE_STATS_LOG_INTERVAL_FRAMES
+        int "Idle wake audio stats log interval"
+        default 120
+        range 0 2000
+        depends on ENABLE_WAKE_WORD
+        help
+            Emit one idle wake-word audio stats log every N microphone frames.
+            Set to 0 to disable periodic idle wake audio stats logs.
+
+    choice WAKE_WORD_DET_MODE
+        prompt "WakeNet detection sensitivity"
+        default WAKE_WORD_DET_MODE_95
+        depends on ENABLE_WAKE_WORD
+        help
+            DET_MODE_95 is more aggressive and improves wake probability, but
+            may increase false wakeups in noisy environments.
+
+        config WAKE_WORD_DET_MODE_90
+            bool "DET_MODE_90 normal sensitivity"
+
+        config WAKE_WORD_DET_MODE_95
+            bool "DET_MODE_95 aggressive sensitivity"
+    endchoice
+
+endmenu

@@ -1,0 +1,137 @@
+menu "Watcher Logging"
+
+    config WATCHER_RUNTIME_QUIET_LOGS
+        bool "Reduce runtime log noise"
+        default y
+        help
+            Raise the runtime default log level to WARN and keep only the main
+            control-flow and memory monitor tags at INFO. This keeps heap
+            alerts visible while reducing UART noise from other subsystems.
+
+    config WATCHER_LOG_HEAP_DIAGNOSTICS
+        bool "Enable heap diagnostic logs"
+        default n
+        help
+            Compile in detailed internal/PSRAM heap snapshot logs used while
+            investigating startup and low-memory recovery behavior.
+
+    config WATCHER_CAMERA_VERBOSE_LOGS
+        bool "Enable verbose camera diagnostics logs"
+        default n
+        help
+            Compile in HX6538 info/model/catalog diagnostic logging. Disabling
+            this removes large format strings and skips extra diagnostic queries.
+
+    config WATCHER_WIFI_REASON_NAME_LOGS
+        bool "Enable WiFi disconnect reason name strings"
+        default n
+        help
+            Include human-readable WiFi disconnect reason names in warning logs.
+            Disable this to keep only numeric reason codes and save flash/rodata.
+
+endmenu
+
+menu "Watcher Stress"
+
+    config WATCHER_STRESS_BUILD
+        bool "Enable dual-MCU stress driver"
+        default n
+        help
+            Compile in the periodic coprocessor stress driver used for the
+            10-minute STM32/ESP32 pressure bench.
+
+    config WATCHER_STRESS_SERVO_PERIOD_MS
+        int "Stress servo command period (ms)"
+        range 50 5000
+        default 200
+        depends on WATCHER_STRESS_BUILD
+
+    config WATCHER_STRESS_STATS_PERIOD_MS
+        int "Stress stats log period (ms)"
+        range 500 60000
+        default 5000
+        depends on WATCHER_STRESS_BUILD
+
+endmenu
+
+menu "Watcher Memory Monitor"
+
+    config WATCHER_MEM_MONITOR_ENABLE
+        bool "Enable runtime memory monitor"
+        default y
+        help
+            Start a low-priority task that samples heap usage, emits lifecycle
+            snapshots, and warns when internal or DMA headroom becomes tight.
+
+    if WATCHER_MEM_MONITOR_ENABLE
+
+    config WATCHER_MEM_MONITOR_PERIOD_MS
+        int "Memory monitor sample period (ms)"
+        range 1000 600000
+        default 15000
+        help
+            How often the background monitor samples heap state for warnings.
+
+    config WATCHER_MEM_MONITOR_TASK_STACK_SIZE
+        int "Memory monitor task stack size"
+        range 1536 8192
+        default 4096
+        help
+            Stack size for the low-priority memory monitor task. The task only
+            samples heap counters and is allocated with an external stack when
+            PSRAM is enabled.
+
+    config WATCHER_MEM_MONITOR_ALERT_REPEAT_MS
+        int "Low-memory alert repeat period (ms)"
+        range 1000 3600000
+        default 60000
+        help
+            Minimum interval between repeated low-memory alert logs while the
+            system stays in the same warning band.
+
+    config WATCHER_MEM_MONITOR_LOG_STAGE_SNAPSHOTS
+        bool "Log lifecycle memory snapshots"
+        default y
+        help
+            Log concise heap snapshots at key boot and recovery stages.
+
+    config WATCHER_MEM_MONITOR_WARN_INTERNAL_FREE_KB
+        int "Warn when internal free drops below (KB)"
+        range 8 512
+        default 40
+
+    config WATCHER_MEM_MONITOR_WARN_INTERNAL_LARGEST_KB
+        int "Warn when internal largest block drops below (KB)"
+        range 4 256
+        default 16
+
+    config WATCHER_MEM_MONITOR_CRITICAL_INTERNAL_FREE_KB
+        int "Critical when internal free drops below (KB)"
+        range 8 512
+        default 28
+
+    config WATCHER_MEM_MONITOR_CRITICAL_INTERNAL_LARGEST_KB
+        int "Critical when internal largest block drops below (KB)"
+        range 4 256
+        default 12
+
+    config WATCHER_MEM_MONITOR_WARN_DMA_LARGEST_KB
+        int "Warn when DMA largest block drops below (KB)"
+        range 4 256
+        default 16
+
+    config WATCHER_MEM_MONITOR_CRITICAL_DMA_LARGEST_KB
+        int "Critical when DMA largest block drops below (KB)"
+        range 4 256
+        default 12
+
+    config WATCHER_MEM_MONITOR_CHECK_INTEGRITY_ON_CRITICAL
+        bool "Run heap integrity check during critical pressure"
+        default n
+        help
+            Run heap_caps_check_integrity_all() when the monitor enters the
+            critical band, rate-limited by the alert repeat period.
+
+    endif
+
+endmenu

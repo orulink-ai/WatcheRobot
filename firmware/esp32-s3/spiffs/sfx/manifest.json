@@ -1,0 +1,17 @@
+{
+    "version":  "1.0",
+    "sounds":  {
+                   "bluetooth":  "bluetooth.pcm",
+                   "boot":  "boot.pcm",
+                   "concentration":  "concentration.pcm",
+                   "disconnect":  "disconnect.pcm",
+                   "error":  "error.pcm",
+                   "get":  "get.pcm",
+                   "happy":  "happy.pcm",
+                   "look":  "look.pcm",
+                   "recharge":  "recharge.pcm",
+                   "shock":  "shock.pcm",
+                   "standby":  "standby.pcm",
+                   "thinking":  "thinking.pcm"
+               }
+}

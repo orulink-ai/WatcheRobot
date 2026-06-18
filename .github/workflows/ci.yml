@@ -26,10 +26,6 @@ jobs:
             echo "Release artifacts must be uploaded to GitHub Releases, not committed to Git."
             exit 1
           fi
-          for dir in hardware/V*; do
-            [ -d "$dir" ] || continue
-            test -f "$dir/3d-models/README.md"
-          done
       - name: Check public link hygiene
         shell: bash
         run: |

@@ -5,7 +5,7 @@
 Maintainers should keep the following boundaries clear:
 
 - firmware source changes belong under `firmware/`
-- hardware source changes belong under `hardware/Vx.y.z/`
+- hardware source changes belong under `hardware/pcb/`, `hardware/3d-models/`, or `hardware/assembly/`
 - app, server, and desktop binaries are release assets only
 - release artifacts are uploaded to GitHub Releases
 - private implementation details do not belong in public docs

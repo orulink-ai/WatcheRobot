@@ -53,6 +53,7 @@ function(watcher_apply_arm_gcc_options target_name)
         target_compile_options(${target_name} PRIVATE
             ${WATCHER_ARM_MCU_FLAGS}
             $<$<CONFIG:Debug>:-Og>
+            $<$<CONFIG:Release>:-Os>
             $<$<COMPILE_LANGUAGE:C>:-ffunction-sections>
             $<$<COMPILE_LANGUAGE:C>:-fdata-sections>
             $<$<COMPILE_LANGUAGE:ASM>:-x>

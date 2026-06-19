@@ -25,15 +25,33 @@
 static Servo_HandleTypeDef s_servo1Handle = NULL;
 static Servo_HandleTypeDef s_servo2Handle = NULL;
 static uint8_t s_bottomIrInitialized;
+#if (APP_SERVO_FEEDBACK_ENABLE != 0U)
+#define APP_SERVO_FEEDBACK_RAW_LOCK_DEADBAND 24U
+#define APP_SERVO_FEEDBACK_CONFIRM_COUNT 2U
+#define APP_SERVO_FEEDBACK_ANGLE_STEP_DEG 2U
+
+typedef struct {
+    uint8_t initialized;
+    uint8_t candidateCount;
+    int8_t candidateDirection;
+    uint16_t stableRaw;
+    uint16_t candidateRaw;
+    uint8_t stableAngle;
+    uint8_t candidateAngle;
+} App_ServoFeedbackFilterTypeDef;
+#endif
 typedef struct {
     uint8_t minAngle;
     uint8_t maxAngle;
 } App_ServoLimitTypeDef;
 
 static App_ServoLimitTypeDef s_servoLimits[2] = {
-    {0U, 180U},
-    {0U, 180U}
+    {100U, 130U},
+    {30U, 150U}
 };
+#if (APP_SERVO_FEEDBACK_ENABLE != 0U)
+static App_ServoFeedbackFilterTypeDef s_servoFeedbackFilters[2];
+#endif
 #if (APP_LED_ENABLE != 0U)
 static WS2812_HandleTypeDef s_ws2812SideHandle = NULL;
 static WS2812_HandleTypeDef s_ws2812BottomHandle = NULL;
@@ -42,6 +60,10 @@ static WS2812_HandleTypeDef s_ws2812BottomHandle = NULL;
 static Servo_HandleTypeDef App_GetServoHandle(uint8_t servoIndex);
 static uint8_t App_ClampServoAngle(uint8_t servoIndex, uint8_t angle);
 static uint8_t App_PulseToAngle(Servo_HandleTypeDef servoHandle, uint16_t pulseUs, uint8_t *angle);
+#if (APP_SERVO_FEEDBACK_ENABLE != 0U)
+static uint8_t App_QuantizeServoFeedbackAngle(uint8_t angle);
+static void App_FilterServoFeedback(uint8_t servoIndex, uint16_t raw, uint8_t angle, uint16_t *filteredRaw, uint8_t *filteredAngle);
+#endif
 static void App_InitIp5306Power(void);
 static void App_RunPower5VServoProbe(void);
 #if (APP_LED_ENABLE != 0U)
@@ -86,12 +108,19 @@ static const Servo_ConfigTypeDef s_servo1Config = {
 #if (APP_SERVO_FEEDBACK_ENABLE != 0U)
     .pFeedbackAdcHandle = &hadc1,
     .feedbackSampleIndex = 1U,
+    .feedbackAdcChannel = ADC_CHANNEL_0,
 #else
     .pFeedbackAdcHandle = NULL,
     .feedbackSampleIndex = 0U,
+    .feedbackAdcChannel = 0U,
 #endif
-    .feedbackRawMin = 204U,
-    .feedbackRawMax = 1033U,
+    /* Installed robot calibration through the PA0 feedback divider. */
+    .feedbackRawMin = 1433U,
+    .feedbackRawMid = 1600U,
+    .feedbackRawMax = 1661U,
+    .feedbackAngleMin = 100U,
+    .feedbackAngleMid = 115U,
+    .feedbackAngleMax = 130U,
     .pulseMin = 500U,
     .pulseMax = 2500U,
     .pulseCenter = 1500U,
@@ -106,12 +135,19 @@ static const Servo_ConfigTypeDef s_servo2Config = {
 #if (APP_SERVO_FEEDBACK_ENABLE != 0U)
     .pFeedbackAdcHandle = &hadc1,
     .feedbackSampleIndex = 2U,
+    .feedbackAdcChannel = ADC_CHANNEL_5,
 #else
     .pFeedbackAdcHandle = NULL,
     .feedbackSampleIndex = 0U,
+    .feedbackAdcChannel = 0U,
 #endif
-    .feedbackRawMin = 204U,
-    .feedbackRawMax = 1033U,
+    /* Installed robot calibration through the PA5 feedback divider. */
+    .feedbackRawMin = 650U,
+    .feedbackRawMid = 1311U,
+    .feedbackRawMax = 1986U,
+    .feedbackAngleMin = 30U,
+    .feedbackAngleMid = 90U,
+    .feedbackAngleMax = 150U,
     .pulseMin = 500U,
     .pulseMax = 2500U,
     .pulseCenter = 1500U,
@@ -209,7 +245,7 @@ void App_Init(void)
 #if !defined(WATCHER_STRESS_BUILD)
     Platform_Uart_Print("\r\n=== STM32 CLI Ready ===\r\n");
     Platform_Uart_Print("USART1 @ 115200 8N1\r\n");
-    Platform_Uart_Print("Commands: help, servo 90, servo_fb, servo_angle, ws red, ws_bottom red\r\n");
+    Platform_Uart_Print("Commands: help, servo 90, servo_off, servo_fb, servo_angle, ws red, ws_bottom red\r\n");
     Platform_Uart_Print("> ");
 #endif
 }
@@ -269,6 +305,50 @@ uint8_t App_SetServoAngle(uint8_t servoIndex, uint8_t angle, uint16_t *pulseUs)
         if (Servo_GetPulse(servoHandle, pulseUs) != SERVO_OK) {
             return 0U;
         }
+    }
+
+    return 1U;
+}
+
+uint8_t App_SetServoDegX10(uint8_t servoIndex, int16_t degX10, uint16_t *pulseUs)
+{
+    Servo_HandleTypeDef servoHandle = App_GetServoHandle(servoIndex);
+    const Servo_ConfigTypeDef *servoConfig;
+    uint16_t pulseRange;
+    uint16_t targetPulseUs;
+    int16_t minDegX10;
+    int16_t maxDegX10;
+
+    if (servoHandle == NULL) {
+        return 0U;
+    }
+
+    if (servoIndex == 1U) {
+        servoConfig = &s_servo1Config;
+    } else if (servoIndex == 2U) {
+        servoConfig = &s_servo2Config;
+    } else {
+        return 0U;
+    }
+
+    minDegX10 = (int16_t)((uint16_t)s_servoLimits[servoIndex - 1U].minAngle * 10U);
+    maxDegX10 = (int16_t)((uint16_t)s_servoLimits[servoIndex - 1U].maxAngle * 10U);
+    if (degX10 < minDegX10) {
+        degX10 = minDegX10;
+    } else if (degX10 > maxDegX10) {
+        degX10 = maxDegX10;
+    }
+
+    pulseRange = (uint16_t)(servoConfig->pulseMax - servoConfig->pulseMin);
+    targetPulseUs = (uint16_t)(servoConfig->pulseMin +
+                               (((uint32_t)(uint16_t)degX10 * pulseRange + 900U) / 1800U));
+
+    if (Servo_SetPulse(servoHandle, targetPulseUs) != SERVO_OK) {
+        return 0U;
+    }
+
+    if (pulseUs != NULL) {
+        *pulseUs = targetPulseUs;
     }
 
     return 1U;
@@ -400,6 +480,72 @@ uint8_t App_GetServoCommandAngle(uint8_t servoIndex, uint8_t *angle)
     return App_PulseToAngle(servoHandle, state.currentPulse, angle);
 }
 
+#if (APP_SERVO_FEEDBACK_ENABLE != 0U)
+static uint8_t App_QuantizeServoFeedbackAngle(uint8_t angle)
+{
+    uint8_t step = APP_SERVO_FEEDBACK_ANGLE_STEP_DEG;
+    uint16_t rounded;
+
+    if (step <= 1U) {
+        return angle;
+    }
+
+    rounded = (uint16_t)(((uint16_t)angle + (step / 2U)) / step) * step;
+    return (rounded > 180U) ? 180U : (uint8_t)rounded;
+}
+
+static void App_FilterServoFeedback(uint8_t servoIndex, uint16_t raw, uint8_t angle, uint16_t *filteredRaw, uint8_t *filteredAngle)
+{
+    App_ServoFeedbackFilterTypeDef *filter;
+    uint16_t delta;
+    int8_t direction;
+    uint8_t quantizedAngle;
+
+    if ((servoIndex == 0U) || (servoIndex > 2U) || (filteredRaw == NULL) || (filteredAngle == NULL)) {
+        return;
+    }
+
+    quantizedAngle = App_QuantizeServoFeedbackAngle(angle);
+    filter = &s_servoFeedbackFilters[servoIndex - 1U];
+    if (filter->initialized == 0U) {
+        filter->initialized = 1U;
+        filter->stableRaw = raw;
+        filter->stableAngle = quantizedAngle;
+        filter->candidateRaw = raw;
+        filter->candidateAngle = quantizedAngle;
+        filter->candidateCount = 0U;
+        filter->candidateDirection = 0;
+    }
+
+    delta = (raw >= filter->stableRaw) ? (uint16_t)(raw - filter->stableRaw) : (uint16_t)(filter->stableRaw - raw);
+    if (delta <= APP_SERVO_FEEDBACK_RAW_LOCK_DEADBAND) {
+        filter->candidateCount = 0U;
+        filter->candidateDirection = 0;
+    } else {
+        direction = (raw > filter->stableRaw) ? 1 : -1;
+        if (filter->candidateDirection == direction) {
+            if (filter->candidateCount < APP_SERVO_FEEDBACK_CONFIRM_COUNT) {
+                filter->candidateCount++;
+            }
+        } else {
+            filter->candidateDirection = direction;
+            filter->candidateCount = 1U;
+        }
+        filter->candidateRaw = raw;
+        filter->candidateAngle = quantizedAngle;
+        if (filter->candidateCount >= APP_SERVO_FEEDBACK_CONFIRM_COUNT) {
+            filter->stableRaw = filter->candidateRaw;
+            filter->stableAngle = filter->candidateAngle;
+            filter->candidateCount = 0U;
+            filter->candidateDirection = 0;
+        }
+    }
+
+    *filteredRaw = filter->stableRaw;
+    *filteredAngle = filter->stableAngle;
+}
+#endif
+
 uint8_t App_GetServoFeedbackSnapshot(uint8_t servoIndex, App_ServoFeedbackSnapshotTypeDef *snapshot)
 {
     Servo_HandleTypeDef servoHandle = App_GetServoHandle(servoIndex);
@@ -407,6 +553,7 @@ uint8_t App_GetServoFeedbackSnapshot(uint8_t servoIndex, App_ServoFeedbackSnapsh
     uint8_t commandAngle;
 #if (APP_SERVO_FEEDBACK_ENABLE != 0U)
     uint16_t feedbackRaw;
+    uint8_t feedbackAngle;
 #endif
 
     if ((servoHandle == NULL) || (snapshot == NULL)) {
@@ -428,11 +575,10 @@ uint8_t App_GetServoFeedbackSnapshot(uint8_t servoIndex, App_ServoFeedbackSnapsh
 
 #if (APP_SERVO_FEEDBACK_ENABLE != 0U)
     if (Servo_GetFeedbackRaw(servoHandle, &feedbackRaw) == SERVO_OK) {
-        snapshot->feedbackValid = 1U;
-        snapshot->feedbackRaw = feedbackRaw;
-        snapshot->feedbackMv = Servo_ConvertFeedbackToMv(feedbackRaw);
-        if (Servo_GetFeedbackAngle(servoHandle, &snapshot->feedbackAngle) != SERVO_OK) {
-            snapshot->feedbackValid = 0U;
+        if (Servo_ConvertFeedbackRawToAngle(servoHandle, feedbackRaw, &feedbackAngle) == SERVO_OK) {
+            App_FilterServoFeedback(servoIndex, feedbackRaw, feedbackAngle, &snapshot->feedbackRaw, &snapshot->feedbackAngle);
+            snapshot->feedbackValid = 1U;
+            snapshot->feedbackMv = Servo_ConvertFeedbackToMv(snapshot->feedbackRaw);
         }
     }
 #endif
@@ -1097,6 +1243,14 @@ uint8_t App_SetServoAngle(uint8_t servoIndex, uint8_t angle, uint16_t *pulseUs)
 {
     (void)servoIndex;
     (void)angle;
+    (void)pulseUs;
+    return 0U;
+}
+
+uint8_t App_SetServoDegX10(uint8_t servoIndex, int16_t degX10, uint16_t *pulseUs)
+{
+    (void)servoIndex;
+    (void)degX10;
     (void)pulseUs;
     return 0U;
 }

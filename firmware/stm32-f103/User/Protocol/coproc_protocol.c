@@ -98,6 +98,9 @@ static void CoprocProtocol_OnDispatchEvent(void *ctx, const CoprocDispatchEvent 
         case COPROC_DISPATCH_EVENT_MOTION_DONE:
             eventType = COPROC_OBS_EVENT_MOTION_DONE;
             break;
+        case COPROC_DISPATCH_EVENT_MOTION_STATE:
+            eventType = COPROC_OBS_EVENT_MOTION_STATE;
+            break;
         case COPROC_DISPATCH_EVENT_LED_SET_RGB:
             eventType = COPROC_OBS_EVENT_LED_SET_RGB;
             break;

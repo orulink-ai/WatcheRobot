@@ -4,7 +4,7 @@
 > 当前固定引用：
 >
 > ```text
-> Protocol baseline: orulink-ai/WatcheRobot@proto/v2.0.0-stm32-align-20260416
+> Protocol baseline: Ro-In-AI/WatcheRobot-Firmware@proto/v2.0.0-stm32-align-20260416
 > ```
 
 ## 1. 本文用途
@@ -61,7 +61,7 @@
 
 当前固定引用的上游真源文件位于：
 
-- `orulink-ai/WatcheRobot`
+- `Ro-In-AI/WatcheRobot-Firmware`
 - `firmware/integration_docs/STM32_UART_PROTOCOL.md`
 - `firmware/integration_docs/STM32_COPROC_REFACTOR_PLAN.md`
 - `firmware/integration_docs/IMPLEMENTATION_STATUS.md`

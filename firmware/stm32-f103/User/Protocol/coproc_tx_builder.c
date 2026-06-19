@@ -173,6 +173,62 @@ CoprocStatus CoprocTxBuilder_BuildMotionDone(uint32_t seq,
     return CoprocTxBuilder_EncodeWire(outMessage);
 }
 
+CoprocStatus CoprocTxBuilder_BuildMotionState(uint32_t seq,
+                                              uint32_t timestampMs,
+                                              uint8_t validMask,
+                                              int16_t xDegX10,
+                                              int16_t yDegX10,
+                                              uint16_t servo1Raw,
+                                              uint16_t servo2Raw,
+                                              CoprocTxMessage *outMessage)
+{
+    if (outMessage == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+
+    CoprocFrameCodec_InitHeader(&outMessage->frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_MOTION_STATE,
+                                0u,
+                                seq,
+                                COPROC_PAYLOAD_LEN_MOTION_STATE);
+    CoprocTxBuilder_WriteU32Le(outMessage->frame.payload, timestampMs);
+    outMessage->frame.payload[4] = validMask;
+    CoprocTxBuilder_WriteI16Le(&outMessage->frame.payload[5], xDegX10);
+    CoprocTxBuilder_WriteI16Le(&outMessage->frame.payload[7], yDegX10);
+    CoprocTxBuilder_WriteU16Le(&outMessage->frame.payload[9], servo1Raw);
+    CoprocTxBuilder_WriteU16Le(&outMessage->frame.payload[11], servo2Raw);
+    return CoprocTxBuilder_EncodeWire(outMessage);
+}
+
+CoprocStatus CoprocTxBuilder_BuildServoFeedbackRsp(uint32_t seq,
+                                                   uint8_t validMask,
+                                                   uint16_t servo1Raw,
+                                                   int16_t servo1DegX10,
+                                                   uint16_t servo2Raw,
+                                                   int16_t servo2DegX10,
+                                                   uint32_t timestampMs,
+                                                   CoprocTxMessage *outMessage)
+{
+    if (outMessage == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+
+    CoprocFrameCodec_InitHeader(&outMessage->frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_FEEDBACK_RSP,
+                                COPROC_FRAME_FLAG_RESP | COPROC_FRAME_FLAG_FINAL,
+                                seq,
+                                COPROC_PAYLOAD_LEN_SERVO_FEEDBACK_RSP);
+    outMessage->frame.payload[0] = validMask;
+    CoprocTxBuilder_WriteU16Le(&outMessage->frame.payload[1], servo1Raw);
+    CoprocTxBuilder_WriteI16Le(&outMessage->frame.payload[3], servo1DegX10);
+    CoprocTxBuilder_WriteU16Le(&outMessage->frame.payload[5], servo2Raw);
+    CoprocTxBuilder_WriteI16Le(&outMessage->frame.payload[7], servo2DegX10);
+    CoprocTxBuilder_WriteU32Le(&outMessage->frame.payload[9], timestampMs);
+    return CoprocTxBuilder_EncodeWire(outMessage);
+}
+
 CoprocStatus CoprocTxBuilder_BuildLedDone(uint32_t seq,
                                           uint32_t refSeq,
                                           uint8_t resultCode,

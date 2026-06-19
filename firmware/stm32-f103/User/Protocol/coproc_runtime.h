@@ -6,7 +6,9 @@
 typedef uint32_t (*CoprocRuntimeNowMsFn)(void *ctx);
 typedef uint8_t (*CoprocRuntimeReadTouchFn)(void *ctx);
 typedef uint8_t (*CoprocRuntimeSetServoAngleFn)(void *ctx, uint8_t servoIndex, uint8_t angle, uint16_t *pulseUs);
+typedef uint8_t (*CoprocRuntimeSetServoDegX10Fn)(void *ctx, uint8_t servoIndex, int16_t degX10, uint16_t *pulseUs);
 typedef uint8_t (*CoprocRuntimeStopServoFn)(void *ctx, uint8_t servoIndex);
+typedef uint8_t (*CoprocRuntimeReleaseServoFn)(void *ctx, uint8_t servoIndex);
 typedef uint8_t (*CoprocRuntimeReadServoFeedbackFn)(void *ctx,
                                                     uint8_t servoIndex,
                                                     uint8_t *commandAngle,
@@ -33,8 +35,12 @@ typedef struct
     void *readTouchCtx;
     CoprocRuntimeSetServoAngleFn setServoAngleFn;
     void *setServoAngleCtx;
+    CoprocRuntimeSetServoDegX10Fn setServoDegX10Fn;
+    void *setServoDegX10Ctx;
     CoprocRuntimeStopServoFn stopServoFn;
     void *stopServoCtx;
+    CoprocRuntimeReleaseServoFn releaseServoFn;
+    void *releaseServoCtx;
     CoprocRuntimeReadServoFeedbackFn readServoFeedbackFn;
     void *readServoFeedbackCtx;
     CoprocRuntimeSetLedCountFn setLedCountFn;
@@ -60,6 +66,8 @@ typedef struct
     CoprocRuntimeSetPower5VFn setPower5VFn;
     void *setPower5VCtx;
     uint32_t touchDebounceMs;
+    uint8_t servoFeedbackStateEnabled;
+    uint32_t servoFeedbackStateIntervalMs;
 } CoprocRuntimeConfig;
 
 typedef struct
@@ -71,6 +79,7 @@ typedef struct
     uint32_t ledDoneTxCount;
     uint32_t touchEventQueuedCount;
     uint32_t touchEventTxCount;
+    uint32_t servoFeedbackStateTxCount;
     uint32_t powerCommandRxCount;
     uint32_t eventDropCount;
     uint32_t txFailCount;
@@ -85,6 +94,7 @@ typedef struct
 
 #define COPROC_RUNTIME_TOUCH_QUEUE_DEPTH 8u
 #define COPROC_RUNTIME_MOTION_QUEUE_DEPTH 4u
+#define COPROC_RUNTIME_SEQUENCE_MAX_SEGMENTS 64u
 
 typedef struct
 {
@@ -121,10 +131,34 @@ typedef struct
     int16_t jogMaxXDegX10;
     int16_t jogMinYDegX10;
     int16_t jogMaxYDegX10;
+    uint8_t relayFollowActive;
+    uint8_t relayAxisMask;
+    uint8_t relaySourceTag;
+    int16_t relayStartXDegX10;
+    int16_t relayStartYDegX10;
+    int16_t relayTargetXDegX10;
+    int16_t relayTargetYDegX10;
+    int16_t relayCurrentXDegX10;
+    int16_t relayCurrentYDegX10;
+    uint16_t relaySmoothingMs;
+    uint32_t relayStartedAtMs;
+    uint32_t relayLastUpdateMs;
+    uint32_t relayTimeoutAtMs;
     uint8_t touchInitialized;
     uint8_t touchStableState;
     uint8_t touchCandidateState;
     uint32_t touchCandidateSinceMs;
+    uint32_t lastServoFeedbackStateTxMs;
+    uint8_t sequenceActive;
+    uint16_t sequenceId;
+    uint8_t sequenceExpectedSegments;
+    uint8_t sequenceReceivedSegments;
+    uint8_t sequenceSourceTag;
+    uint8_t sequencePlaybackActive;
+    uint8_t sequencePlaybackIndex;
+    uint8_t sequencePlaybackCount;
+    uint8_t servoFeedbackUnlockedAxisMask;
+    CoprocRuntimeMotionCommand sequenceCommands[COPROC_RUNTIME_SEQUENCE_MAX_SEGMENTS];
     CoprocRuntimeMotionCommand motionQueue[COPROC_RUNTIME_MOTION_QUEUE_DEPTH];
     uint8_t motionQueueHead;
     uint8_t motionQueueTail;

@@ -1,7 +1,7 @@
 # BMM150 驱动 README
 
-> **日期**: 2026-04-18
-> **项目**: watcheRobot_STM32
+> **日期**: 2026-04-18  
+> **项目**: watcheRobot_STM32  
 > **芯片**: Bosch BMM150
 
 ## 1. 当前职责

@@ -32,6 +32,7 @@ typedef struct {
 } App_BottomIrTestSnapshotTypeDef;
 
 uint8_t App_SetServoAngle(uint8_t servoIndex, uint8_t angle, uint16_t *pulseUs);
+uint8_t App_SetServoDegX10(uint8_t servoIndex, int16_t degX10, uint16_t *pulseUs);
 uint8_t App_MoveServoToAngleOverTime(uint8_t servoIndex,
                                      uint8_t angle,
                                      uint16_t durationMs,

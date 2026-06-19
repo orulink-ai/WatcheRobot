@@ -360,6 +360,19 @@ uint32_t Platform_Time_GetTickMs(void)
     return s_nowMs;
 }
 
+HAL_StatusTypeDef HAL_ADC_Init(ADC_HandleTypeDef *hadc)
+{
+    (void)hadc;
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_ADC_ConfigChannel(ADC_HandleTypeDef *hadc, ADC_ChannelConfTypeDef *sConfig)
+{
+    (void)hadc;
+    (void)sConfig;
+    return HAL_OK;
+}
+
 HAL_StatusTypeDef HAL_ADCEx_Calibration_Start(ADC_HandleTypeDef *hadc)
 {
     (void)hadc;

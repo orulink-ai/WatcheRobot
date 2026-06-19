@@ -57,8 +57,13 @@ typedef struct {
     uint32_t TimChannel;
     ADC_HandleTypeDef *pFeedbackAdcHandle;
     uint8_t feedbackSampleIndex;
+    uint32_t feedbackAdcChannel;
     uint16_t feedbackRawMin;
+    uint16_t feedbackRawMid;
     uint16_t feedbackRawMax;
+    uint8_t feedbackAngleMin;
+    uint8_t feedbackAngleMid;
+    uint8_t feedbackAngleMax;
     uint16_t pulseMin;
     uint16_t pulseMax;
     uint16_t pulseCenter;
@@ -130,6 +135,7 @@ uint16_t Servo_MotionUpdatePeriodFromSteps(uint16_t durationMs, uint16_t request
 Servo_StatusTypeDef Servo_StopMotion(Servo_HandleTypeDef servo);
 Servo_StatusTypeDef Servo_GetFeedbackRaw(Servo_HandleTypeDef servo, uint16_t *adcRaw);
 uint16_t Servo_ConvertFeedbackToMv(uint16_t adcRaw);
+Servo_StatusTypeDef Servo_ConvertFeedbackRawToAngle(Servo_HandleTypeDef servo, uint16_t adcRaw, uint8_t *angle);
 Servo_StatusTypeDef Servo_GetFeedbackAngle(Servo_HandleTypeDef servo, uint8_t *angle);
 Servo_StatusTypeDef Servo_StartReciprocating(Servo_HandleTypeDef servo);
 Servo_StatusTypeDef Servo_StopReciprocating(Servo_HandleTypeDef servo);

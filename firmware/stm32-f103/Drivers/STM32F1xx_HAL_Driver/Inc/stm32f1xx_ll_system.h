@@ -571,3 +571,5 @@ __STATIC_INLINE uint32_t LL_FLASH_IsHalfCycleAccessEnabled(void)
 #endif
 
 #endif /* __STM32F1xx_LL_SYSTEM_H */
+
+

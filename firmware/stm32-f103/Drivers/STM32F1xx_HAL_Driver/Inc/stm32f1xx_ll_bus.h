@@ -1009,3 +1009,4 @@ __STATIC_INLINE void LL_APB2_GRP1_ReleaseReset(uint32_t Periphs)
 #endif
 
 #endif /* __STM32F1xx_LL_BUS_H */
+

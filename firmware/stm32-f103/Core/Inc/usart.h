@@ -52,3 +52,4 @@ void MX_USART2_UART_Init(void);
 #endif
 
 #endif /* __USART_H__ */
+

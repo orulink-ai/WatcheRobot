@@ -11,10 +11,13 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "hal_servo.h"
+#include "mcu_led_service.h"
+#include "sfx_service.h"
 #include "voice_service.h"
 #include "ws_client.h"
 
@@ -38,6 +41,16 @@
 #define WS_DEVICE_ERROR_CODE_CAMERA 1502
 #define WS_DEVICE_ERROR_CODE_SERVO 1503
 #define WS_DEVICE_ERROR_CODE_OTA 1504
+#define SERVO_FEEDBACK_RAW_DELTA_MIN 70U
+#define SERVO_FEEDBACK_ANGLE_X10_DELTA_MIN 25
+#define SERVO_PWM_RETRY_COUNT 5
+#define SERVO_PWM_RETRY_DELAY_MS 40
+#define SERVO_TRAJECTORY_MIN_DURATION_MS 30
+#define SERVO_TRAJECTORY_MAX_DURATION_MS 3000
+#define SERVO_TRAJECTORY_X_MIN_DEG 0.0f
+#define SERVO_TRAJECTORY_X_MAX_DEG 180.0f
+#define SERVO_TRAJECTORY_Y_MIN_DEG 90.0f
+#define SERVO_TRAJECTORY_Y_MAX_DEG 150.0f
 
 typedef struct {
     SemaphoreHandle_t lock;
@@ -61,6 +74,12 @@ typedef struct {
     TaskHandle_t upload_task;
 } ws_camera_context_t;
 
+typedef struct {
+    bool initialized;
+    uint16_t raw;
+    int16_t angle_x10;
+} ws_servo_feedback_report_state_t;
+
 static ws_camera_context_t s_camera_ctx = {
     .lock = NULL,
     .frame_ready_sem = NULL,
@@ -82,6 +101,8 @@ static ws_camera_context_t s_camera_ctx = {
     .pending_timestamp_ms = 0,
     .upload_task = NULL,
 };
+static ws_servo_feedback_report_state_t s_servo_feedback_x_state = {0};
+static ws_servo_feedback_report_state_t s_servo_feedback_y_state = {0};
 
 #if SERVO_POSITION_REPORT_ENABLED
 static TaskHandle_t s_servo_report_task = NULL;
@@ -557,7 +578,90 @@ static void ws_servo_report_task(void *arg) {
 }
 #endif
 
+static bool ws_servo_feedback_should_report(ws_servo_feedback_report_state_t *state, uint16_t raw, int16_t angle_x10) {
+    uint16_t raw_delta;
+    int angle_delta;
+
+    if (state == NULL) {
+        return false;
+    }
+
+    if (!state->initialized) {
+        state->initialized = true;
+        state->raw = raw;
+        state->angle_x10 = angle_x10;
+        return true;
+    }
+
+    raw_delta = (raw >= state->raw) ? (uint16_t)(raw - state->raw) : (uint16_t)(state->raw - raw);
+    angle_delta = abs((int)angle_x10 - (int)state->angle_x10);
+    if (raw_delta < SERVO_FEEDBACK_RAW_DELTA_MIN && angle_delta < SERVO_FEEDBACK_ANGLE_X10_DELTA_MIN) {
+        return false;
+    }
+
+    state->raw = raw;
+    state->angle_x10 = angle_x10;
+    return true;
+}
+
+static float ws_clamp_float(float value, float min_value, float max_value) {
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
+static int ws_round_float_to_int(float value) {
+    return (int)(value >= 0.0f ? value + 0.5f : value - 0.5f);
+}
+
+static void ws_servo_feedback_reset_report_state(uint8_t axis_mask) {
+    if ((axis_mask & HAL_SERVO_AXIS_MASK_X) != 0u) {
+        s_servo_feedback_x_state.initialized = false;
+    }
+    if ((axis_mask & HAL_SERVO_AXIS_MASK_Y) != 0u) {
+        s_servo_feedback_y_state.initialized = false;
+    }
+}
+
+static void ws_servo_feedback_callback(const hal_servo_feedback_t *feedback, void *ctx) {
+    (void)ctx;
+    if (feedback == NULL) {
+        return;
+    }
+    if ((feedback->axis_mask & HAL_SERVO_AXIS_MASK_X) != 0u &&
+        ws_servo_feedback_should_report(&s_servo_feedback_x_state, feedback->x_raw, feedback->x_angle_x10)) {
+        (void)ws_send_servo_feedback("x", feedback->x_raw, ((float)feedback->x_angle_x10) / 10.0f);
+    }
+    if ((feedback->axis_mask & HAL_SERVO_AXIS_MASK_Y) != 0u &&
+        ws_servo_feedback_should_report(&s_servo_feedback_y_state, feedback->y_raw, feedback->y_angle_x10)) {
+        (void)ws_send_servo_feedback("y", feedback->y_raw, ((float)feedback->y_angle_x10) / 10.0f);
+    }
+}
+
+static esp_err_t ws_retry_servo_pwm_command(esp_err_t (*command_fn)(uint8_t), uint8_t axis_mask) {
+    esp_err_t ret = ESP_FAIL;
+
+    if (command_fn == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (int attempt = 0; attempt < SERVO_PWM_RETRY_COUNT; attempt++) {
+        ret = command_fn(axis_mask);
+        if (ret == ESP_OK || (ret != ESP_ERR_TIMEOUT && ret != ESP_ERR_INVALID_STATE)) {
+            return ret;
+        }
+        vTaskDelay(pdMS_TO_TICKS(SERVO_PWM_RETRY_DELAY_MS));
+    }
+
+    return ret;
+}
+
 void ws_handlers_init(void) {
+    (void)hal_servo_set_feedback_callback(ws_servo_feedback_callback, NULL);
 #if SERVO_POSITION_REPORT_ENABLED
     if (s_servo_report_task == NULL) {
         if (xTaskCreate(ws_servo_report_task, "ws_servo_report", SERVO_REPORT_TASK_STACK, NULL,
@@ -694,6 +798,244 @@ void on_servo_handler(const ws_servo_cmd_t *cmd) {
     }
 }
 
+void on_servo_trajectory_play_handler(const ws_servo_trajectory_cmd_t *cmd) {
+    esp_err_t ret;
+    int frame_count;
+    hal_servo_trajectory_frame_t frames[WS_SERVO_TRAJECTORY_MAX_FRAMES];
+    size_t valid_frame_count = 0u;
+
+    if (cmd == NULL || cmd->frame_count <= 0) {
+        ws_send_sys_nack("ctrl.servo.trajectory.play", cmd != NULL ? cmd->command_id : NULL, "invalid_trajectory_payload");
+        return;
+    }
+
+    frame_count = cmd->frame_count;
+    if (frame_count > WS_SERVO_TRAJECTORY_MAX_FRAMES) {
+        frame_count = WS_SERVO_TRAJECTORY_MAX_FRAMES;
+    }
+
+    for (int index = 0; index < frame_count; index++) {
+        const ws_servo_trajectory_frame_t *frame = &cmd->frames[index];
+        hal_servo_trajectory_frame_t *segment = &frames[valid_frame_count];
+        float x_deg = ws_clamp_float(frame->x_deg, SERVO_TRAJECTORY_X_MIN_DEG, SERVO_TRAJECTORY_X_MAX_DEG);
+        float y_deg = ws_clamp_float(frame->y_deg, SERVO_TRAJECTORY_Y_MIN_DEG, SERVO_TRAJECTORY_Y_MAX_DEG);
+        int duration_ms = frame->duration_ms;
+
+        if (duration_ms < SERVO_TRAJECTORY_MIN_DURATION_MS) {
+            duration_ms = SERVO_TRAJECTORY_MIN_DURATION_MS;
+        } else if (duration_ms > SERVO_TRAJECTORY_MAX_DURATION_MS) {
+            duration_ms = SERVO_TRAJECTORY_MAX_DURATION_MS;
+        }
+
+        segment->axis_mask = frame->axis_mask & (HAL_SERVO_AXIS_MASK_X | HAL_SERVO_AXIS_MASK_Y);
+        if (segment->axis_mask == 0u) {
+            continue;
+        }
+        segment->x_deg_x10 = (int16_t)ws_round_float_to_int(x_deg * 10.0f);
+        segment->y_deg_x10 = (int16_t)ws_round_float_to_int(y_deg * 10.0f);
+        segment->duration_ms = (uint16_t)duration_ms;
+        segment->motion_profile = frame->motion_profile == HAL_SERVO_MOTION_PROFILE_EASE_IN_OUT
+                                      ? HAL_SERVO_MOTION_PROFILE_EASE_IN_OUT
+                                      : HAL_SERVO_MOTION_PROFILE_LINEAR;
+
+        ESP_LOGI(TAG,
+                 "servo trajectory segment prepared: command_id=%s index=%u/%d axis_mask=0x%02x x_deg_x10=%d y_deg_x10=%d duration_ms=%u profile=%u enqueue_tick_us=%lld",
+                 cmd->command_id,
+                 (unsigned)(valid_frame_count + 1u),
+                 frame_count,
+                 (unsigned)segment->axis_mask,
+                 (int)segment->x_deg_x10,
+                 (int)segment->y_deg_x10,
+                 (unsigned)segment->duration_ms,
+                 (unsigned)segment->motion_profile,
+                 (long long)esp_timer_get_time());
+
+        valid_frame_count++;
+    }
+
+    if (valid_frame_count == 0u) {
+        ws_send_sys_nack("ctrl.servo.trajectory.play", cmd->command_id, "empty_trajectory");
+        return;
+    }
+
+    ret = hal_servo_play_trajectory(frames, valid_frame_count, HAL_SERVO_MOTION_SOURCE_WS);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "servo trajectory sequence queue failed: command_id=%s segments=%u err=%s",
+                 cmd->command_id,
+                 (unsigned)valid_frame_count,
+                 esp_err_to_name(ret));
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ws_send_sys_nack("ctrl.servo.trajectory.play", cmd->command_id, "mcu_link_not_ready");
+        } else if (ret == ESP_ERR_TIMEOUT) {
+            ws_send_sys_nack("ctrl.servo.trajectory.play", cmd->command_id, "busy");
+        } else {
+            ws_send_device_error(WS_DEVICE_ERROR_CODE_SERVO, "servo_trajectory_failed");
+            ws_send_sys_nack("ctrl.servo.trajectory.play", cmd->command_id, "servo_trajectory_failed");
+        }
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "servo trajectory play queued: command_id=%s segments=%u",
+             cmd->command_id,
+             (unsigned)valid_frame_count);
+    ws_servo_feedback_reset_report_state(HAL_SERVO_AXIS_MASK_X | HAL_SERVO_AXIS_MASK_Y);
+    ws_send_sys_ack("ctrl.servo.trajectory.play", cmd->command_id);
+}
+
+static bool light_byte_is_valid(int value) {
+    return value >= 0 && value <= 255;
+}
+
+static bool light_u16_is_valid(int value) {
+    return value >= 0 && value <= 65535;
+}
+
+static uint8_t light_effect_from_name(const char *effect) {
+    if (effect == NULL || effect[0] == '\0') {
+        return 0U;
+    }
+    if (strcasecmp(effect, "blink") == 0) {
+        return MCU_LED_EFFECT_BLINK;
+    }
+    if (strcasecmp(effect, "breathing") == 0 || strcasecmp(effect, "breathe") == 0) {
+        return MCU_LED_EFFECT_BREATHING;
+    }
+    if (strcasecmp(effect, "rainbow") == 0) {
+        return MCU_LED_EFFECT_RAINBOW;
+    }
+    if (strcasecmp(effect, "status_pulse") == 0 || strcasecmp(effect, "status-pulse") == 0) {
+        return MCU_LED_EFFECT_STATUS_PULSE;
+    }
+    return 0U;
+}
+
+static bool light_zone_from_name(const char *zone, mcu_led_zone_t *out_zone) {
+    if (out_zone == NULL) {
+        return false;
+    }
+    if (zone == NULL || zone[0] == '\0' || strcasecmp(zone, "all") == 0 || strcasecmp(zone, "both") == 0) {
+        *out_zone = MCU_LED_ZONE_ALL;
+        return true;
+    }
+    if (strcasecmp(zone, "side") == 0) {
+        *out_zone = MCU_LED_ZONE_SIDE;
+        return true;
+    }
+    if (strcasecmp(zone, "bottom") == 0) {
+        *out_zone = MCU_LED_ZONE_BOTTOM;
+        return true;
+    }
+    return false;
+}
+
+void on_light_set_handler(const ws_light_cmd_t *cmd) {
+    mcu_led_request_t req = {0};
+    esp_err_t ret;
+    const char *mode;
+
+    if (cmd == NULL) {
+        return;
+    }
+
+    mode = cmd->mode[0] != '\0' ? cmd->mode : "static";
+    if (!light_byte_is_valid(cmd->red) || !light_byte_is_valid(cmd->green) || !light_byte_is_valid(cmd->blue) ||
+        !light_byte_is_valid(cmd->secondary_red) || !light_byte_is_valid(cmd->secondary_green) ||
+        !light_byte_is_valid(cmd->secondary_blue) || !light_byte_is_valid(cmd->brightness) ||
+        !light_u16_is_valid(cmd->period_ms) || !light_u16_is_valid(cmd->repeat_count)) {
+        ws_send_sys_nack("ctrl.light.set", cmd->command_id, "invalid_light_payload");
+        return;
+    }
+
+    req.primary_red = (uint8_t)cmd->red;
+    req.primary_green = (uint8_t)cmd->green;
+    req.primary_blue = (uint8_t)cmd->blue;
+    req.secondary_red = (uint8_t)cmd->secondary_red;
+    req.secondary_green = (uint8_t)cmd->secondary_green;
+    req.secondary_blue = (uint8_t)cmd->secondary_blue;
+    req.brightness = (uint8_t)cmd->brightness;
+    req.period_ms = (uint16_t)cmd->period_ms;
+    req.repeat_count = (uint16_t)cmd->repeat_count;
+    if (!light_zone_from_name(cmd->zone, &req.zone)) {
+        ws_send_sys_nack("ctrl.light.set", cmd->command_id, "invalid_light_zone");
+        return;
+    }
+
+    if (strcasecmp(mode, "off") == 0) {
+        req.mode = MCU_LED_MODE_OFF;
+    } else if (strcasecmp(mode, "static") == 0) {
+        req.mode = MCU_LED_MODE_STATIC;
+    } else if (strcasecmp(mode, "effect") == 0) {
+        req.mode = MCU_LED_MODE_EFFECT;
+        req.effect_id = light_effect_from_name(cmd->effect);
+        if (req.effect_id == 0U) {
+            ws_send_sys_nack("ctrl.light.set", cmd->command_id, "invalid_light_effect");
+            return;
+        }
+        if (req.period_ms == 0U) {
+            ws_send_sys_nack("ctrl.light.set", cmd->command_id, "invalid_period_ms");
+            return;
+        }
+    } else {
+        ws_send_sys_nack("ctrl.light.set", cmd->command_id, "invalid_light_mode");
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "light command: zone=%s mode=%s effect=%s rgb=(%d,%d,%d) brightness=%d period=%d repeat=%d command_id=%s",
+             cmd->zone[0] != '\0' ? cmd->zone : "all", mode, cmd->effect, cmd->red, cmd->green, cmd->blue,
+             cmd->brightness, cmd->period_ms, cmd->repeat_count, cmd->command_id);
+    ret = mcu_led_submit(&req);
+    if (ret == ESP_OK) {
+        ws_send_sys_ack("ctrl.light.set", cmd->command_id);
+    } else if (ret == ESP_ERR_INVALID_STATE) {
+        ws_send_sys_nack("ctrl.light.set", cmd->command_id, "mcu_link_not_ready");
+    } else if (ret == ESP_ERR_TIMEOUT) {
+        ws_send_sys_nack("ctrl.light.set", cmd->command_id, "busy");
+    } else {
+        ws_send_sys_nack("ctrl.light.set", cmd->command_id, "light_set_failed");
+    }
+}
+
+void on_servo_pwm_unlock_handler(const ws_servo_pwm_unlock_cmd_t *cmd) {
+    esp_err_t ret;
+
+    if (cmd == NULL || cmd->axis_mask == 0u) {
+        ws_send_sys_nack("ctrl.servo.pwm.unlock", cmd != NULL ? cmd->command_id : NULL, "invalid_axes");
+        return;
+    }
+
+    ret = ws_retry_servo_pwm_command(hal_servo_pwm_unlock, cmd->axis_mask);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "servo pwm unlock failed axis_mask=0x%02x err=%s", cmd->axis_mask, esp_err_to_name(ret));
+        ws_send_sys_nack("ctrl.servo.pwm.unlock", cmd->command_id, esp_err_to_name(ret));
+        return;
+    }
+
+    ws_servo_feedback_reset_report_state(cmd->axis_mask);
+    ws_send_sys_ack("ctrl.servo.pwm.unlock", cmd->command_id);
+}
+
+void on_servo_pwm_lock_handler(const ws_servo_pwm_unlock_cmd_t *cmd) {
+    esp_err_t ret;
+
+    if (cmd == NULL || cmd->axis_mask == 0u) {
+        ws_send_sys_nack("ctrl.servo.pwm.lock", cmd != NULL ? cmd->command_id : NULL, "invalid_axes");
+        return;
+    }
+
+    ret = ws_retry_servo_pwm_command(hal_servo_pwm_lock, cmd->axis_mask);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "servo pwm lock failed axis_mask=0x%02x err=%s", cmd->axis_mask, esp_err_to_name(ret));
+        ws_send_sys_nack("ctrl.servo.pwm.lock", cmd->command_id, esp_err_to_name(ret));
+        return;
+    }
+
+    ws_servo_feedback_reset_report_state(cmd->axis_mask);
+    ws_send_sys_ack("ctrl.servo.pwm.lock", cmd->command_id);
+}
+
 void on_motion_jog_handler(const ws_motion_jog_cmd_t *cmd) {
     control_jog_request_t req = {0};
     esp_err_t ret;
@@ -797,6 +1139,63 @@ void on_state_set_handler(const ws_state_cmd_t *cmd) {
         ws_send_sys_nack("ctrl.robot.state.set", cmd->command_id, "busy");
     } else {
         ws_send_sys_nack("ctrl.robot.state.set", cmd->command_id, "state_set_failed");
+    }
+}
+
+static void normalize_sound_id(const char *raw, char *out, size_t out_size) {
+    const char *base;
+    const char *ext;
+    size_t len;
+    size_t i;
+
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (raw == NULL || raw[0] == '\0') {
+        return;
+    }
+
+    base = raw;
+    for (i = 0; raw[i] != '\0'; ++i) {
+        if (raw[i] == '/' || raw[i] == '\\') {
+            base = &raw[i + 1];
+        }
+    }
+
+    ext = strrchr(base, '.');
+    len = (ext != NULL && ext > base) ? (size_t)(ext - base) : strlen(base);
+    if (len >= out_size) {
+        len = out_size - 1;
+    }
+    for (i = 0; i < len; ++i) {
+        out[i] = (char)tolower((unsigned char)base[i]);
+    }
+    out[len] = '\0';
+}
+
+void on_sound_play_handler(const ws_sound_cmd_t *cmd) {
+    char sound_id[WS_RESOURCE_NAME_MAX];
+    esp_err_t ret;
+
+    if (cmd == NULL) {
+        return;
+    }
+
+    normalize_sound_id(cmd->sound_id, sound_id, sizeof(sound_id));
+    if (sound_id[0] == '\0') {
+        ws_send_sys_nack("ctrl.sound.play", cmd->command_id, "invalid_sound_payload");
+        return;
+    }
+
+    ESP_LOGI(TAG, "sound command: sound_id=%s delay=%dms command_id=%s", sound_id, cmd->delay_ms, cmd->command_id);
+    ret = sfx_service_play_delayed(sound_id, cmd->delay_ms);
+    if (ret == ESP_OK) {
+        ws_send_sys_ack("ctrl.sound.play", cmd->command_id);
+    } else if (ret == ESP_ERR_INVALID_STATE) {
+        ws_send_sys_nack("ctrl.sound.play", cmd->command_id, "audio_busy_tts");
+    } else {
+        ws_send_sys_nack("ctrl.sound.play", cmd->command_id, "sound_play_failed");
     }
 }
 
@@ -983,7 +1382,7 @@ void on_asr_result_handler(const ws_text_event_t *event) {
 
     ESP_LOGI(TAG, "ASR result: %s", event->text);
     snprintf(req.state_id, sizeof(req.state_id), "%s", "processing");
-    snprintf(req.text, sizeof(req.text), "%s", event->text[0] != '\0' ? event->text : "Listening...");
+    req.text[0] = '\0';
     if (control_ingress_submit_state_text(&req) != ESP_OK) {
         ESP_LOGW(TAG, "Failed to enqueue ASR state update");
     }
@@ -1020,12 +1419,10 @@ void on_ai_thinking_handler(const ws_ai_thinking_t *event) {
     }
 
     ESP_LOGI(TAG, "AI thinking: kind=%s content=%s", event->kind, event->content);
-    if (event->content[0] != '\0') {
-        snprintf(req.state_id, sizeof(req.state_id), "%s", "thinking");
-        snprintf(req.text, sizeof(req.text), "%s", event->content);
-        if (control_ingress_submit_state_text(&req) != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to enqueue thinking state update");
-        }
+    snprintf(req.state_id, sizeof(req.state_id), "%s", "thinking");
+    req.text[0] = '\0';
+    if (control_ingress_submit_state_text(&req) != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to enqueue thinking state update");
     }
 }
 
@@ -1059,11 +1456,16 @@ ws_router_t ws_handlers_get_router(void) {
         .on_sys_pong = on_sys_pong_handler,
         .on_session_resume = on_session_resume_handler,
         .on_servo = on_servo_handler,
+        .on_servo_pwm_unlock = on_servo_pwm_unlock_handler,
+        .on_servo_pwm_lock = on_servo_pwm_lock_handler,
+        .on_servo_trajectory_play = on_servo_trajectory_play_handler,
+        .on_light_set = on_light_set_handler,
         .on_motion_jog = on_motion_jog_handler,
         .on_motion_stop = on_motion_stop_handler,
         .on_microphone_open = on_microphone_open_handler,
         .on_microphone_close = on_microphone_close_handler,
         .on_state_set = on_state_set_handler,
+        .on_sound_play = on_sound_play_handler,
         .on_capture = on_capture_handler,
         .on_asr_result = on_asr_result_handler,
         .on_ai_status = on_ai_status_handler,

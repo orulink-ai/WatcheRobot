@@ -31,6 +31,7 @@ idf_component_register(
         # camera_service
         control_ingress
         ota_service
+        power_monitor_service
         vfs
         # Utils
         wifi_manager

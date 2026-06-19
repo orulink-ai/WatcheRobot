@@ -21,6 +21,9 @@ static bool s_ready = true;
 static captured_frame_t s_captured;
 static captured_frame_t s_history[8];
 static unsigned s_history_count;
+static mcu_motion_servo_feedback_t s_feedback;
+static unsigned s_feedback_count;
+static void *s_feedback_ctx;
 
 mcu_link_t *mcu_link_bootstrap_get_link(void)
 {
@@ -75,8 +78,20 @@ static void reset_capture(void)
 {
     memset(&s_captured, 0, sizeof(s_captured));
     memset(s_history, 0, sizeof(s_history));
+    memset(&s_feedback, 0, sizeof(s_feedback));
     s_history_count = 0u;
+    s_feedback_count = 0u;
+    s_feedback_ctx = NULL;
     s_ready = true;
+    assert(mcu_motion_set_servo_feedback_callback(NULL, NULL) == ESP_OK);
+}
+
+static void capture_feedback(const mcu_motion_servo_feedback_t *feedback, void *ctx)
+{
+    assert(feedback != NULL);
+    s_feedback = *feedback;
+    s_feedback_ctx = ctx;
+    s_feedback_count++;
 }
 
 static void test_stop_clears_pending_motion_queue(void)
@@ -233,6 +248,73 @@ static void test_chunked_sequence_sends_begin_chunks_and_end(void)
     assert(s_history[3].payload[1] == 0x12u);
 }
 
+static void test_motion_state_feedback_uses_stm32_payload_layout(void)
+{
+    int sentinel = 0;
+    mcu_link_event_t event = {
+        .type = MCU_LINK_RX_EVENT_SERVO_FEEDBACK,
+        .frame = {
+            .header = {
+                .payload_len = 13u,
+                .msg_id = MCU_MOTION_MSG_MOTION_STATE,
+            },
+            .payload = {
+                0x78u, 0x56u, 0x34u, 0x12u,
+                MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y,
+                0xD2u, 0x04u,
+                0x37u, 0x02u,
+                0xDCu, 0x05u,
+                0xC4u, 0x09u,
+            },
+        },
+    };
+
+    reset_capture();
+
+    assert(mcu_motion_set_servo_feedback_callback(capture_feedback, &sentinel) == ESP_OK);
+    assert(mcu_motion_service_handle_link_event(&event) == ESP_OK);
+    assert(s_feedback_count == 1u);
+    assert(s_feedback_ctx == &sentinel);
+    assert(s_feedback.axis_mask == (MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y));
+    assert(s_feedback.x_angle_x10 == 1234);
+    assert(s_feedback.y_angle_x10 == 567);
+    assert(s_feedback.x_raw == 2500u);
+    assert(s_feedback.y_raw == 1500u);
+}
+
+static void test_servo_feedback_rsp_uses_compact_payload_layout(void)
+{
+    int sentinel = 0;
+    mcu_link_event_t event = {
+        .type = MCU_LINK_RX_EVENT_SERVO_FEEDBACK,
+        .frame = {
+            .header = {
+                .payload_len = 9u,
+                .msg_id = MCU_MOTION_MSG_SERVO_FEEDBACK,
+            },
+            .payload = {
+                MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y,
+                0x57u, 0x04u,
+                0xDEu, 0x00u,
+                0x05u, 0x0Du,
+                0xBCu, 0x01u,
+            },
+        },
+    };
+
+    reset_capture();
+
+    assert(mcu_motion_set_servo_feedback_callback(capture_feedback, &sentinel) == ESP_OK);
+    assert(mcu_motion_service_handle_link_event(&event) == ESP_OK);
+    assert(s_feedback_count == 1u);
+    assert(s_feedback_ctx == &sentinel);
+    assert(s_feedback.axis_mask == (MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y));
+    assert(s_feedback.x_angle_x10 == 444);
+    assert(s_feedback.y_angle_x10 == 222);
+    assert(s_feedback.x_raw == 3333u);
+    assert(s_feedback.y_raw == 1111u);
+}
+
 int main(void)
 {
     test_stop_clears_pending_motion_queue();
@@ -240,5 +322,7 @@ int main(void)
     test_sequence_rejects_invalid_segment_without_send();
     test_sequence_accepts_max_single_frame_segments();
     test_chunked_sequence_sends_begin_chunks_and_end();
+    test_motion_state_feedback_uses_stm32_payload_layout();
+    test_servo_feedback_rsp_uses_compact_payload_layout();
     return 0;
 }

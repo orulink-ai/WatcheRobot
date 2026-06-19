@@ -38,3 +38,4 @@ dependencies:
     public: true
 
   # sscma_client and esp_io_expander_pca95xx_16bit are defined in main/idf_component.yml
+

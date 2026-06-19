@@ -34,6 +34,7 @@
 #include "mcu_sensor_service.h"
 #include "mem_monitor.h"
 #include "ota_service.h"
+#include "power_monitor_service.h"
 #include "sensecap-watcher.h"
 #include "sfx_service.h"
 #include "stress_mode.h"
@@ -62,6 +63,7 @@
 #define ESP32_SHUTDOWN_WAKE_IDLE_POLL_MS 50
 #define STARTUP_BEHAVIOR_POLL_MS 50
 #define STARTUP_BEHAVIOR_TIMEOUT_MS 10000
+#define STARTUP_LED_RETRY_MS 1000
 #define READY_IDLE_VARIANT_COUNT 4
 #define READY_IDLE_ROUNDS_BEFORE_SLEEP 5
 #define READY_IDLE_MIN_VARIANT_DURATION_MS 1000
@@ -74,6 +76,7 @@
 #define READY_IDLE_MEMORY_PRESSURE_LOG_INTERVAL_US 10000000LL
 #define READY_IDLE_MEMORY_FORCE_STANDBY_DEFERS 3U
 #define CLOUD_DISCOVERY_TIMEOUT_MS 5000
+#define CLOUD_DISCOVERY_TASK_STACK_BYTES 8192
 #define CLOUD_RETRY_DELAY_MS 2000
 #define CLOUD_PROTOCOL_RETRY_DELAY_MS 5000
 #define CACHED_WS_CONNECT_TIMEOUT_MS 5000U
@@ -90,6 +93,10 @@
 #define CLOUD_RUNTIME_MIN_INTERNAL_FREE_BYTES (24U * 1024U)
 #define CLOUD_RUNTIME_MIN_INTERNAL_LARGEST_BYTES (12U * 1024U)
 #define MCU_HANDSHAKE_UI_TIMEOUT_MS 5000U
+#define BLE_CONNECTED_FEEDBACK_STATE_ID "bluetooth"
+#define BLE_CONNECTED_FEEDBACK_ANIM_ID "bluetooth"
+#define BLE_CONNECTED_FEEDBACK_SOUND_ID "bluetooth"
+#define BLE_CONNECTED_FEEDBACK_ACTION_ID "bluetooth"
 #define TOUCH_FONDLE_STATE_ID "fondle_love"
 #define TOUCH_FONDLE_ANIM_ID "fondle_love"
 #define TOUCH_FONDLE_ACTION_ID "fondle_love"
@@ -185,6 +192,8 @@ static mcu_link_state_t s_last_mcu_obs_state = MCU_LINK_STATE_DOWN;
 static bool s_mcu_obs_stats_initialized = false;
 static mcu_link_stats_t s_last_mcu_obs_stats = {0};
 static int64_t s_last_mcu_obs_stats_log_us = 0;
+static bool s_startup_green_leds_applied = false;
+static int64_t s_startup_green_leds_last_attempt_us = 0;
 static volatile bool s_shutdown_in_progress = false;
 static TaskHandle_t s_shutdown_task = NULL;
 static uint32_t s_shutdown_power_seq = 0;
@@ -424,6 +433,7 @@ static void transport_reset_low_memory_recovery(const char *reason);
 static int transport_prepare_ws_client(const char *ws_url);
 static void transport_reset_cached_ws_resume_state(void);
 static void wait_for_behavior_idle(uint32_t timeout_ms);
+static void maybe_apply_startup_green_leds(void);
 static void maybe_play_ble_connected_feedback(void);
 static void boot_halt_with_error(const char *error_msg);
 static void log_directory_contents(const char *path);
@@ -916,6 +926,7 @@ static void maybe_complete_mcu_link_baseline_restore(const mcu_link_event_t *eve
              mcu_link_state_to_string(mcu_link_get_state(link)), mcu_link_is_ready(link) ? 1 : 0);
     if (mcu_link_is_ready(link)) {
         stress_mode_notify_ready();
+        maybe_apply_startup_green_leds();
         ESP_LOGI(MCU_OBS_TAG, "evt=ready link_state=%s", mcu_link_state_to_string(mcu_link_get_state(link)));
     }
     maybe_log_mcu_obs_state_transition(link, "baseline_restore_done");
@@ -1078,6 +1089,30 @@ static void service_mcu_link_runtime(void) {
         ESP_LOGW(TAG, "MCU link runtime poll failed: %s", esp_err_to_name(ret));
         maybe_log_mcu_obs_stats(mcu_link_bootstrap_get_link(), "poll_error", true);
         return;
+    }
+}
+
+static void maybe_apply_startup_green_leds(void) {
+    int64_t now_us;
+    esp_err_t ret;
+
+    if (s_startup_green_leds_applied || !mcu_link_bootstrap_is_ready()) {
+        return;
+    }
+
+    now_us = esp_timer_get_time();
+    if (s_startup_green_leds_last_attempt_us != 0 &&
+        (now_us - s_startup_green_leds_last_attempt_us) < ((int64_t)STARTUP_LED_RETRY_MS * 1000LL)) {
+        return;
+    }
+    s_startup_green_leds_last_attempt_us = now_us;
+
+    ret = mcu_led_submit_boot_green_baseline();
+    if (ret == ESP_OK) {
+        s_startup_green_leds_applied = true;
+        ESP_LOGI(TAG, "Startup LED baseline applied: static green for side and bottom LEDs");
+    } else {
+        ESP_LOGW(TAG, "Startup LED baseline apply failed: %s", esp_err_to_name(ret));
     }
 }
 
@@ -1433,6 +1468,45 @@ static idle_hint_view_t get_idle_hint_view(idle_hint_mode_t mode) {
 
 static bool ready_idle_has_animation_headroom(int64_t now_us);
 
+static bool power_monitor_charge_mode_active(void) {
+    power_monitor_sample_t snapshot;
+
+    if (power_monitor_service_get_snapshot(&snapshot) != ESP_OK) {
+        return false;
+    }
+
+    return snapshot.vbus_present;
+}
+
+static bool recharge_intro_is_active(void) {
+    const char *current_state = behavior_state_get_current();
+
+    if (current_state == NULL || strcmp(current_state, "recharge") != 0) {
+        return false;
+    }
+
+    return emoji_anim_is_running() || emoji_anim_is_switch_pending();
+}
+
+static bool handoff_completed_recharge_to_idle(const idle_hint_view_t *view) {
+    const char *current_state = behavior_state_get_current();
+    esp_err_t ret;
+
+    if (current_state == NULL || strcmp(current_state, "recharge") != 0 || recharge_intro_is_active()) {
+        return false;
+    }
+
+    ret = behavior_state_set_with_resources("standby", view != NULL ? view->text : NULL,
+                                            view != NULL ? view->font_size : 0, "standby", "");
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to hand off completed recharge intro to standby: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Recharge intro completed; handoff to standby idle");
+    return true;
+}
+
 static bool ready_idle_can_replace_happy(void) {
     const char *current_state = behavior_state_get_current();
     if (current_state == NULL || strcmp(current_state, "happy") != 0) {
@@ -1777,6 +1851,16 @@ static void apply_idle_hint_if_needed(void) {
         return;
     }
 
+    if (power_monitor_charge_mode_active() && recharge_intro_is_active()) {
+        reset_ready_idle_rotation();
+        return;
+    }
+
+    if (power_monitor_charge_mode_active() && handoff_completed_recharge_to_idle(&view)) {
+        reset_ready_idle_rotation();
+        return;
+    }
+
     if (desired_hint != IDLE_HINT_READY) {
         reset_ready_idle_rotation();
     } else {
@@ -1851,7 +1935,7 @@ static void maybe_play_ble_connected_feedback(void) {
     }
 
     current_state = behavior_state_get_current();
-    if (current_state != NULL && strcmp(current_state, "bluetooth") == 0) {
+    if (current_state != NULL && strcmp(current_state, BLE_CONNECTED_FEEDBACK_STATE_ID) == 0) {
         s_ble_connected_feedback_pending = false;
         return;
     }
@@ -1860,7 +1944,12 @@ static void maybe_play_ble_connected_feedback(void) {
         return;
     }
 
-    ret = behavior_state_set_with_text_style("bluetooth", "BLE connected", 0, false);
+    ret = behavior_state_set_with_resources_and_action(BLE_CONNECTED_FEEDBACK_STATE_ID,
+                                                       "BLE connected",
+                                                       0,
+                                                       BLE_CONNECTED_FEEDBACK_ANIM_ID,
+                                                       BLE_CONNECTED_FEEDBACK_SOUND_ID,
+                                                       BLE_CONNECTED_FEEDBACK_ACTION_ID);
     if (ret == ESP_OK) {
         s_ble_connected_feedback_pending = false;
         ESP_LOGI(TAG, "Triggered BLE connected feedback state");
@@ -1935,7 +2024,12 @@ static int transport_launch_discovery(void) {
     *generation = s_discovery_generation;
     s_discovery_inflight = true;
 
-    task_ret = xTaskCreate(transport_discovery_task, "cloud_discovery", 4096, generation, 5, NULL);
+    task_ret = xTaskCreate(transport_discovery_task,
+                           "cloud_discovery",
+                           CLOUD_DISCOVERY_TASK_STACK_BYTES,
+                           generation,
+                           5,
+                           NULL);
     if (task_ret != pdPASS) {
         s_discovery_inflight = false;
         free(generation);
@@ -2319,6 +2413,10 @@ void app_main(void) {
     LOG_HEAP_STATE("after_control_ingress");
 #endif
     behavior_state_init();
+    if (power_monitor_service_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Power monitor init failed");
+        boot_halt_with_error("Power monitor init failed");
+    }
 
 #if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
     if (control_ingress_init() != ESP_OK) {
@@ -2406,7 +2504,9 @@ void app_main(void) {
 #if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
         service_mcu_link_runtime();
 #endif
+        maybe_apply_startup_green_leds();
         transport_coordinator_tick();
+        (void)power_monitor_service_tick();
         maybe_play_ble_connected_feedback();
         apply_idle_hint_if_needed();
         ws_tts_timeout_check();

@@ -38,6 +38,8 @@ typedef struct {
 static QueueHandle_t s_state_queue = NULL;
 static TaskHandle_t s_state_task = NULL;
 static int64_t s_manual_touch_suppressed_until_us = 0;
+static int64_t s_manual_jog_stream_until_us = 0;
+static control_motion_source_t s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
 
 static hal_servo_motion_source_t control_source_to_hal(control_motion_source_t source) {
     switch (source) {
@@ -97,6 +99,29 @@ static void control_suppress_touch_for_manual_source(control_motion_source_t sou
     }
 }
 
+static bool control_begin_jog_stream(control_motion_source_t source, int timeout_ms) {
+    const int64_t now_us = esp_timer_get_time();
+    const bool stream_active = control_source_is_manual(source) && s_manual_jog_stream_source == source &&
+                               now_us < s_manual_jog_stream_until_us;
+
+    if (control_source_is_manual(source)) {
+        s_manual_jog_stream_source = source;
+        s_manual_jog_stream_until_us = now_us + ((int64_t)timeout_ms * 1000LL);
+    }
+
+    return !stream_active;
+}
+
+static void control_end_jog_stream(control_motion_source_t source) {
+    if (!control_source_is_manual(source)) {
+        return;
+    }
+    if (s_manual_jog_stream_source == source) {
+        s_manual_jog_stream_until_us = 0;
+        s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
+    }
+}
+
 static const control_ingress_ops_t s_default_ops = {
     .interrupt_action = control_default_interrupt_action,
     .move_sync = control_default_move_sync,
@@ -112,11 +137,15 @@ static const control_ingress_ops_t *s_ops = &s_default_ops;
 void control_ingress_set_ops_for_test(const control_ingress_ops_t *ops) {
     s_ops = ops != NULL ? ops : &s_default_ops;
     s_manual_touch_suppressed_until_us = 0;
+    s_manual_jog_stream_until_us = 0;
+    s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
 }
 
 void control_ingress_reset_ops_for_test(void) {
     s_ops = &s_default_ops;
     s_manual_touch_suppressed_until_us = 0;
+    s_manual_jog_stream_until_us = 0;
+    s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
 }
 #endif
 
@@ -167,10 +196,36 @@ static void control_normalize_resource_name(const char *raw, char *out, size_t o
     }
 
     for (i = 0; i < len; ++i) {
-        out[i] = (char)tolower((unsigned char)base[i]);
+        char ch = (char)tolower((unsigned char)base[i]);
+        out[i] = ch == '-' ? '_' : ch;
     }
     out[len] = '\0';
+
+    if (strncmp(out, "watcher_", 8) == 0) {
+        memmove(out, out + 8, strlen(out + 8) + 1);
+    }
+
+    len = strlen(out);
+    if (len > 6 && strcmp(out + len - 6, "_10fps") == 0) {
+        out[len - 6] = '\0';
+    }
+
+    if (strcmp(out, "look1") == 0) {
+        snprintf(out, out_size, "standby1");
+    } else if (strcmp(out, "look2") == 0) {
+        snprintf(out, out_size, "standby2");
+    } else if (strcmp(out, "look3") == 0) {
+        snprintf(out, out_size, "standby3");
+    } else if (strcmp(out, "look4") == 0) {
+        snprintf(out, out_size, "standby4");
+    }
 }
+
+#if defined(CONTROL_INGRESS_ENABLE_TEST_API)
+void control_ingress_normalize_resource_name_for_test(const char *raw, char *out, size_t out_size) {
+    control_normalize_resource_name(raw, out, out_size);
+}
+#endif
 
 static bool control_append_state_candidate(const char **candidates, size_t *count, size_t max_count,
                                            const char *candidate) {
@@ -233,6 +288,52 @@ static const char *control_ai_status_to_fallback(const char *status, const char 
     return NULL;
 }
 
+static bool control_is_voice_flow_state(const char *state_id) {
+    if (state_id == NULL || state_id[0] == '\0') {
+        return false;
+    }
+    return strcasecmp(state_id, "listening") == 0 || strcasecmp(state_id, "thinking") == 0 ||
+           strcasecmp(state_id, "processing") == 0 || strcasecmp(state_id, "speaking") == 0;
+}
+
+static bool control_ai_status_uses_voice_flow_state(const char *action_state_id, const char *status_state_id,
+                                                    const char *fallback_state_id, const char *image_name) {
+    return control_is_voice_flow_state(action_state_id) || control_is_voice_flow_state(status_state_id) ||
+           control_is_voice_flow_state(fallback_state_id) || control_is_voice_flow_state(image_name);
+}
+
+static const char *control_ai_status_display_text(const control_ai_status_request_t *req) {
+    static const char clear_text[] = "";
+    char action_state_id[sizeof(req->action_file)];
+    char status_state_id[sizeof(req->status)];
+    char fallback_state_id[sizeof(req->status)];
+    char image_name[sizeof(req->image_name)];
+
+    if (req == NULL) {
+        return NULL;
+    }
+    if (req->message[0] == '\0') {
+        return clear_text;
+    }
+
+    control_normalize_resource_name(req->action_file, action_state_id, sizeof(action_state_id));
+    control_normalize_resource_name(req->status, status_state_id, sizeof(status_state_id));
+    control_normalize_resource_name(req->image_name, image_name, sizeof(image_name));
+    control_normalize_resource_name(control_ai_status_to_fallback(req->status, req->message), fallback_state_id,
+                                    sizeof(fallback_state_id));
+
+    if (control_ai_status_uses_voice_flow_state(action_state_id, status_state_id, fallback_state_id, image_name)) {
+        return clear_text;
+    }
+    return req->message;
+}
+
+#if defined(CONTROL_INGRESS_ENABLE_TEST_API)
+const char *control_ingress_ai_status_text_for_test(const control_ai_status_request_t *req) {
+    return control_ai_status_display_text(req);
+}
+#endif
+
 static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req) {
     char action_state_id[sizeof(req->action_file)];
     char status_state_id[sizeof(req->status)];
@@ -256,7 +357,7 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
     control_normalize_resource_name(control_ai_status_to_fallback(req->status, req->message), fallback_state_id,
                                     sizeof(fallback_state_id));
 
-    text = req->message[0] != '\0' ? req->message : NULL;
+    text = control_ai_status_display_text(req);
     /* Preserve explicit panel/protocol SFX while still suppressing implicit state-default
      * sounds for cloud AI statuses that do not provide a sound_file. */
     if (sound_id[0] != '\0') {
@@ -429,6 +530,7 @@ esp_err_t control_ingress_submit_servo_with_seq(const control_servo_request_t *r
         return ESP_ERR_INVALID_ARG;
     }
 
+    control_end_jog_stream(req->source);
     control_suppress_touch_for_manual_source(req->source);
 
 #if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
@@ -456,6 +558,8 @@ esp_err_t control_ingress_submit_servo_with_seq(const control_servo_request_t *r
 }
 
 esp_err_t control_ingress_submit_jog_with_seq(const control_jog_request_t *req, uint32_t *out_seq) {
+    bool should_interrupt;
+
     if (req == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -465,9 +569,10 @@ esp_err_t control_ingress_submit_jog_with_seq(const control_jog_request_t *req, 
     }
 
     control_suppress_touch_for_manual_source(req->source);
+    should_interrupt = control_begin_jog_stream(req->source, req->timeout_ms);
 
 #if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
-    if (s_ops->interrupt_action != NULL) {
+    if (should_interrupt && s_ops->interrupt_action != NULL) {
         esp_err_t interrupt_ret = s_ops->interrupt_action("control_ingress_jog");
         if (interrupt_ret != ESP_OK && interrupt_ret != ESP_ERR_NOT_FOUND) {
             ESP_LOGW(TAG, "Failed to interrupt action loop before jog control: %s", esp_err_to_name(interrupt_ret));
@@ -482,6 +587,8 @@ esp_err_t control_ingress_submit_jog_with_seq(const control_jog_request_t *req, 
 }
 
 esp_err_t control_ingress_submit_jog_vector_with_seq(const control_jog_vector_request_t *req, uint32_t *out_seq) {
+    bool should_interrupt;
+
     if (req == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -499,9 +606,10 @@ esp_err_t control_ingress_submit_jog_vector_with_seq(const control_jog_vector_re
     }
 
     control_suppress_touch_for_manual_source(req->source);
+    should_interrupt = control_begin_jog_stream(req->source, req->timeout_ms);
 
 #if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
-    if (s_ops->interrupt_action != NULL) {
+    if (should_interrupt && s_ops->interrupt_action != NULL) {
         esp_err_t interrupt_ret = s_ops->interrupt_action("control_ingress_jog");
         if (interrupt_ret != ESP_OK && interrupt_ret != ESP_ERR_NOT_FOUND) {
             ESP_LOGW(TAG, "Failed to interrupt action loop before jog control: %s", esp_err_to_name(interrupt_ret));
@@ -517,6 +625,7 @@ esp_err_t control_ingress_submit_jog_vector_with_seq(const control_jog_vector_re
 }
 
 esp_err_t control_ingress_stop_manual(control_motion_source_t source) {
+    control_end_jog_stream(source);
     control_suppress_touch_for_manual_source(source);
 
     if (s_ops->interrupt_action != NULL) {

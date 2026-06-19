@@ -1,12 +1,17 @@
 #include "mcu_motion_service.h"
 
 #include "esp_log.h"
+#if defined(ESP_PLATFORM)
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
 #include "mcu_link_bootstrap.h"
 
 #include <stdbool.h>
 #include <string.h>
 
 static const char *TAG = "MCU_MOTION";
+#define MCU_MOTION_CHUNKED_SEQUENCE_FRAME_GAP_MS 12u
 #if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
 static const char *OBS_TAG = "MCU_OBS";
 #endif
@@ -15,6 +20,8 @@ static mcu_motion_request_t s_last_request;
 static bool s_has_last_request;
 static uint32_t s_last_command_seq;
 static bool s_command_inflight;
+static mcu_motion_servo_feedback_cb_t s_servo_feedback_cb;
+static void *s_servo_feedback_ctx;
 
 static uint16_t decode_u16_le(const uint8_t *src) {
     return (uint16_t)(((uint16_t)src[0]) | ((uint16_t)src[1] << 8u));
@@ -118,6 +125,82 @@ static esp_err_t mcu_motion_submit_stop_frame(mcu_motion_source_t source) {
 #endif
     s_last_command_seq = seq;
     s_command_inflight = true;
+    return ESP_OK;
+}
+
+static esp_err_t mcu_motion_submit_pwm_unlock_frame(const mcu_motion_pwm_unlock_request_t *request) {
+    uint8_t payload[2];
+    mcu_link_t *link;
+    uint32_t seq = 0u;
+    size_t wire_len = 0u;
+    esp_err_t ret;
+
+    if (request == NULL || request->axis_mask == 0u ||
+        (request->axis_mask & (uint8_t)~(MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y)) != 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    link = mcu_link_bootstrap_get_link();
+    if (link == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!mcu_link_bootstrap_is_ready()) {
+        ESP_LOGW(TAG, "MCU link not fully ready; rejecting PWM unlock request");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    payload[0] = request->axis_mask;
+    payload[1] = (uint8_t)request->source;
+    ret = mcu_link_send_frame(link, MCU_FRAME_CLASS_MOTION, MCU_MOTION_MSG_SERVO_PWM_UNLOCK, MCU_FRAME_FLAG_ACK_REQ,
+                              payload, (uint16_t)sizeof(payload), &seq, &wire_len);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to queue SERVO_PWM_UNLOCK frame: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+#if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
+    ESP_LOGI(TAG, "Queued SERVO_PWM_UNLOCK frame seq=%lu wire_len=%u axis_mask=0x%02x source=%u",
+             (unsigned long)seq, (unsigned)wire_len, request->axis_mask, (unsigned)request->source);
+#endif
+    s_last_command_seq = seq;
+    s_command_inflight = true;
+    return ESP_OK;
+}
+
+static esp_err_t mcu_motion_submit_pwm_lock_frame(const mcu_motion_pwm_lock_request_t *request) {
+    uint8_t payload[2];
+    uint32_t seq = 0u;
+    size_t wire_len = 0u;
+    esp_err_t ret;
+    mcu_link_t *link;
+
+    if (request == NULL || request->axis_mask == 0u ||
+        (request->axis_mask & (uint8_t)~(MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y)) != 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    link = mcu_link_bootstrap_get_link();
+    if (link == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!mcu_link_bootstrap_is_ready()) {
+        ESP_LOGW(TAG, "MCU link not fully ready; rejecting PWM lock request");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    payload[0] = request->axis_mask;
+    payload[1] = (uint8_t)request->source;
+    ret = mcu_link_send_frame(link, MCU_FRAME_CLASS_MOTION, MCU_MOTION_MSG_SERVO_PWM_LOCK, MCU_FRAME_FLAG_ACK_REQ,
+                              payload, (uint16_t)sizeof(payload), &seq, &wire_len);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to queue SERVO_PWM_LOCK frame: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    s_last_command_seq = seq;
+    s_command_inflight = true;
+    ESP_LOGI(TAG, "Queued SERVO_PWM_LOCK frame seq=%lu wire_len=%u axis_mask=0x%02x source=%u",
+             (unsigned long)seq, (unsigned int)wire_len, request->axis_mask, (unsigned)request->source);
     return ESP_OK;
 }
 
@@ -235,6 +318,12 @@ static esp_err_t mcu_motion_send_chunked_sequence_control_frame(mcu_link_t *link
                                out_seq, &wire_len);
 }
 
+static void mcu_motion_chunked_sequence_frame_gap(void) {
+#if defined(ESP_PLATFORM)
+    vTaskDelay(pdMS_TO_TICKS(MCU_MOTION_CHUNKED_SEQUENCE_FRAME_GAP_MS));
+#endif
+}
+
 static esp_err_t mcu_motion_submit_chunked_sequence_frames(const mcu_motion_chunked_sequence_t *sequence,
                                                           uint32_t *out_end_seq) {
     uint8_t payload[4u + (MCU_MOTION_SEQUENCE_CHUNK_MAX_SEGMENTS * 8u)];
@@ -265,6 +354,7 @@ static esp_err_t mcu_motion_submit_chunked_sequence_frames(const mcu_motion_chun
         ESP_LOGW(TAG, "Failed to queue SERVO_SEQUENCE_BEGIN frame: %s", esp_err_to_name(ret));
         return ret;
     }
+    mcu_motion_chunked_sequence_frame_gap();
 
     while (next_index < sequence->segment_count) {
         uint8_t chunk_count = (uint8_t)(sequence->segment_count - next_index);
@@ -294,6 +384,7 @@ static esp_err_t mcu_motion_submit_chunked_sequence_frames(const mcu_motion_chun
             ESP_LOGW(TAG, "Failed to queue SERVO_SEQUENCE_CHUNK frame: %s", esp_err_to_name(ret));
             return ret;
         }
+        mcu_motion_chunked_sequence_frame_gap();
         next_index = (uint8_t)(next_index + chunk_count);
     }
 
@@ -437,6 +528,8 @@ esp_err_t mcu_motion_service_init(void) {
     s_has_last_request = false;
     s_last_command_seq = 0u;
     s_command_inflight = false;
+    s_servo_feedback_cb = NULL;
+    s_servo_feedback_ctx = NULL;
     return ESP_OK;
 }
 
@@ -454,6 +547,32 @@ esp_err_t mcu_motion_submit_sequence(const mcu_motion_sequence_t *sequence) {
 
 esp_err_t mcu_motion_submit_chunked_sequence(const mcu_motion_chunked_sequence_t *sequence) {
     return mcu_motion_submit_chunked_sequence_with_seq(sequence, NULL);
+}
+
+esp_err_t mcu_motion_pwm_unlock(const mcu_motion_pwm_unlock_request_t *request) {
+    if (request == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (request->source < MCU_MOTION_SOURCE_UNKNOWN || request->source > MCU_MOTION_SOURCE_RECOVERY) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return mcu_motion_submit_pwm_unlock_frame(request);
+}
+
+esp_err_t mcu_motion_pwm_lock(const mcu_motion_pwm_lock_request_t *request) {
+    if (request == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (request->source < MCU_MOTION_SOURCE_UNKNOWN || request->source > MCU_MOTION_SOURCE_RECOVERY) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return mcu_motion_submit_pwm_lock_frame(request);
+}
+
+esp_err_t mcu_motion_set_servo_feedback_callback(mcu_motion_servo_feedback_cb_t cb, void *ctx) {
+    s_servo_feedback_cb = cb;
+    s_servo_feedback_ctx = ctx;
+    return ESP_OK;
 }
 
 esp_err_t mcu_motion_submit_with_seq(const mcu_motion_request_t *request, uint32_t *out_seq) {
@@ -569,6 +688,32 @@ esp_err_t mcu_motion_service_handle_link_event(const mcu_link_event_t *event) {
                      (int)decode_i16_le(&event->frame.payload[7]), (unsigned)decode_u16_le(&event->frame.payload[9]));
 #endif
             s_command_inflight = false;
+        }
+        return ESP_OK;
+    case MCU_LINK_RX_EVENT_SERVO_FEEDBACK:
+        if (s_servo_feedback_cb != NULL) {
+            mcu_motion_servo_feedback_t feedback = {0};
+
+            if ((mcu_motion_msg_id_t)event->frame.header.msg_id == MCU_MOTION_MSG_MOTION_STATE) {
+                if (event->frame.header.payload_len < 13u) {
+                    return ESP_ERR_INVALID_SIZE;
+                }
+                feedback.axis_mask = event->frame.payload[4];
+                feedback.x_angle_x10 = (int16_t)decode_u16_le(&event->frame.payload[5]);
+                feedback.y_angle_x10 = (int16_t)decode_u16_le(&event->frame.payload[7]);
+                feedback.y_raw = decode_u16_le(&event->frame.payload[9]);
+                feedback.x_raw = decode_u16_le(&event->frame.payload[11]);
+            } else {
+                if (event->frame.header.payload_len < 9u) {
+                    return ESP_ERR_INVALID_SIZE;
+                }
+                feedback.axis_mask = event->frame.payload[0];
+                feedback.y_raw = decode_u16_le(&event->frame.payload[1]);
+                feedback.y_angle_x10 = (int16_t)decode_u16_le(&event->frame.payload[3]);
+                feedback.x_raw = decode_u16_le(&event->frame.payload[5]);
+                feedback.x_angle_x10 = (int16_t)decode_u16_le(&event->frame.payload[7]);
+            }
+            s_servo_feedback_cb(&feedback, s_servo_feedback_ctx);
         }
         return ESP_OK;
     default:

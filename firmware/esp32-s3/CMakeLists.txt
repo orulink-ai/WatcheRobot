@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(PROJECT_VER "V2.3.0")
+set(PROJECT_VER "V2.4.1")
 
 # Extra component directories (nested structure)
 # ESP-IDF only scans components/ directly, so we need to specify subdirectories
@@ -17,6 +17,7 @@ set(EXTRA_COMPONENT_DIRS
     "components/protocols/ble_service"
     "components/protocols/discovery"
     "components/protocols/mcu_link"
+    "components/protocols/server_pairing"
     "components/protocols/ws_client"
     # Services
     "components/services/anim_service"
@@ -28,6 +29,7 @@ set(EXTRA_COMPONENT_DIRS
     "components/services/mcu_power_service"
     "components/services/mcu_sensor_service"
     "components/services/ota_service"
+    "components/services/power_monitor_service"
     "components/services/sfx_service"
     "components/services/voice_service"
     # Utils
@@ -59,7 +61,7 @@ if(EXISTS "${ANIM_GIF_DIR}")
     endif()
 endif()
 
-set(ANIM_OUTPUT_DIR ${CMAKE_BINARY_DIR}/generated/sdcard/anim)
+set(ANIM_OUTPUT_DIR ${CMAKE_SOURCE_DIR}/release/${PROJECT_VER}/sdcard/anim)
 set(ANIM_GENERATOR_ARGS
     --output-dir ${ANIM_OUTPUT_DIR}
     --input-dir ${ANIM_IMPORT_DIR}

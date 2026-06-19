@@ -272,6 +272,41 @@ static void test_jog_vector_request_interrupts_and_preserves_both_axes(void) {
     assert(s_stub.last_source == CONTROL_MOTION_SOURCE_BLE);
 }
 
+static void test_jog_vector_stream_interrupts_only_on_stream_start(void) {
+    control_jog_vector_request_t req = {
+        .has_x = true,
+        .has_y = true,
+        .x_velocity_deg_per_sec = 60,
+        .y_velocity_deg_per_sec = -45,
+        .timeout_ms = 240,
+        .source = CONTROL_MOTION_SOURCE_BLE,
+    };
+
+    install_stub_ops();
+    reset_stub();
+    assert(control_ingress_submit_jog_vector(&req) == ESP_OK);
+    assert(s_stub.interrupt_calls == 1);
+    assert(s_stub.jog_vector_calls == 1);
+
+    control_ingress_host_esp_timer_now_us = 120000;
+    req.x_velocity_deg_per_sec = 80;
+    req.y_velocity_deg_per_sec = -20;
+    assert(control_ingress_submit_jog_vector(&req) == ESP_OK);
+    assert(s_stub.interrupt_calls == 1);
+    assert(s_stub.jog_vector_calls == 2);
+    assert(s_stub.last_x_velocity == 80);
+    assert(s_stub.last_y_velocity == -20);
+
+    control_ingress_host_esp_timer_now_us = 361000;
+    req.x_velocity_deg_per_sec = -70;
+    req.y_velocity_deg_per_sec = 30;
+    assert(control_ingress_submit_jog_vector(&req) == ESP_OK);
+    assert(s_stub.interrupt_calls == 2);
+    assert(s_stub.jog_vector_calls == 3);
+    assert(s_stub.last_x_velocity == -70);
+    assert(s_stub.last_y_velocity == 30);
+}
+
 static void test_state_queue_reports_timeout_when_full(void) {
     control_state_set_request_t req = {.state_id = "standby"};
     int i;
@@ -281,6 +316,70 @@ static void test_state_queue_reports_timeout_when_full(void) {
         assert(control_ingress_submit_state_set(&req) == ESP_OK);
     }
     assert(control_ingress_submit_state_set(&req) == ESP_ERR_TIMEOUT);
+}
+
+static void assert_normalizes_resource(const char *raw, const char *expected) {
+    char normalized[64];
+
+    memset(normalized, 0xa5, sizeof(normalized));
+    control_ingress_normalize_resource_name_for_test(raw, normalized, sizeof(normalized));
+    assert(strcmp(normalized, expected) == 0);
+}
+
+static void test_resource_names_accept_design_export_aliases(void) {
+    assert_normalizes_resource("watcher_smile_10fps.json", "smile");
+    assert_normalizes_resource("2026.05.09/actions/watcher_fondle_love_10fps.json", "fondle_love");
+    assert_normalizes_resource("watcher-fondle-anger-10fps.json", "fondle_anger");
+    assert_normalizes_resource("look1.gif", "standby1");
+    assert_normalizes_resource("look2", "standby2");
+    assert_normalizes_resource("look3.gif", "standby3");
+    assert_normalizes_resource("look4.gif", "standby4");
+}
+
+static void test_ai_status_voice_flow_states_clear_text(void) {
+    control_ai_status_request_t req = {0};
+    const char *text;
+
+    snprintf(req.status, sizeof(req.status), "%s", "thinking");
+    snprintf(req.message, sizeof(req.message), "%s", "Thinking about reply");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
+
+    memset(&req, 0, sizeof(req));
+    snprintf(req.status, sizeof(req.status), "%s", "brain_update");
+    snprintf(req.message, sizeof(req.message), "%s", "processing request");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
+
+    memset(&req, 0, sizeof(req));
+    snprintf(req.image_name, sizeof(req.image_name), "%s", "watcher_speaking_10fps.json");
+    snprintf(req.message, sizeof(req.message), "%s", "Speaking response");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
+}
+
+static void test_ai_status_empty_message_clears_text(void) {
+    control_ai_status_request_t req = {0};
+    const char *text;
+
+    snprintf(req.status, sizeof(req.status), "%s", "happy");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
+}
+
+static void test_ai_status_non_voice_flow_preserves_text(void) {
+    control_ai_status_request_t req = {0};
+    const char *text;
+
+    snprintf(req.status, sizeof(req.status), "%s", "error");
+    snprintf(req.message, sizeof(req.message), "%s", "Cloud Offline");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "Cloud Offline") == 0);
 }
 
 int main(void) {
@@ -297,7 +396,13 @@ int main(void) {
         {"stop_interrupts_action_loop_before_servo_stop", test_stop_interrupts_action_loop_before_servo_stop},
         {"jog_vector_request_interrupts_and_preserves_both_axes",
          test_jog_vector_request_interrupts_and_preserves_both_axes},
+        {"jog_vector_stream_interrupts_only_on_stream_start",
+         test_jog_vector_stream_interrupts_only_on_stream_start},
         {"state_queue_reports_timeout_when_full", test_state_queue_reports_timeout_when_full},
+        {"resource_names_accept_design_export_aliases", test_resource_names_accept_design_export_aliases},
+        {"ai_status_voice_flow_states_clear_text", test_ai_status_voice_flow_states_clear_text},
+        {"ai_status_empty_message_clears_text", test_ai_status_empty_message_clears_text},
+        {"ai_status_non_voice_flow_preserves_text", test_ai_status_non_voice_flow_preserves_text},
     };
     size_t i;
 

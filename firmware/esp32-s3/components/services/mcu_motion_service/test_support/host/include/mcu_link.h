@@ -14,14 +14,26 @@
 #define MCU_MOTION_MSG_SERVO_SEQUENCE_BEGIN 0x07u
 #define MCU_MOTION_MSG_SERVO_SEQUENCE_CHUNK 0x08u
 #define MCU_MOTION_MSG_SERVO_SEQUENCE_END 0x09u
+#define MCU_MOTION_MSG_SERVO_PWM_UNLOCK 0x0Au
+#define MCU_MOTION_MSG_SERVO_FEEDBACK 0x0Bu
+#define MCU_MOTION_MSG_SERVO_PWM_LOCK 0x0Cu
 #define MCU_MOTION_MSG_MOTION_DONE 0x03u
+#define MCU_MOTION_MSG_MOTION_STATE 0x04u
 #define MCU_FRAME_FLAG_ACK_REQ 0x01u
+
+typedef uint8_t mcu_motion_msg_id_t;
+
+typedef struct {
+    uint16_t payload_len;
+    uint8_t msg_id;
+} test_mcu_frame_header_t;
 
 typedef struct mcu_link {
     int placeholder;
 } mcu_link_t;
 
 typedef struct {
+    test_mcu_frame_header_t header;
     uint8_t payload[128];
 } test_mcu_frame_t;
 
@@ -30,6 +42,7 @@ typedef enum {
     MCU_LINK_RX_EVENT_NACK,
     MCU_LINK_RX_EVENT_FAULT,
     MCU_LINK_RX_EVENT_MOTION_DONE,
+    MCU_LINK_RX_EVENT_SERVO_FEEDBACK,
 } mcu_link_rx_event_type_t;
 
 typedef struct {

@@ -1,6 +1,6 @@
 version: "1.0.0"
 description: "Util: boot_anim"
-url: "https://github.com/orulink-ai/WatcheRobot"
+url: "https://github.com/Ro-In-AI/WatcheRobot-Firmware"
 license: "Apache-2.0"
 targets:
   - esp32s3

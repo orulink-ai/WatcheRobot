@@ -162,6 +162,7 @@ int ws_send_ota_handshake(const char *transfer_id, const char *status);
  * Send the current servo position.
  */
 int ws_send_servo_position(float x_deg, float y_deg);
+int ws_send_servo_feedback(const char *axis, uint16_t raw, float angle);
 
 /**
  * Send a camera state event.
@@ -215,6 +216,14 @@ void ws_handle_tts_binary(const uint8_t *data, int len);
  * Call this when the LAST audio frame is received.
  */
 void ws_tts_complete(void);
+
+/**
+ * Abort any in-progress or queued TTS playback.
+ *
+ * This function is idempotent and may be called before starting microphone capture
+ * to ensure the audio path is no longer in playback mode.
+ */
+void ws_client_abort_tts_playback(void);
 
 /**
  * Check response timeout and recover wake-word mode if needed.

@@ -12,9 +12,11 @@ idf_component_register(
         "freertos"
         "hal_audio"
         "hal_servo"
+        "mcu_led_service"
         "ota_service"
         "behavior_state_service"
         "sfx_service"
+        "server_pairing"
         "voice_service"
         "anim_service"
 

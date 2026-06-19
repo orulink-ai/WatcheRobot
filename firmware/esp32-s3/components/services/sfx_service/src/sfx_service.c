@@ -1,8 +1,11 @@
 #include "sfx_service.h"
 
+#include "sfx_schedule.h"
+
 #include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -25,21 +28,24 @@ void mem_monitor_snapshot(const char *stage);
 #else
 #define SFX_TASK_STACK 4096
 #endif
-#define SFX_TASK_PRIORITY 5
+#define SFX_TASK_PRIORITY 7
 #define SFX_POLL_INTERVAL_MS 20
 #ifdef CONFIG_WATCHER_SFX_STREAM_CHUNK_SIZE
 #define SFX_STREAM_CHUNK_SIZE CONFIG_WATCHER_SFX_STREAM_CHUNK_SIZE
 #else
 #define SFX_STREAM_CHUNK_SIZE 2048
 #endif
-#define SFX_PREFETCH_LIMIT_BYTES (192 * 1024)
+#define SFX_PREFETCH_LIMIT_BYTES (256 * 1024)
+#define SFX_CACHE_TOTAL_LIMIT_BYTES (2 * 1024 * 1024)
 #define SFX_MAX_ID_LEN 32
 #define SFX_MAX_PATH_LEN 128
 #define SFX_MAX_MANIFEST_BYTES 8192
-
 typedef struct {
     char id[SFX_MAX_ID_LEN];
     char path[SFX_MAX_PATH_LEN];
+    uint8_t *audio_data;
+    size_t audio_size;
+    bool loaded_in_psram;
 } sfx_manifest_entry_t;
 
 typedef struct {
@@ -55,7 +61,7 @@ typedef struct {
     bool local_busy;
     bool stop_requested;
     uint32_t request_generation;
-    char pending_sound_id[SFX_MAX_ID_LEN];
+    sfx_schedule_t schedule;
     sfx_manifest_t manifest;
 } sfx_context_t;
 
@@ -76,10 +82,18 @@ static void sfx_copy_string(char *dst, size_t dst_size, const char *src) {
 }
 
 static void sfx_manifest_free(sfx_manifest_t *manifest) {
+    int i;
+
     if (manifest == NULL) {
         return;
     }
 
+    for (i = 0; i < manifest->count; ++i) {
+        free(manifest->entries[i].audio_data);
+        manifest->entries[i].audio_data = NULL;
+        manifest->entries[i].audio_size = 0U;
+        manifest->entries[i].loaded_in_psram = false;
+    }
     free(manifest->entries);
     manifest->entries = NULL;
     manifest->count = 0;
@@ -97,6 +111,21 @@ static void sfx_unlock(void) {
     if (s_ctx.lock != NULL) {
         xSemaphoreGive(s_ctx.lock);
     }
+}
+
+static int64_t sfx_now_ms(void) {
+    return esp_timer_get_time() / 1000LL;
+}
+
+static void sfx_bump_generation_locked(void) {
+    s_ctx.request_generation++;
+    if (s_ctx.request_generation == 0U) {
+        s_ctx.request_generation = 1U;
+    }
+}
+
+static void sfx_clear_schedule_locked(void) {
+    sfx_schedule_clear(&s_ctx.schedule);
 }
 
 static void sfx_normalize_path(const char *raw_path, char *out_path, size_t out_size) {
@@ -239,6 +268,31 @@ static void sfx_resolve_path_locked(const char *sound_id, char *out_path, size_t
     snprintf(out_path, out_size, "%s/%s.pcm", SFX_DIR, sound_id);
 }
 
+static bool sfx_find_cached_audio_locked(const char *sound_id, const uint8_t **audio_data, size_t *audio_size,
+                                         bool *loaded_in_psram) {
+    int i;
+
+    if (audio_data == NULL || audio_size == NULL || loaded_in_psram == NULL) {
+        return false;
+    }
+
+    *audio_data = NULL;
+    *audio_size = 0U;
+    *loaded_in_psram = false;
+    for (i = 0; i < s_ctx.manifest.count; ++i) {
+        sfx_manifest_entry_t *entry = &s_ctx.manifest.entries[i];
+
+        if (strcmp(entry->id, sound_id) != 0 || entry->audio_data == NULL || entry->audio_size == 0U) {
+            continue;
+        }
+        *audio_data = entry->audio_data;
+        *audio_size = entry->audio_size;
+        *loaded_in_psram = entry->loaded_in_psram;
+        return true;
+    }
+    return false;
+}
+
 static bool sfx_playback_should_abort(uint32_t expected_generation) {
     bool abort = true;
 
@@ -246,7 +300,8 @@ static bool sfx_playback_should_abort(uint32_t expected_generation) {
         return true;
     }
 
-    abort = s_ctx.stop_requested || s_ctx.cloud_audio_busy || s_ctx.request_generation != expected_generation;
+    abort = s_ctx.stop_requested || s_ctx.cloud_audio_busy || s_ctx.request_generation != expected_generation ||
+            sfx_schedule_has_due(&s_ctx.schedule, sfx_now_ms());
     sfx_unlock();
     return abort;
 }
@@ -322,6 +377,43 @@ static esp_err_t sfx_load_audio_blob(const char *sound_id, const char *sound_pat
     return ESP_OK;
 }
 
+static void sfx_cache_manifest_audio_locked(void) {
+    size_t total_cached = 0U;
+    int cached_count = 0;
+    int i;
+
+    for (i = 0; i < s_ctx.manifest.count; ++i) {
+        sfx_manifest_entry_t *entry = &s_ctx.manifest.entries[i];
+        uint8_t *audio_data = NULL;
+        size_t audio_size = 0U;
+        bool loaded_in_psram = false;
+        esp_err_t ret;
+
+        if (entry->audio_data != NULL || entry->path[0] == '\0') {
+            continue;
+        }
+
+        ret = sfx_load_audio_blob(entry->id, entry->path, &audio_data, &audio_size, &loaded_in_psram);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "SFX cache skipped '%s': %s", entry->id, esp_err_to_name(ret));
+            continue;
+        }
+        if (total_cached + audio_size > SFX_CACHE_TOTAL_LIMIT_BYTES) {
+            ESP_LOGW(TAG, "SFX cache budget reached, skipping '%s' (%u bytes)", entry->id, (unsigned int)audio_size);
+            free(audio_data);
+            continue;
+        }
+
+        entry->audio_data = audio_data;
+        entry->audio_size = audio_size;
+        entry->loaded_in_psram = loaded_in_psram;
+        total_cached += audio_size;
+        cached_count++;
+    }
+
+    ESP_LOGI(TAG, "Cached %d local sfx entries (%u bytes)", cached_count, (unsigned int)total_cached);
+}
+
 static bool sfx_playback_buffered(const char *sound_id, uint32_t generation, const uint8_t *audio_data,
                                   size_t audio_size) {
     uint8_t staging[SFX_STREAM_CHUNK_SIZE];
@@ -392,11 +484,13 @@ static bool sfx_is_cloud_audio_busy(void) {
 static void sfx_playback_file(const char *sound_id, uint32_t generation) {
     FILE *file = NULL;
     uint8_t *audio_data = NULL;
+    const uint8_t *playback_audio_data = NULL;
     size_t audio_size = 0U;
     char sound_path[SFX_MAX_PATH_LEN];
     bool audio_started = false;
     bool loaded_in_psram = false;
     bool use_prefetched_audio = false;
+    bool owns_audio_data = false;
     bool handoff_to_cloud_audio = false;
     esp_err_t preload_ret = ESP_OK;
 
@@ -404,12 +498,20 @@ static void sfx_playback_file(const char *sound_id, uint32_t generation) {
         return;
     }
     sfx_resolve_path_locked(sound_id, sound_path, sizeof(sound_path));
+    if (sfx_find_cached_audio_locked(sound_id, &playback_audio_data, &audio_size, &loaded_in_psram)) {
+        use_prefetched_audio = true;
+    }
     sfx_unlock();
 
-    preload_ret = sfx_load_audio_blob(sound_id, sound_path, &audio_data, &audio_size, &loaded_in_psram);
-    if (preload_ret == ESP_OK) {
-        use_prefetched_audio = true;
-    } else if (preload_ret == ESP_ERR_NOT_SUPPORTED || preload_ret == ESP_ERR_NO_MEM) {
+    if (!use_prefetched_audio) {
+        preload_ret = sfx_load_audio_blob(sound_id, sound_path, &audio_data, &audio_size, &loaded_in_psram);
+        if (preload_ret == ESP_OK) {
+            playback_audio_data = audio_data;
+            use_prefetched_audio = true;
+            owns_audio_data = true;
+        }
+    }
+    if (!use_prefetched_audio && (preload_ret == ESP_ERR_NOT_SUPPORTED || preload_ret == ESP_ERR_NO_MEM)) {
         file = fopen(sound_path, "rb");
         if (file == NULL) {
             ESP_LOGI(TAG, "Skip local sfx '%s': file not found (%s)", sound_id, sound_path);
@@ -418,7 +520,7 @@ static void sfx_playback_file(const char *sound_id, uint32_t generation) {
         }
         ESP_LOGW(TAG, "Playing local sfx '%s' with streaming fallback (reason=%s)", sound_id,
                  preload_ret == ESP_ERR_NO_MEM ? "no_mem" : "too_large");
-    } else {
+    } else if (!use_prefetched_audio) {
         ESP_LOGW(TAG, "Failed to preload local sfx '%s' from %s: %s", sound_id, sound_path,
                  esp_err_to_name(preload_ret));
         sfx_set_local_busy(false);
@@ -453,7 +555,7 @@ static void sfx_playback_file(const char *sound_id, uint32_t generation) {
     if (use_prefetched_audio) {
         ESP_LOGI(TAG, "Playing local sfx '%s' from %s via %s prefetch (%u bytes, chunk=%u)", sound_id, sound_path,
                  loaded_in_psram ? "psram" : "heap", (unsigned int)audio_size, (unsigned int)SFX_STREAM_CHUNK_SIZE);
-        sfx_playback_buffered(sound_id, generation, audio_data, audio_size);
+        sfx_playback_buffered(sound_id, generation, playback_audio_data, audio_size);
     } else {
         ESP_LOGI(TAG, "Playing local sfx '%s' from %s via streaming fallback (chunk=%u)", sound_id, sound_path,
                  (unsigned int)SFX_STREAM_CHUNK_SIZE);
@@ -463,7 +565,9 @@ static void sfx_playback_file(const char *sound_id, uint32_t generation) {
     if (file != NULL) {
         fclose(file);
     }
-    free(audio_data);
+    if (owns_audio_data) {
+        free(audio_data);
+    }
     if (audio_started) {
         handoff_to_cloud_audio = sfx_is_cloud_audio_busy();
         if (handoff_to_cloud_audio) {
@@ -479,21 +583,26 @@ static void sfx_playback_file(const char *sound_id, uint32_t generation) {
     sfx_set_local_busy(false);
 }
 
-static bool sfx_take_pending_request(char *sound_id, size_t sound_id_size, uint32_t *generation) {
+static bool sfx_take_scheduled_request(char *sound_id, size_t sound_id_size, uint32_t *generation) {
     bool has_request = false;
+    int64_t now_ms;
+    int64_t late_ms;
 
     if (!sfx_lock()) {
         return false;
     }
 
-    if (!s_ctx.cloud_audio_busy && s_ctx.pending_sound_id[0] != '\0') {
+    now_ms = sfx_now_ms();
+    if (!s_ctx.cloud_audio_busy) {
+        has_request = sfx_schedule_take_due(&s_ctx.schedule, now_ms, sound_id, sound_id_size, &late_ms);
+    }
+    if (has_request) {
         /* Keep the service busy across task handoff so callers do not think playback finished
          * between dequeuing the request and actually starting the speaker stream. */
         s_ctx.local_busy = true;
-        sfx_copy_string(sound_id, sound_id_size, s_ctx.pending_sound_id);
-        s_ctx.pending_sound_id[0] = '\0';
+        sfx_bump_generation_locked();
         *generation = s_ctx.request_generation;
-        has_request = true;
+        ESP_LOGI(TAG, "Dequeued local sfx '%s' late=%lldms", sound_id, (long long)late_ms);
     }
 
     sfx_unlock();
@@ -507,7 +616,7 @@ static void sfx_task(void *arg) {
     (void)arg;
 
     while (true) {
-        if (sfx_take_pending_request(sound_id, sizeof(sound_id), &generation)) {
+        if (sfx_take_scheduled_request(sound_id, sizeof(sound_id), &generation)) {
             sfx_playback_file(sound_id, generation);
             continue;
         }
@@ -536,6 +645,7 @@ esp_err_t sfx_service_init(void) {
         return ESP_FAIL;
     }
     sfx_manifest_load_locked();
+    sfx_cache_manifest_audio_locked();
     sfx_unlock();
 
     task_result = xTaskCreate(sfx_task, "sfx_task", SFX_TASK_STACK, NULL, SFX_TASK_PRIORITY, &s_ctx.task);
@@ -563,11 +673,19 @@ esp_err_t sfx_service_reload(void) {
     }
 
     sfx_manifest_load_locked();
+    sfx_cache_manifest_audio_locked();
     sfx_unlock();
     return ESP_OK;
 }
 
 esp_err_t sfx_service_play(const char *sound_id) {
+    return sfx_service_play_delayed(sound_id, 0);
+}
+
+esp_err_t sfx_service_play_delayed(const char *sound_id, int delay_ms) {
+    int safe_delay_ms;
+    char replaced_sound_id[SFX_MAX_ID_LEN];
+
     if (sound_id == NULL || sound_id[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
@@ -585,12 +703,17 @@ esp_err_t sfx_service_play(const char *sound_id) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_ctx.request_generation++;
-    if (s_ctx.request_generation == 0U) {
-        s_ctx.request_generation = 1U;
-    }
+    safe_delay_ms = delay_ms > 0 ? delay_ms : 0;
     s_ctx.stop_requested = false;
-    sfx_copy_string(s_ctx.pending_sound_id, sizeof(s_ctx.pending_sound_id), sound_id);
+    if (!sfx_schedule_enqueue(&s_ctx.schedule, sound_id, sfx_now_ms() + (int64_t)safe_delay_ms, replaced_sound_id,
+                              sizeof(replaced_sound_id))) {
+        sfx_unlock();
+        return ESP_FAIL;
+    }
+    if (replaced_sound_id[0] != '\0') {
+        ESP_LOGW(TAG, "SFX schedule full, replacing latest request '%s'", replaced_sound_id);
+    }
+    ESP_LOGI(TAG, "Scheduled local sfx '%s' delay=%dms", sound_id, safe_delay_ms);
     sfx_unlock();
     return ESP_OK;
 }
@@ -601,11 +724,8 @@ void sfx_service_stop(void) {
     }
 
     s_ctx.stop_requested = true;
-    s_ctx.pending_sound_id[0] = '\0';
-    s_ctx.request_generation++;
-    if (s_ctx.request_generation == 0U) {
-        s_ctx.request_generation = 1U;
-    }
+    sfx_clear_schedule_locked();
+    sfx_bump_generation_locked();
     sfx_unlock();
 }
 
@@ -616,7 +736,7 @@ bool sfx_service_is_busy(void) {
         return false;
     }
 
-    busy = s_ctx.local_busy || s_ctx.pending_sound_id[0] != '\0';
+    busy = s_ctx.local_busy || sfx_schedule_has_active(&s_ctx.schedule);
     sfx_unlock();
     return busy;
 }
@@ -633,11 +753,8 @@ void sfx_service_set_cloud_audio_busy(bool busy) {
     s_ctx.cloud_audio_busy = busy;
     if (busy) {
         s_ctx.stop_requested = true;
-        s_ctx.pending_sound_id[0] = '\0';
-        s_ctx.request_generation++;
-        if (s_ctx.request_generation == 0U) {
-            s_ctx.request_generation = 1U;
-        }
+        sfx_clear_schedule_locked();
+        sfx_bump_generation_locked();
     }
     sfx_unlock();
 }

@@ -108,6 +108,106 @@ static void fill_servo_cmd(cJSON *root, ws_servo_cmd_t *cmd) {
     cmd->duration_ms = get_int(data, "duration_ms", 100);
 }
 
+static void fill_servo_pwm_unlock_cmd(cJSON *root, ws_servo_pwm_unlock_cmd_t *cmd) {
+    cJSON *data = get_object(root, "data");
+    cJSON *axes;
+    cJSON *axis;
+
+    memset(cmd, 0, sizeof(*cmd));
+    if (!data) {
+        return;
+    }
+
+    copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
+    axes = cJSON_GetObjectItem(data, "axes");
+    if (cJSON_IsArray(axes)) {
+        cJSON_ArrayForEach(axis, axes) {
+            const char *value = cJSON_IsString(axis) ? axis->valuestring : NULL;
+            if (value == NULL || value[0] == '\0') {
+                continue;
+            }
+            if (value[0] == 'x' || value[0] == 'X') {
+                cmd->axis_mask |= 0x01u;
+            } else if (value[0] == 'y' || value[0] == 'Y') {
+                cmd->axis_mask |= 0x02u;
+            }
+        }
+        return;
+    }
+
+    axis = cJSON_GetObjectItem(data, "axis");
+    if (cJSON_IsString(axis) && axis->valuestring != NULL) {
+        if (axis->valuestring[0] == 'x' || axis->valuestring[0] == 'X') {
+            cmd->axis_mask |= 0x01u;
+        } else if (axis->valuestring[0] == 'y' || axis->valuestring[0] == 'Y') {
+            cmd->axis_mask |= 0x02u;
+        }
+    }
+}
+
+static void fill_servo_trajectory_cmd(cJSON *root, ws_servo_trajectory_cmd_t *cmd) {
+    cJSON *data = get_object(root, "data");
+    cJSON *frames;
+    cJSON *frame;
+    int count = 0;
+
+    memset(cmd, 0, sizeof(*cmd));
+    if (!data) {
+        return;
+    }
+
+    copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
+    frames = cJSON_GetObjectItem(data, "frames");
+    if (!cJSON_IsArray(frames)) {
+        return;
+    }
+
+    cJSON_ArrayForEach(frame, frames) {
+        ws_servo_trajectory_frame_t *out;
+
+        if (!cJSON_IsObject(frame) || count >= WS_SERVO_TRAJECTORY_MAX_FRAMES) {
+            continue;
+        }
+
+        out = &cmd->frames[count];
+        if (!get_float(frame, "x_deg", &out->x_deg) || !get_float(frame, "y_deg", &out->y_deg)) {
+            continue;
+        }
+        out->duration_ms = get_int(frame, "duration_ms", 80);
+        out->axis_mask = 0x03u;
+        out->motion_profile = 0u;
+        cJSON *axes = cJSON_GetObjectItem(frame, "axes");
+        if (cJSON_IsArray(axes)) {
+            cJSON *axis;
+            uint8_t axis_mask = 0u;
+            cJSON_ArrayForEach(axis, axes) {
+                const char *value = cJSON_IsString(axis) ? axis->valuestring : NULL;
+                if (value == NULL || value[0] == '\0') {
+                    continue;
+                }
+                if (value[0] == 'x' || value[0] == 'X') {
+                    axis_mask |= 0x01u;
+                } else if (value[0] == 'y' || value[0] == 'Y') {
+                    axis_mask |= 0x02u;
+                }
+            }
+            if (axis_mask != 0u) {
+                out->axis_mask = axis_mask;
+            }
+        }
+        {
+            const char *profile = get_string(frame, "profile");
+            if (profile != NULL &&
+                ((profile[0] == 'e' || profile[0] == 'E') || strcmp(profile, "1") == 0)) {
+                out->motion_profile = 1u;
+            }
+        }
+        count++;
+    }
+
+    cmd->frame_count = count;
+}
+
 static void fill_motion_jog_cmd(cJSON *root, ws_motion_jog_cmd_t *cmd) {
     cJSON *data = get_object(root, "data");
     const char *axis;
@@ -151,6 +251,43 @@ static void fill_state_cmd(cJSON *root, ws_state_cmd_t *cmd) {
     if (data != NULL) {
         copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
         copy_string(cmd->state_id, sizeof(cmd->state_id), get_string(data, "state_id"));
+    }
+}
+
+static void fill_sound_cmd(cJSON *root, ws_sound_cmd_t *cmd) {
+    cJSON *data = get_object(root, "data");
+
+    memset(cmd, 0, sizeof(*cmd));
+    if (data != NULL) {
+        copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
+        copy_string(cmd->sound_id, sizeof(cmd->sound_id), get_string(data, "sound_id"));
+        if (cmd->sound_id[0] == '\0') {
+            copy_string(cmd->sound_id, sizeof(cmd->sound_id), get_string(data, "sound_file"));
+        }
+        cmd->delay_ms = get_int(data, "delay_ms", 0);
+    }
+}
+
+static void fill_light_cmd(cJSON *root, ws_light_cmd_t *cmd) {
+    cJSON *data = get_object(root, "data");
+
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->brightness = 255;
+    cmd->green = 255;
+    if (data != NULL) {
+        copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
+        copy_string(cmd->mode, sizeof(cmd->mode), get_string(data, "mode"));
+        copy_string(cmd->effect, sizeof(cmd->effect), get_string(data, "effect"));
+        copy_string(cmd->zone, sizeof(cmd->zone), get_string(data, "zone"));
+        cmd->red = get_int(data, "red", 0);
+        cmd->green = get_int(data, "green", 255);
+        cmd->blue = get_int(data, "blue", 0);
+        cmd->secondary_red = get_int(data, "secondary_red", 0);
+        cmd->secondary_green = get_int(data, "secondary_green", 0);
+        cmd->secondary_blue = get_int(data, "secondary_blue", 0);
+        cmd->brightness = get_int(data, "brightness", 255);
+        cmd->period_ms = get_int(data, "period_ms", get_int(data, "hold_ms", 0));
+        cmd->repeat_count = get_int(data, "repeat_count", 0);
     }
 }
 
@@ -275,6 +412,34 @@ ws_msg_type_t ws_route_message(const char *json_str) {
             fill_servo_cmd(root, &cmd);
             g_router.on_servo(&cmd);
         }
+    } else if (strcmp(type, "ctrl.servo.pwm.unlock") == 0) {
+        msg_type = WS_MSG_CTRL_SERVO_PWM_UNLOCK;
+        if (g_router.on_servo_pwm_unlock) {
+            ws_servo_pwm_unlock_cmd_t cmd;
+            fill_servo_pwm_unlock_cmd(root, &cmd);
+            g_router.on_servo_pwm_unlock(&cmd);
+        }
+    } else if (strcmp(type, "ctrl.servo.pwm.lock") == 0) {
+        msg_type = WS_MSG_CTRL_SERVO_PWM_LOCK;
+        if (g_router.on_servo_pwm_lock) {
+            ws_servo_pwm_unlock_cmd_t cmd;
+            fill_servo_pwm_unlock_cmd(root, &cmd);
+            g_router.on_servo_pwm_lock(&cmd);
+        }
+    } else if (strcmp(type, "ctrl.servo.trajectory.play") == 0) {
+        msg_type = WS_MSG_CTRL_SERVO_TRAJECTORY_PLAY;
+        if (g_router.on_servo_trajectory_play) {
+            ws_servo_trajectory_cmd_t cmd;
+            fill_servo_trajectory_cmd(root, &cmd);
+            g_router.on_servo_trajectory_play(&cmd);
+        }
+    } else if (strcmp(type, "ctrl.light.set") == 0) {
+        msg_type = WS_MSG_CTRL_LIGHT_SET;
+        if (g_router.on_light_set) {
+            ws_light_cmd_t cmd;
+            fill_light_cmd(root, &cmd);
+            g_router.on_light_set(&cmd);
+        }
     } else if (strcmp(type, "ctrl.motion.jog") == 0) {
         msg_type = WS_MSG_CTRL_MOTION_JOG;
         if (g_router.on_motion_jog) {
@@ -307,6 +472,13 @@ ws_msg_type_t ws_route_message(const char *json_str) {
             ws_state_cmd_t cmd;
             fill_state_cmd(root, &cmd);
             g_router.on_state_set(&cmd);
+        }
+    } else if (strcmp(type, "ctrl.sound.play") == 0) {
+        msg_type = WS_MSG_CTRL_SOUND_PLAY;
+        if (g_router.on_sound_play) {
+            ws_sound_cmd_t cmd;
+            fill_sound_cmd(root, &cmd);
+            g_router.on_sound_play(&cmd);
         }
     } else if (strcmp(type, "ctrl.camera.video_config") == 0) {
         msg_type = WS_MSG_CTRL_CAMERA_VIDEO_CONFIG;

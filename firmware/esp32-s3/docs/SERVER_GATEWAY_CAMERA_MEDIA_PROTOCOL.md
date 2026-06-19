@@ -602,6 +602,6 @@ decode(jpeg)
 
 如果只保留一句最重要的话，可以这样说：
 
-> Watcher 的图片流和视频流都不是 H.264，而是 `WSPK + JPEG/MJPEG`。
-> 图片是 `frame_type=3` 的单张 JPEG，视频是 `frame_type=2` 的连续 JPEG 帧。
+> Watcher 的图片流和视频流都不是 H.264，而是 `WSPK + JPEG/MJPEG`。  
+> 图片是 `frame_type=3` 的单张 JPEG，视频是 `frame_type=2` 的连续 JPEG 帧。  
 > JPEG 负载后面允许有少量 `0x00` padding，服务端必须按最后一个 `FFD9` 截断后再解码。

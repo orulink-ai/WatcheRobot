@@ -30,7 +30,7 @@ typedef enum {
 
 #define MCU_MOTION_SEQUENCE_MAX_SEGMENTS 15u
 #define MCU_MOTION_SEQUENCE_CHUNK_MAX_SEGMENTS 15u
-#define MCU_MOTION_CHUNKED_SEQUENCE_MAX_SEGMENTS 32u
+#define MCU_MOTION_CHUNKED_SEQUENCE_MAX_SEGMENTS 64u
 
 typedef struct {
     uint8_t axis_mask;
@@ -68,6 +68,26 @@ typedef struct {
 } mcu_motion_sequence_t;
 
 typedef struct {
+    uint8_t axis_mask;
+    mcu_motion_source_t source;
+} mcu_motion_pwm_unlock_request_t;
+
+typedef struct {
+    uint8_t axis_mask;
+    mcu_motion_source_t source;
+} mcu_motion_pwm_lock_request_t;
+
+typedef struct {
+    uint8_t axis_mask;
+    uint16_t x_raw;
+    int16_t x_angle_x10;
+    uint16_t y_raw;
+    int16_t y_angle_x10;
+} mcu_motion_servo_feedback_t;
+
+typedef void (*mcu_motion_servo_feedback_cb_t)(const mcu_motion_servo_feedback_t *feedback, void *ctx);
+
+typedef struct {
     uint16_t sequence_id;
     mcu_motion_source_t source;
     uint8_t segment_count;
@@ -83,6 +103,9 @@ esp_err_t mcu_motion_submit_sequence_with_seq(const mcu_motion_sequence_t *seque
 esp_err_t mcu_motion_submit_sequence(const mcu_motion_sequence_t *sequence);
 esp_err_t mcu_motion_submit_chunked_sequence_with_seq(const mcu_motion_chunked_sequence_t *sequence, uint32_t *out_end_seq);
 esp_err_t mcu_motion_submit_chunked_sequence(const mcu_motion_chunked_sequence_t *sequence);
+esp_err_t mcu_motion_pwm_unlock(const mcu_motion_pwm_unlock_request_t *request);
+esp_err_t mcu_motion_pwm_lock(const mcu_motion_pwm_lock_request_t *request);
+esp_err_t mcu_motion_set_servo_feedback_callback(mcu_motion_servo_feedback_cb_t cb, void *ctx);
 esp_err_t mcu_motion_service_get_last_request(mcu_motion_request_t *out_request);
 esp_err_t mcu_motion_stop(mcu_motion_source_t source);
 esp_err_t mcu_motion_service_handle_link_event(const mcu_link_event_t *event);

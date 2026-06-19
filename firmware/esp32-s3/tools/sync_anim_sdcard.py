@@ -4,7 +4,7 @@ Copy generated AnimPack assets to an SD-card style target directory and verify
 the copy matches the source exactly.
 
 Default behavior:
-  - source: build/generated/sdcard/anim
+  - source: release/V2.3.0/sdcard/anim
   - target: <target-root>/anim
 
 The script removes the target anim directory before copying so the result is a
@@ -22,7 +22,7 @@ from pathlib import Path
 PROJECT_VERSION = "V2.3.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
-DEFAULT_SOURCE_DIR = PROJECT_ROOT / "build" / "generated" / "sdcard" / "anim"
+DEFAULT_SOURCE_DIR = PROJECT_ROOT / "release" / PROJECT_VERSION / "sdcard" / "anim"
 
 
 def file_hash(path: Path) -> str:
@@ -51,9 +51,9 @@ def resolve_source_dir(explicit_source_dir: str | None) -> Path:
     if DEFAULT_SOURCE_DIR.is_dir():
         return DEFAULT_SOURCE_DIR.resolve()
 
-    release_root = PROJECT_ROOT / "build"
+    release_root = PROJECT_ROOT / "release"
     candidates = sorted(
-        (path for path in release_root.glob("*/generated/sdcard/anim") if path.is_dir()),
+        (path for path in release_root.glob("*/sdcard/anim") if path.is_dir()),
         key=lambda path: str(path).lower(),
     )
     if not candidates:

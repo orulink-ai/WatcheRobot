@@ -35,6 +35,7 @@
 #define ANIM_SWITCH_PREFILL_FRAMES 3
 #define ANIM_PERF_LOG_FRAME_INTERVAL 10U
 #define ANIM_INVALID_SLOT_FRAME (-1)
+#define ANIM_FRAME_LOAD_FAILURE_LIMIT 3U
 
 typedef enum {
     ANIM_PLAYER_IDLE = 0,
@@ -55,6 +56,7 @@ typedef struct {
     int buffered_frames;
     int next_frame_to_load;
     int next_slot_to_load;
+    uint32_t load_failure_count;
     uint32_t displayed_frames;
     uint32_t stats_frames;
     uint32_t underrun_count;
@@ -130,6 +132,14 @@ static int playback_loop_duration_ms(anim_playback_t *playback) {
         total_ms += effective_delay_ms(playback, index);
     }
     return total_ms > 0 && total_ms <= INT_MAX ? (int)total_ms : 0;
+}
+
+static bool anim_type_should_loop(emoji_anim_type_t type, const anim_stream_t *stream) {
+    if (type == EMOJI_ANIM_RECHARGE) {
+        return false;
+    }
+
+    return stream != NULL && stream->info.loop;
 }
 
 static void playback_reset_perf_stats(anim_playback_t *playback, int64_t now_us) {
@@ -473,7 +483,7 @@ static bool playback_prepare_load_job(anim_playback_t *playback, bool target_pen
 
     int frame_index = playback->next_frame_to_load;
     if (frame_index >= frame_count) {
-        if (!playback->stream.info.loop) {
+        if (!anim_type_should_loop(playback->type, &playback->stream)) {
             return false;
         }
         frame_index %= frame_count;
@@ -516,7 +526,35 @@ static bool playback_commit_loaded_frame(anim_playback_t *playback, const anim_l
     playback->buffered_frames++;
     playback->next_frame_to_load = job->frame_index + 1;
     playback->next_slot_to_load = (job->slot_index + 1) % playback->slot_count;
+    playback->load_failure_count = 0;
     playback_note_read_frame(playback, read_us);
+    return true;
+}
+
+static bool playback_note_load_failure(anim_playback_t *playback, const anim_load_job_t *job) {
+    if (playback == NULL || job == NULL || !job->valid || !playback->in_use) {
+        return false;
+    }
+    if (playback->type != job->type || playback->generation_id != job->generation_id ||
+        playback->next_slot_to_load != job->slot_index) {
+        return false;
+    }
+
+    anim_load_job_t expected_job = {0};
+    if (!playback_prepare_load_job(playback, job->target_pending, &expected_job) ||
+        expected_job.frame_index != job->frame_index || expected_job.slot_index != job->slot_index) {
+        return false;
+    }
+
+    playback->load_failure_count++;
+    if (playback->load_failure_count < ANIM_FRAME_LOAD_FAILURE_LIMIT) {
+        return true;
+    }
+
+    ESP_LOGW(TAG, "Skipping unreadable frame %d for %s after %lu failed read(s)", job->frame_index,
+             emoji_type_name(job->type), (unsigned long)playback->load_failure_count);
+    playback->next_frame_to_load = job->frame_index + 1;
+    playback->load_failure_count = 0;
     return true;
 }
 
@@ -540,6 +578,15 @@ static bool playback_advance(anim_playback_t *playback) {
     playback->current_frame_index = playback->slot_frame_index[next_slot];
     playback->buffered_frames--;
     return true;
+}
+
+static bool playback_reached_final_frame(const anim_playback_t *playback) {
+    if (playback == NULL || !playback->in_use || anim_type_should_loop(playback->type, &playback->stream)) {
+        return false;
+    }
+
+    return playback->stream.frame_count > 0 && playback->current_frame_index >= playback->stream.frame_count - 1 &&
+           playback->buffered_frames <= 1;
 }
 
 static const lv_img_dsc_t *playback_current_descriptor(anim_playback_t *playback) {
@@ -675,6 +722,11 @@ static void anim_worker_task(void *param) {
             ESP_LOGW(TAG, "Failed to read frame %d for %s", job.frame_index, emoji_type_name(job.type));
             anim_stream_close(&worker_stream);
             worker_stream_type = EMOJI_ANIM_NONE;
+            if (g_player_mutex != NULL && xSemaphoreTake(g_player_mutex, portMAX_DELAY) == pdTRUE) {
+                anim_playback_t *target = job.target_pending ? &g_pending_playback : &g_active_playback;
+                (void)playback_note_load_failure(target, &job);
+                xSemaphoreGive(g_player_mutex);
+            }
             vTaskDelay(pdMS_TO_TICKS(ANIM_WORKER_IDLE_MS));
             continue;
         }
@@ -707,9 +759,19 @@ static void anim_frame_timer_cb(lv_timer_t *timer) {
     const lv_img_dsc_t *latest_frame = NULL;
     int64_t due_us = g_next_frame_deadline_us;
     if (!playback_advance(&g_active_playback)) {
-        playback_note_underrun(&g_active_playback);
-        int delay_ms = effective_delay_ms(&g_active_playback, g_active_playback.current_frame_index);
-        g_next_frame_deadline_us = now_us + (int64_t)delay_ms * 1000LL;
+        if (playback_reached_final_frame(&g_active_playback)) {
+            if (g_frame_timer != NULL) {
+                lv_timer_pause(g_frame_timer);
+            }
+            g_state = ANIM_PLAYER_IDLE;
+            g_requested_type = EMOJI_ANIM_NONE;
+            g_next_frame_deadline_us = 0;
+            ESP_LOGI(TAG, "Animation completed and held on final frame: %s", emoji_type_name(g_current_type));
+        } else {
+            playback_note_underrun(&g_active_playback);
+            int delay_ms = effective_delay_ms(&g_active_playback, g_active_playback.current_frame_index);
+            g_next_frame_deadline_us = now_us + (int64_t)delay_ms * 1000LL;
+        }
     } else {
         latest_frame = playback_current_descriptor(&g_active_playback);
         g_current_type = g_active_playback.type;

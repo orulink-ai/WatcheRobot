@@ -151,6 +151,24 @@ static esp_err_t mcu_link_handle_frame(mcu_link_t *link, const mcu_frame_t *fram
             }
             return ESP_OK;
         }
+        if ((mcu_motion_msg_id_t)frame->header.msg_id == MCU_MOTION_MSG_MOTION_STATE) {
+            if (frame->header.payload_len < 13u) {
+                return ESP_ERR_NOT_FOUND;
+            }
+            if (out_event != NULL) {
+                out_event->type = MCU_LINK_RX_EVENT_SERVO_FEEDBACK;
+            }
+            return ESP_OK;
+        }
+        if ((mcu_motion_msg_id_t)frame->header.msg_id == MCU_MOTION_MSG_SERVO_FEEDBACK) {
+            if (frame->header.payload_len < 9u) {
+                return ESP_ERR_NOT_FOUND;
+            }
+            if (out_event != NULL) {
+                out_event->type = MCU_LINK_RX_EVENT_SERVO_FEEDBACK;
+            }
+            return ESP_OK;
+        }
         break;
     case MCU_FRAME_CLASS_LED:
         if ((mcu_led_msg_id_t)frame->header.msg_id == MCU_LED_MSG_DONE) {

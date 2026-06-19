@@ -32,8 +32,8 @@ The branch has been brought to a hardware-validated baseline.
 
 Authoring and generated assets live in these locations:
 
-- Source GIFs: `firmware/esp32-s3/assets/gif/`
-- Generated assets: `firmware/esp32-s3/build/generated/sdcard/anim/`
+- Source GIFs: `firmware/s3/assets/gif/`
+- Generated assets: `firmware/s3/release/V2.2.1/sdcard/anim/`
 - Device runtime path: `/sdcard/anim/`
 
 The runtime expects at least:
@@ -66,12 +66,12 @@ The current branch has been validated against this baseline:
   transitions no longer flash white or show `No data`.
 - Generated assets can be mirrored to an SD-card root with
   `tools/sync_anim_sdcard.py`.
-- GitHub Release packaging now produces both a firmware flash bundle and an
-  SD-card animation bundle for `V2.2.1`.
+- Release packaging now produces both a firmware flash bundle and an SD-card
+  animation bundle for `V2.2.1`.
 
 ## Daily Workflow
 
-From `firmware/esp32-s3`:
+From `firmware/s3`:
 
 ```powershell
 python tools/generate_anim_assets.py

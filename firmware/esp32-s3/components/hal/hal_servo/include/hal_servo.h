@@ -13,6 +13,11 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#define HAL_SERVO_AXIS_MASK_X 0x01u
+#define HAL_SERVO_AXIS_MASK_Y 0x02u
 
 /** Servo axis selector */
 typedef enum {
@@ -35,6 +40,24 @@ typedef enum {
     HAL_SERVO_MOTION_PROFILE_LINEAR = 0,
     HAL_SERVO_MOTION_PROFILE_EASE_IN_OUT = 1,
 } hal_servo_motion_profile_t;
+
+typedef struct {
+    uint8_t axis_mask;
+    int16_t x_deg_x10;
+    int16_t y_deg_x10;
+    uint16_t duration_ms;
+    hal_servo_motion_profile_t motion_profile;
+} hal_servo_trajectory_frame_t;
+
+typedef struct {
+    uint8_t axis_mask;
+    uint16_t x_raw;
+    int16_t x_angle_x10;
+    uint16_t y_raw;
+    int16_t y_angle_x10;
+} hal_servo_feedback_t;
+
+typedef void (*hal_servo_feedback_cb_t)(const hal_servo_feedback_t *feedback, void *ctx);
 
 /**
  * @brief Initialize servo compatibility facade.
@@ -121,6 +144,12 @@ esp_err_t hal_servo_send_cmd(const char *id, int angle_deg, int duration_ms);
  */
 esp_err_t hal_servo_cancel_all(void);
 esp_err_t hal_servo_cancel_all_with_source(hal_servo_motion_source_t source);
+esp_err_t hal_servo_pwm_unlock(uint8_t axis_mask);
+esp_err_t hal_servo_pwm_lock(uint8_t axis_mask);
+esp_err_t hal_servo_play_trajectory(const hal_servo_trajectory_frame_t *frames,
+                                    size_t frame_count,
+                                    hal_servo_motion_source_t source);
+esp_err_t hal_servo_set_feedback_callback(hal_servo_feedback_cb_t cb, void *ctx);
 
 /**
  * @brief Get the last commanded servo angle.

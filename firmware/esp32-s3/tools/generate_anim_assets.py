@@ -27,7 +27,7 @@ except ImportError as exc:  # pragma: no cover - runtime dependency check
     raise SystemExit("Pillow is required. Install it with: python -m pip install Pillow") from exc
 
 
-PROJECT_VERSION = "V2.3.0"
+PROJECT_VERSION = "V2.4.1"
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "assets" / "gif"
@@ -68,6 +68,7 @@ ANIM_TYPES = [
 
 NON_LOOP_ANIM_TYPES = {
     "fondle_love",
+    "recharge",
 }
 
 NAME_LEN = 24
@@ -81,6 +82,9 @@ FRAME_DESC_SIZE = struct.calcsize(FRAME_DESC_FMT)
 MANIFEST_ENTRY_FMT = f"<HHHHHB3x{NAME_LEN}s{PATH_LEN}s"
 PACK_HEADER_FMT = "<4sHHHHBBHIII"
 FRAME_FLAG_INDEXED8 = 0x0001
+RAW_FRAME_ANIM_TYPES = {
+    "bluetooth",
+}
 
 LEGACY_IMPORT_MAP = {
     "watcher-boot": "boot",
@@ -269,8 +273,9 @@ def write_animpack(
         raise ValueError(f"Frame size mismatch in {anim_type}")
 
     encoded_frames: list[tuple[bytes, int]] = []
+    use_raw_frames = anim_type in RAW_FRAME_ANIM_TYPES
     for payload in raw_payloads:
-        indexed_payload = encode_indexed8_exact(payload)
+        indexed_payload = None if use_raw_frames else encode_indexed8_exact(payload)
         if indexed_payload is not None:
             encoded_frames.append((indexed_payload, FRAME_FLAG_INDEXED8))
         else:

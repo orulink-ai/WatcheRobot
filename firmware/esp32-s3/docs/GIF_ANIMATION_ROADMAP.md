@@ -22,9 +22,9 @@ The current branch baseline is complete and validated for:
 
 ## Phase 2: Release Packaging Completed
 
-- Promote the GIF / AnimPack branch baseline into the maintained GitHub Release track.
+- Promote the GIF / AnimPack branch baseline into the maintained release track.
 - Package firmware flash binaries and SD-card animation assets as separate
-  GitHub Release assets.
+  deliverables under `release/V2.2.1/`.
 - Refresh top-level release documentation so `V2.2.1` is the current
   baseline for validation and distribution.
 

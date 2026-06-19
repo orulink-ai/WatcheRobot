@@ -32,6 +32,8 @@
 #include "esp_gatts_api.h"
 #include "hal_servo.h"
 #include "nvs_flash.h"
+#include "server_pairing.h"
+#include "sfx_service.h"
 #include "wifi_manager.h"
 
 #define TAG "BLE_SVC"
@@ -50,7 +52,7 @@ enum {
 #define PROFILE_APP_IDX             0
 #define ESP_APP_ID                  0x55
 #define SVC_INST_ID                 0
-#define GATTS_CHAR_VAL_LEN_MAX      256
+#define GATTS_CHAR_VAL_LEN_MAX      512
 #define CHAR_DECLARATION_SIZE       (sizeof(uint8_t))
 #define BLE_ADV_MAX_LEN             31
 #define BLE_JOG_DEFAULT_TIMEOUT_MS  250
@@ -360,6 +362,54 @@ static void ble_copy_json_string(cJSON *parent, const char *key, char *out, size
     if (cJSON_IsString(item) && item->valuestring != NULL) {
         snprintf(out, out_size, "%s", item->valuestring);
     }
+}
+
+static int ble_get_json_int(cJSON *parent, const char *key, int default_value)
+{
+    cJSON *item;
+
+    if (parent == NULL || key == NULL) {
+        return default_value;
+    }
+
+    item = cJSON_GetObjectItem(parent, key);
+    if (item != NULL && cJSON_IsNumber(item)) {
+        return item->valueint;
+    }
+    return default_value;
+}
+
+static void ble_normalize_sound_id(const char *raw, char *out, size_t out_size)
+{
+    const char *base;
+    const char *ext;
+    size_t len;
+    size_t i;
+
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (raw == NULL || raw[0] == '\0') {
+        return;
+    }
+
+    base = raw;
+    for (i = 0; raw[i] != '\0'; ++i) {
+        if (raw[i] == '/' || raw[i] == '\\') {
+            base = &raw[i + 1];
+        }
+    }
+
+    ext = strrchr(base, '.');
+    len = (ext != NULL && ext > base) ? (size_t)(ext - base) : strlen(base);
+    if (len >= out_size) {
+        len = out_size - 1;
+    }
+    for (i = 0; i < len; ++i) {
+        out[i] = (char)tolower((unsigned char)base[i]);
+    }
+    out[len] = '\0';
 }
 
 static void ble_format_wifi_status(char *response, size_t response_len)
@@ -969,6 +1019,36 @@ static esp_err_t ble_process_json_payload(const char *json_text,
         return ret;
     }
 
+    if (strcmp(message_type, "ctrl.sound.play") == 0) {
+        char raw_sound_id[96];
+        char sound_id[96];
+        int delay_ms = 0;
+        esp_err_t ret;
+
+        ble_copy_json_string(data, "sound_id", raw_sound_id, sizeof(raw_sound_id));
+        if (raw_sound_id[0] == '\0') {
+            ble_copy_json_string(data, "sound_file", raw_sound_id, sizeof(raw_sound_id));
+        }
+        delay_ms = ble_get_json_int(data, "delay_ms", 0);
+        ble_normalize_sound_id(raw_sound_id, sound_id, sizeof(sound_id));
+        cJSON_Delete(root);
+        if (sound_id[0] == '\0') {
+            ble_build_sys_nack_json(message_type, command_id, "invalid_sound_payload", 400, response, response_len);
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        ret = sfx_service_play_delayed(sound_id, delay_ms);
+        if (ret == ESP_OK) {
+            return ble_build_sys_ack_json(message_type, command_id, response, response_len);
+        }
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ble_build_sys_nack_json(message_type, command_id, "audio_busy_tts", 503, response, response_len);
+            return ret;
+        }
+        ble_build_sys_nack_json(message_type, command_id, "sound_play_failed", 500, response, response_len);
+        return ret;
+    }
+
     if (strcmp(message_type, "evt.ai.status") == 0) {
         control_ai_status_request_t req = {0};
         esp_err_t ret;
@@ -1046,6 +1126,48 @@ static esp_err_t ble_process_json_payload(const char *json_text,
             ble_build_sys_nack_json(message_type, command_id, "wifi_config_failed", 500, response, response_len);
             return ESP_FAIL;
         }
+        return ble_build_sys_ack_json(message_type, command_id, response, response_len);
+    }
+
+    if (strcmp(message_type, "cfg.server.pair") == 0) {
+        server_pairing_config_t config = {0};
+        int ws_port;
+        int discovery_port;
+        esp_err_t ret;
+
+        ble_copy_json_string(data, "server_id", config.server_id, sizeof(config.server_id));
+        ble_copy_json_string(data, "server_name", config.server_name, sizeof(config.server_name));
+        ble_copy_json_string(data, "pairing_id", config.pairing_id, sizeof(config.pairing_id));
+        ble_copy_json_string(data, "pairing_secret", config.pairing_secret, sizeof(config.pairing_secret));
+        ble_copy_json_string(data, "protocol_version", config.protocol_version, sizeof(config.protocol_version));
+        ws_port = ble_get_json_int(data, "ws_port", 0);
+        discovery_port = ble_get_json_int(data, "discovery_port", 0);
+        cJSON_Delete(root);
+
+        if (config.protocol_version[0] == '\0') {
+            snprintf(config.protocol_version, sizeof(config.protocol_version), "%s", SERVER_PAIRING_PROTOCOL_VERSION);
+        }
+        if (config.server_id[0] == '\0' ||
+            config.pairing_id[0] == '\0' ||
+            strlen(config.pairing_secret) != 64U ||
+            ws_port <= 0 ||
+            ws_port > 65535 ||
+            discovery_port <= 0 ||
+            discovery_port > 65535) {
+            ble_build_sys_nack_json(message_type, command_id, "invalid_server_pairing_payload", 400, response, response_len);
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        config.configured = true;
+        config.ws_port = (uint16_t)ws_port;
+        config.discovery_port = (uint16_t)discovery_port;
+        ret = server_pairing_save(&config);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "server pairing save failed: %s", esp_err_to_name(ret));
+            ble_build_sys_nack_json(message_type, command_id, "server_pairing_save_failed", 500, response, response_len);
+            return ret;
+        }
+        ESP_LOGI(TAG, "Server pairing stored: server_id=%s pairing_id=%s", config.server_id, config.pairing_id);
         return ble_build_sys_ack_json(message_type, command_id, response, response_len);
     }
 

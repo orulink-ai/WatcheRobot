@@ -12,6 +12,8 @@
 static bool anim_validator(const char *anim_id, void *ctx) {
     (void)ctx;
     return anim_id != NULL && (strcmp(anim_id, "standby") == 0 || strcmp(anim_id, "happy") == 0 ||
+                               strcmp(anim_id, "standby1") == 0 || strcmp(anim_id, "standby2") == 0 ||
+                               strcmp(anim_id, "standby3") == 0 || strcmp(anim_id, "standby4") == 0 ||
                                strcmp(anim_id, "listening") == 0 || strcmp(anim_id, "fondle_love") == 0);
 }
 
@@ -321,6 +323,74 @@ static void test_production_fondle_love_is_one_shot(void) {
     free(json);
 }
 
+static void test_production_recharge_is_one_shot_hold(void) {
+    behavior_catalog_t catalog = {0};
+    const behavior_state_def_t *recharge = NULL;
+    size_t json_len = 0;
+    char *json = read_file(BEHAVIOR_PRODUCTION_STATES_JSON, &json_len);
+
+    assert(json != NULL);
+    assert(behavior_catalog_parse_json(json, json_len, NULL, NULL, &catalog) == ESP_OK);
+    recharge = find_state(&catalog, "recharge");
+
+    assert(recharge != NULL);
+    assert(!recharge->loop);
+    assert(recharge->hold_until_replaced);
+    assert(recharge->expression_count == 1);
+    assert(strcmp(recharge->expression[0].anim, "recharge") == 0);
+    assert(recharge->sound_count == 1);
+    assert(strcmp(recharge->sound[0].sound_id, "recharge") == 0);
+
+    behavior_free_catalog(&catalog);
+    free(json);
+}
+
+static void test_production_standby_variants_are_states(void) {
+    behavior_catalog_t catalog = {0};
+    size_t json_len = 0;
+    char *json = read_file(BEHAVIOR_PRODUCTION_STATES_JSON, &json_len);
+    static const char *variants[] = {"standby1", "standby2", "standby3", "standby4"};
+    size_t index;
+
+    assert(json != NULL);
+    assert(behavior_catalog_parse_json(json, json_len, NULL, NULL, &catalog) == ESP_OK);
+
+    for (index = 0; index < ARRAY_SIZE(variants); ++index) {
+        const behavior_state_def_t *state = find_state(&catalog, variants[index]);
+
+        assert(state != NULL);
+        assert(state->loop);
+        assert(state->expression_count == 1);
+        assert(strcmp(state->expression[0].anim, variants[index]) == 0);
+    }
+
+    behavior_free_catalog(&catalog);
+    free(json);
+}
+
+static void test_production_voice_flow_states_clear_text_and_keep_anim(void) {
+    behavior_catalog_t catalog = {0};
+    size_t json_len = 0;
+    char *json = read_file(BEHAVIOR_PRODUCTION_STATES_JSON, &json_len);
+    static const char *voice_states[] = {"listening", "thinking", "processing", "speaking"};
+    size_t index;
+
+    assert(json != NULL);
+    assert(behavior_catalog_parse_json(json, json_len, NULL, NULL, &catalog) == ESP_OK);
+
+    for (index = 0; index < ARRAY_SIZE(voice_states); ++index) {
+        const behavior_state_def_t *state = find_state(&catalog, voice_states[index]);
+
+        assert(state != NULL);
+        assert(state->expression_count == 1);
+        assert(strcmp(state->expression[0].anim, voice_states[index]) == 0);
+        assert(strcmp(state->expression[0].text, "") == 0);
+    }
+
+    behavior_free_catalog(&catalog);
+    free(json);
+}
+
 int main(void) {
     const struct {
         const char *name;
@@ -340,6 +410,10 @@ int main(void) {
         {"catalog_parser_rejects_invalid_motion_angle", test_catalog_parser_rejects_invalid_motion_angle},
         {"catalog_parser_clamps_y_axis_angle", test_catalog_parser_clamps_y_axis_angle},
         {"production_fondle_love_is_one_shot", test_production_fondle_love_is_one_shot},
+        {"production_recharge_is_one_shot_hold", test_production_recharge_is_one_shot_hold},
+        {"production_standby_variants_are_states", test_production_standby_variants_are_states},
+        {"production_voice_flow_states_clear_text_and_keep_anim",
+         test_production_voice_flow_states_clear_text_and_keep_anim},
     };
     size_t i;
 

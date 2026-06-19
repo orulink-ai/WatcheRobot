@@ -22,6 +22,7 @@
 #include "hal_audio.h"
 #include "ota_service.h"
 #include "sdkconfig.h"
+#include "server_pairing.h"
 #include "sfx_service.h"
 #include "voice_service.h"
 #include "ws_router.h"
@@ -970,7 +971,7 @@ static bool ws_prepare_tts_playback(bool recovering_existing_stream) {
 
     if (!s_tts_playing) {
         s_tts_playing = true;
-        behavior_state_set_with_resources("speaking", NULL, 0, NULL, "");
+        behavior_state_set_with_resources("speaking", "", 0, NULL, "");
     }
 
     return true;
@@ -999,6 +1000,10 @@ static void ws_abort_tts_playback(void) {
     s_tts_playing = false;
     sfx_service_set_cloud_audio_busy(false);
     ws_resume_wake_word_after_tts();
+}
+
+void ws_client_abort_tts_playback(void) {
+    ws_abort_tts_playback();
 }
 
 static void ws_finish_tts_playback(void) {
@@ -1209,6 +1214,7 @@ static void ws_get_mac_string(char *out, size_t out_size) {
 
 static int ws_send_client_hello(void) {
     cJSON *data = cJSON_CreateObject();
+    server_pairing_config_t pairing = {0};
 
     if (data == NULL) {
         return -1;
@@ -1216,6 +1222,10 @@ static int ws_send_client_hello(void) {
 
     cJSON_AddStringToObject(data, "role", "hardware");
     cJSON_AddStringToObject(data, "fw_version", ota_service_get_fw_version());
+    if (server_pairing_load(&pairing) == ESP_OK && pairing.configured) {
+        cJSON_AddStringToObject(data, "server_id", pairing.server_id);
+        cJSON_AddStringToObject(data, "pairing_id", pairing.pairing_id);
+    }
     return ws_send_json_envelope("sys.client.hello", 0, data, true);
 }
 
@@ -1971,6 +1981,20 @@ int ws_send_servo_position(float x_deg, float y_deg) {
     cJSON_AddNumberToObject(data, "x_deg", x_deg);
     cJSON_AddNumberToObject(data, "y_deg", y_deg);
     return ws_send_json_envelope("evt.servo.position", 0, data, false);
+}
+
+int ws_send_servo_feedback(const char *axis, uint16_t raw, float angle) {
+    cJSON *data = cJSON_CreateObject();
+
+    if (data == NULL || axis == NULL || axis[0] == '\0') {
+        cJSON_Delete(data);
+        return -1;
+    }
+
+    cJSON_AddStringToObject(data, "axis", axis);
+    cJSON_AddNumberToObject(data, "raw", raw);
+    cJSON_AddNumberToObject(data, "angle", angle);
+    return ws_send_json_envelope("evt.servo.feedback", 0, data, false);
 }
 
 int ws_send_camera_state(const char *action, const char *state, int fps, const char *message) {

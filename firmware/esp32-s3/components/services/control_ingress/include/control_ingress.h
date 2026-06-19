@@ -4,6 +4,7 @@
 #include "esp_err.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -92,6 +93,8 @@ typedef struct {
 #if defined(CONTROL_INGRESS_ENABLE_TEST_API)
 void control_ingress_set_ops_for_test(const control_ingress_ops_t *ops);
 void control_ingress_reset_ops_for_test(void);
+void control_ingress_normalize_resource_name_for_test(const char *raw, char *out, size_t out_size);
+const char *control_ingress_ai_status_text_for_test(const control_ai_status_request_t *req);
 #endif
 
 #ifdef __cplusplus

@@ -157,14 +157,14 @@ static void show_listening_ui(void) {
     }
 
     if (has_listening_ui_headroom(&free_internal, &largest_internal)) {
-        behavior_state_set_with_resources("listening", "Listening...", 0, NULL, "");
+        behavior_state_set_with_resources("listening", "", 0, NULL, "");
         return;
     }
 
     if (has_text_only_listening_ui_headroom(&free_internal, &largest_internal)) {
         ESP_LOGW(TAG, "Low internal heap, using text-only listening UI: free=%u KB largest=%u KB",
                  (unsigned)(free_internal / 1024U), (unsigned)(largest_internal / 1024U));
-        behavior_state_set_with_resources("listening", "Listening...", 24, "", "");
+        behavior_state_set_with_resources("listening", "", 24, "", "");
         return;
     }
 
@@ -299,6 +299,8 @@ static int start_recording(void) {
         g_stats.error_count++;
         return -1;
     }
+
+    ws_client_abort_tts_playback();
 
     LOG_INTERNAL_HEAP_STATE("before_recording");
     size_t free_internal = 0;
@@ -448,7 +450,7 @@ static void handle_short_press_toggle(void) {
     if (g_state == VOICE_STATE_RECORDING) {
         ESP_LOGI(TAG, "Short press - stopping recording");
         voice_recorder_process_event(VOICE_EVENT_BUTTON_SHORT_CLICK);
-        behavior_state_set_with_text("processing", "Processing...", 0);
+        behavior_state_set_with_text("processing", "", 0);
     }
 }
 
@@ -477,7 +479,7 @@ static void handle_remote_apply(void) {
     } else {
         ESP_LOGI(TAG, "Remote microphone target idle - stopping recording");
         voice_recorder_process_event(VOICE_EVENT_REMOTE_APPLY);
-        behavior_state_set_with_text("processing", "Processing...", 0);
+        behavior_state_set_with_text("processing", "", 0);
     }
 }
 
@@ -639,7 +641,7 @@ int voice_recorder_tick(void) {
         ESP_LOGI(TAG, "VAD triggered stop - silence timeout");
         /* Stop recording due to silence timeout */
         voice_recorder_process_event(VOICE_EVENT_TIMEOUT);
-        behavior_state_set_with_text("processing", "Processing...", 0);
+        behavior_state_set_with_text("processing", "", 0);
         return 0; /* Recording stopped, don't send this frame */
     }
 #endif

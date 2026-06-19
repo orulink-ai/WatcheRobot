@@ -8,6 +8,8 @@
 #include <string.h>
 
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+#define TEST_SERVO_AXIS_MASK_X 0x01u
+#define TEST_SERVO_AXIS_MASK_Y 0x02u
 
 typedef struct {
     bool ready;
@@ -143,6 +145,23 @@ static mcu_link_test_packet_t make_motion_done_packet(uint32_t seq, uint32_t ref
     return packet;
 }
 
+static mcu_link_test_packet_t make_servo_feedback_packet(uint32_t seq) {
+    mcu_frame_header_t header;
+    uint8_t payload[9] = {
+        TEST_SERVO_AXIS_MASK_X | TEST_SERVO_AXIS_MASK_Y,
+        0x57u, 0x04u,
+        0xDEu, 0x00u,
+        0x05u, 0x0Du,
+        0xBCu, 0x01u,
+    };
+    mcu_link_test_packet_t packet = {0};
+
+    mcu_frame_header_init(&header, MCU_FRAME_CLASS_MOTION, MCU_MOTION_MSG_SERVO_FEEDBACK, MCU_FRAME_FLAG_RESPONSE, seq,
+                          sizeof(payload));
+    assert(mcu_link_test_support_make_packet(&header, payload, &packet) == ESP_OK);
+    return packet;
+}
+
 static mcu_link_test_packet_t make_imu_packet(uint32_t seq) {
     mcu_frame_header_t header;
     uint8_t payload[11] = {0};
@@ -256,6 +275,24 @@ static void test_poll_decodes_interleaved_burst_across_uart_chunks(void) {
     expect_stats(&link, 0u);
 }
 
+static void test_poll_decodes_compact_servo_feedback_frame(void) {
+    mcu_link_t link = {0};
+    mcu_link_event_t event = {0};
+    const mcu_link_test_packet_t feedback = make_servo_feedback_packet(13u);
+
+    fake_uart_reset();
+    fake_uart_enqueue(feedback.wire, feedback.wire_len);
+
+    assert(mcu_link_init(&link) == ESP_OK);
+    assert(mcu_link_begin_handshake(&link) == ESP_OK);
+    assert(mcu_link_poll(&link, &event) == ESP_OK);
+    assert(event.type == MCU_LINK_RX_EVENT_SERVO_FEEDBACK);
+    assert(event.frame.header.seq == 13u);
+    assert(event.frame.header.payload_len == 9u);
+    assert(event.frame.payload[0] == (TEST_SERVO_AXIS_MASK_X | TEST_SERVO_AXIS_MASK_Y));
+    expect_stats(&link, 0u);
+}
+
 int main(void) {
     const struct {
         const char *name;
@@ -264,6 +301,7 @@ int main(void) {
         {"single_ack_frame", test_poll_decodes_single_ack_frame},
         {"multi_frame_single_read", test_poll_keeps_second_frame_from_single_uart_read},
         {"interleaved_burst_across_chunks", test_poll_decodes_interleaved_burst_across_uart_chunks},
+        {"compact_servo_feedback", test_poll_decodes_compact_servo_feedback_frame},
     };
     size_t i;
 

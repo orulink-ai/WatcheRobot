@@ -35,8 +35,10 @@ The current repository focuses on:
 
 ```text
 firmware/
-  esp32-s3/       ESP32-S3 firmware source, assets, and ESP-IDF project files
-  stm32-f103/     STM32F103 co-processor firmware, protocol code, and host tests
+  README.md                       Firmware build and directory guide
+  COMMUNICATION_PROTOCOLS.md      Public firmware protocol overview
+  esp32-s3/                       ESP32-S3 firmware source, assets, and ESP-IDF project files
+  stm32-f103/                     STM32F103 co-processor firmware, protocol code, and host tests
 
 hardware/
   pcb/            PCB source, schematics, layout PDFs, Gerber, BOM, and CPL files
@@ -74,6 +76,10 @@ cmake --preset HostDebug
 cmake --build --preset HostDebug
 ctest --preset HostDebug
 ```
+
+### Firmware Documentation
+
+Start with [firmware/README.md](firmware/README.md) for the firmware directory map and build entries. Use [firmware/COMMUNICATION_PROTOCOLS.md](firmware/COMMUNICATION_PROTOCOLS.md) as the public protocol overview before opening lower-level implementation notes.
 
 ### Hardware Files
 

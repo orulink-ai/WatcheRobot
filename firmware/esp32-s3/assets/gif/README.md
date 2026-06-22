@@ -36,7 +36,7 @@ Recommended canonical filenames:
 
 Legacy names such as `watcher-boot.gif` are still accepted for compatibility.
 
-Typical workflow from `firmware/esp32-s3`:
+Typical workflow from `firmware/s3`:
 
 ```powershell
 python tools/generate_anim_assets.py
@@ -45,7 +45,7 @@ python tools/sync_anim_sdcard.py --target-root F:\
 
 Generated output is written to:
 
-- `build/generated/sdcard/anim/`
+- `release/V2.3.0/sdcard/anim/`
 
 Current release note:
 

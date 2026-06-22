@@ -6,7 +6,7 @@
 
 ## 1. 范围
 
-本说明只记录 STM32 本轮交付状态和 ESP32 对接所需事实。协议字段、消息号和完整语义以 `orulink-ai/WatcheRobot` 中公开的 STM32/ESP32 联调文档为准。
+本说明只记录 STM32 本轮交付状态和 ESP32 对接所需事实。协议字段、消息号和完整语义仍以 `orulink-ai/WatcheRobot` 的 `firmware/integration_docs/STM32_UART_PROTOCOL.md` 为真源。
 
 本轮 STM32 已完成：
 
@@ -52,7 +52,7 @@ ESP32 当前主线已经能解析并打印 `MCU_OBS evt=touch_event`。如果要
 
 ## 4. 实机验收记录
 
-本轮已刷写 STM32 Debug 固件并在 `<debug-port> @ 115200` 观察到触摸事件：
+本轮已刷写 STM32 Debug 固件并在 `USART1 @ 115200` 观察到触摸事件：
 
 ```text
 STM32_OBS tick_ms=285104 evt=touch_event touch_id=0 code=1 timestamp_ms=285104

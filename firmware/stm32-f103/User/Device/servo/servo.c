@@ -4,6 +4,8 @@
 #include "platform_time.h"
 #include "stm32f1xx_hal_adc_ex.h"
 
+#include <stddef.h>
+
 /*
  * Keep a fixed servo instance pool to avoid dynamic allocation in the MCU
  * runtime while still supporting multiple timer channels.

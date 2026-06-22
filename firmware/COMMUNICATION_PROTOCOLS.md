@@ -10,11 +10,17 @@ This is the public firmware protocol overview for WatcheRobot. It is intended as
 
 Code review date: 2026-06-22.
 
+Release boundary for this version:
+
+- The body of this document only describes behavior confirmed from the current source tree.
+- Items that are implemented on only one side, planned, insufficiently tested, or still semantically ambiguous are not part of the stable public protocol contract for this release.
+- Those items are collected under [Protocol TODOs](#5-protocol-todos) so the release can ship without hiding known protocol work.
+
 ## 1. Link Overview
 
 | Link | Purpose | Current code entry |
 | --- | --- | --- |
-| ESP32-S3 <-> STM32F103 | Board-internal co-processor link for servo, LED, touch, sensor, power control, and status | `esp32-s3/components/protocols/mcu_link/`, `stm32-f103/User/Protocol/`, `stm32-f103/User/Platform/stm32/platform_coproc_uart.c` |
+| ESP32-S3 <-> STM32F103 | Board-internal co-processor link for servo, touch, sensor, power, link status, and reserved LED traffic | `esp32-s3/components/protocols/mcu_link/`, `stm32-f103/User/Protocol/`, `stm32-f103/User/Platform/stm32/platform_coproc_uart.c` |
 | ESP32-S3 <-> Server | Wi-Fi provisioning, UDP Discovery, WebSocket JSON control, and WSPK binary media frames | `esp32-s3/components/utils/wifi_manager/`, `esp32-s3/components/protocols/discovery/`, `esp32-s3/components/protocols/ws_client/` |
 | ESP32-S3 <-> App | BLE GATT local control and Wi-Fi provisioning | `esp32-s3/components/protocols/ble_service/` |
 
@@ -49,7 +55,7 @@ Message classes:
 | --- | --- |
 | `0x01` | SYS: handshake, ACK, NACK, FAULT |
 | `0x02` | MOTION: servo and motion |
-| `0x03` | LED |
+| `0x03` | LED: class reserved in the current protocol space, command payload alignment is tracked in TODOs |
 | `0x04` | SENSOR: touch, IMU, magnetometer |
 | `0x05` | POWER: 5V power control |
 
@@ -59,7 +65,28 @@ Current handshake:
 2. STM32F103 validates the frame and returns `SYS / ACK(0x04)`.
 3. STM32F103 returns `SYS / HELLO_RSP(0x02)` with a `9` byte payload.
 
-The shared core format and constants match on both sides: magic, protocol version, maximum payload, header length, CRC length, COBS delimiter, and class values. ESP32-S3 declares some forward-looking IDs, such as heartbeat, snapshot, and additional sensor events. STM32F103 does not currently implement all of them, so those ESP32-side IDs should not be treated as supported STM32 capabilities.
+Confirmed stable message surface in the current source:
+
+| Direction | Class / message | Payload length | Notes |
+| --- | --- | --- | --- |
+| ESP32-S3 -> STM32F103 | `SYS / HELLO_REQ(0x01)` | `0` | Starts MCU Link handshake, requires `ACK_REQ` |
+| STM32F103 -> ESP32-S3 | `SYS / ACK(0x04)` | `6` | Response payload includes referenced sequence and status |
+| STM32F103 -> ESP32-S3 | `SYS / NACK(0x05)` | `8` | Response payload includes referenced sequence, status, and reason |
+| STM32F103 -> ESP32-S3 | `SYS / FAULT(0x06)` | `9` | Reports link/runtime faults |
+| STM32F103 -> ESP32-S3 | `SYS / HELLO_RSP(0x02)` | `9` | Reports role, firmware/hardware version, capability bitmap, sensor bitmap, boot reason, default stream profile |
+| ESP32-S3 -> STM32F103 | `MOTION / SERVO_MOVE(0x01)` | `9` | Axis mask, X/Y target in deg x10, duration, profile, source |
+| ESP32-S3 -> STM32F103 | `MOTION / SERVO_STOP(0x02)` | `2` | Stop scope and source |
+| ESP32-S3 -> STM32F103 | `MOTION / SERVO_JOG(0x05)` | `12` | Axis mask, X/Y velocity in deg x10/s, timeout, source, axis limits |
+| STM32F103 -> ESP32-S3 | `MOTION / MOTION_DONE(0x03)` | `11` | Referenced sequence, result, final X/Y in deg x10, execution time |
+| STM32F103 -> ESP32-S3 | `SENSOR / TOUCH_EVENT(0x01)` | `6` | Touch ID, event code, timestamp |
+| STM32F103 -> ESP32-S3 | `SENSOR / MAG_STATE(0x02)` | `6` | Heading, field norm, quality, status bits |
+| STM32F103 -> ESP32-S3 | `SENSOR / IMU_STATE(0x04)` | `11` | Roll, pitch, yaw, acceleration norm, gyro norm, motion flags |
+| ESP32-S3 -> STM32F103 | `POWER / 5V_ENABLE(0x01)` | `1` | Source tag |
+| ESP32-S3 -> STM32F103 | `POWER / 5V_DISABLE(0x02)` | `1` | Source tag |
+
+The shared core format and constants match on both sides: magic, protocol version, maximum payload, header length, CRC length, COBS delimiter, and class values.
+
+ESP32-S3 declares additional forward-looking IDs, such as heartbeat, snapshot, motion sequence, LED state, and additional sensor events. STM32F103 does not currently implement all of them. They are intentionally not documented as stable STM32 capabilities in this release; see [Protocol TODOs](#5-protocol-todos).
 
 Code references:
 
@@ -90,7 +117,8 @@ Current UDP Discovery behavior:
 - Default total timeout: `30000 ms`.
 - Up to `3` sends per round, with about `5000 ms` between rounds.
 - The device sends `DISCOVER` with `device_id` and `mac`.
-- After receiving `ANNOUNCE`, firmware parses `ip`, `port`, `version`, `protocol_version`, and `server`.
+- After receiving `ANNOUNCE`, firmware requires `ip`, uses `port` when present, and defaults the WebSocket port to `8765` when `port` is missing.
+- Firmware parses optional `version`, `protocol_version`, and `server` fields for reporting.
 
 Current WebSocket behavior:
 
@@ -99,22 +127,21 @@ Current WebSocket behavior:
 3. Firmware treats the session as ready only after receiving `sys.ack` for `sys.client.hello`.
 4. Text messages use a JSON envelope: `{"type":"...", "code":0, "data":{}}`.
 
-Main downlink types currently routed:
+Downlink types currently routed in source:
 
 ```text
 sys.ack, sys.nack, sys.ping, sys.pong, sys.session.resume
-ctrl.servo.angle, ctrl.servo.pwm.unlock, ctrl.servo.pwm.lock
-ctrl.servo.trajectory.play, ctrl.light.set
+ctrl.servo.angle
 ctrl.motion.jog, ctrl.motion.stop
 ctrl.microphone.open, ctrl.microphone.close
-ctrl.robot.state.set, ctrl.sound.play
+ctrl.robot.state.set
 ctrl.camera.video_config, ctrl.camera.capture_image
 ctrl.camera.start_video, ctrl.camera.stop_video
 evt.asr.result, evt.ai.status, evt.ai.thinking, evt.ai.reply
 xfer.ota.handshake, xfer.ota.checksum
 ```
 
-Binary media frames use the `WSPK` header. The current header length is `14` bytes:
+Binary media frames use the `WSPK` header in the current source. The current header length is `14` bytes:
 
 | Offset | Size | Field | Meaning |
 | --- | --- | --- | --- |
@@ -141,7 +168,7 @@ BLE uses one service and one characteristic. It supports both legacy text comman
 | Service UUID | `0x00FF` |
 | Characteristic UUID | `0xFF01` |
 | Characteristic property | `READ`, `WRITE`, `NOTIFY` |
-| Maximum characteristic value | `512` bytes |
+| Maximum characteristic value | `256` bytes |
 
 JSON mode detection: after trimming leading whitespace, a payload whose first character is `{` is parsed as JSON. Otherwise it is handled as a legacy text command.
 
@@ -184,7 +211,23 @@ Code references:
 - BLE interface: [ble_service.h](esp32-s3/components/protocols/ble_service/include/ble_service.h)
 - BLE implementation: [ble_service.c](esp32-s3/components/protocols/ble_service/src/ble_service.c)
 
-## 5. Detailed Notes and Historical Records
+## 5. Protocol TODOs
+
+The following items are intentionally not promoted into the stable release protocol body yet. They need tests, cross-end confirmation, or implementation alignment before becoming public contract. The main tracking issue is [#5](https://github.com/orulink-ai/WatcheRobot/issues/5).
+
+- Build a MCU Link cross-end contract matrix for class, message ID, payload length, direction, ESP32 support, STM32 support, and expected behavior.
+- Add cross-end golden vector tests so ESP32-packed frames decode on STM32 and STM32-packed frames decode on ESP32.
+- Decide and verify LED command payload alignment. ESP32 currently sends `SET_STATIC` and `SET_EFFECT` payloads, while STM32 currently implements `SET_RGB`, `BREATHE`, and `OFF` payloads.
+- Keep ESP32 motion sequence messages as TODO until STM32 runtime implements and tests `SERVO_SEQUENCE`, `SERVO_SEQUENCE_BEGIN`, `SERVO_SEQUENCE_CHUNK`, and `SERVO_SEQUENCE_END`, or until unsupported NACK behavior is explicitly tested.
+- Keep heartbeat, snapshot request/response, LED state, additional sensor events, and sensor health as forward-looking MCU Link IDs until both sides and tests confirm behavior.
+- Add BLE and WebSocket shared command tests for `ctrl.servo.angle`, `ctrl.motion.jog`, `ctrl.motion.stop`, `ctrl.robot.state.set`, and `sys.ping`, including success, NACK, bad JSON, missing fields, and range validation.
+- Add Discovery edge tests for malformed JSON, non-`ANNOUNCE` responses, missing `ip`, missing `port`, protocol version reporting, bind failure behavior, and URL generation.
+- Add WSPK protocol tests for invalid magic, invalid type, payload length mismatch, zero-payload `LAST`, video `FIRST | KEYFRAME`, image `FIRST | LAST | KEYFRAME`, audio `LAST`, and fragmented frames.
+- Document and test the SSCMA co-processor protocol before treating it as part of the public stable protocol: AT command formatting, `\r{...}\n` response framing, response/event/log dispatch, request matching, buffer limits, and SPI transport read/write/available behavior.
+- Keep currently unrouted WebSocket names out of the stable body until source routes exist, including `ctrl.servo.pwm.unlock`, `ctrl.servo.pwm.lock`, `ctrl.servo.trajectory.play`, `ctrl.light.set`, and `ctrl.sound.play`.
+- Capture hardware-in-the-loop smoke evidence for UART2 `921600 8N1` handshake, split/merged frames, CRC error recovery, queue overflow recovery, STM32 reset, and ESP32 reconnect.
+
+## 6. Detailed Notes and Historical Records
 
 The following files are kept as detailed notes or historical records. Use this document and the current code as the primary reference when they disagree:
 

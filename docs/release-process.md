@@ -15,7 +15,8 @@ Each release should include:
 
 - release notes
 - compatibility matrix
+- version notes from `docs/versions.md`
 - `SHA256SUMS.txt`
 - all required downloadable artifacts
 
-Large binaries, firmware ZIPs, APKs, installers, DMGs, Gerber ZIPs, and hardware package ZIPs must be uploaded as release assets.
+The first public activity release must include at least the ESP32 firmware flash ZIP, SD-card behavior asset ZIP, `SHA256SUMS.txt`, release notes, and compatibility notes. Large binaries, firmware ZIPs, APKs, installers, DMGs, Gerber ZIPs, and hardware package ZIPs must be uploaded as release assets.

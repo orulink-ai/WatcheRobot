@@ -52,6 +52,7 @@ Fork the repository first if you plan to submit a pull request. Branch naming is
 | macOS | Git, Python 3.11+, serial driver if required by your USB adapter, ESP-IDF v5.2.1 if building locally |
 | Linux | Git, Python 3.11+, `dialout` or equivalent serial permission, ESP-IDF v5.2.1 if building locally |
 
+For detailed Windows/macOS ESP-IDF v5.2.1 setup steps in Chinese, see [docs/esp-idf-setup_zh.md](docs/esp-idf-setup_zh.md).
 Use [docs/flashing.md](docs/flashing.md) for driver notes, ports, ESP32 flashing, STM32 flashing, and platform differences.
 
 ### 3. Get Firmware and Behavior Assets
@@ -115,6 +116,7 @@ hardware/
   assembly/       Assembly images or documents when available
 
 docs/
+  esp-idf-setup_zh.md     Windows/macOS ESP-IDF v5.2.1 setup guide in Chinese
   flashing.md             Firmware flashing and toolchain guide
   sd-card-assets.md       SD-card behavior asset guide
   behavior-flash-skill.md Event-ready behavior asset checklist
@@ -133,6 +135,7 @@ tools/
 
 ## Participant Documents
 
+- [ESP-IDF setup guide in Chinese](docs/esp-idf-setup_zh.md)
 - [Flashing guide](docs/flashing.md)
 - [SD-card behavior assets](docs/sd-card-assets.md)
 - [Behavior asset field checklist](docs/behavior-flash-skill.md)

@@ -11,6 +11,8 @@ This guide is the public flashing entry for event participants. Use release asse
 | STM32F103 host tests | CMake 3.22+, Ninja, C compiler | Used for protocol and device-logic host tests. |
 | STM32F103 board flashing | ST-LINK or compatible probe, OpenOCD or vendor tooling | Board flashing is hardware-bench dependent and not yet packaged as a one-command public flow. |
 
+For detailed Windows/macOS ESP-IDF v5.2.1 installation and activation steps in Chinese, see [ESP-IDF setup guide](esp-idf-setup_zh.md).
+
 ## Serial Drivers and Ports
 
 Windows:
@@ -46,6 +48,8 @@ The helper expects a ZIP that contains `flash_args.txt`, `bootloader.bin`, `part
 ## ESP32-S3 Local Build Fallback
 
 Use this path when release assets are not published yet or when developing firmware:
+
+Install and activate ESP-IDF v5.2.1 first. Windows users should run these commands from `ESP-IDF 5.2 CMD`; macOS users should run `. ./export.sh` from their ESP-IDF v5.2.1 directory before entering the repository.
 
 ```bash
 cd firmware/esp32-s3

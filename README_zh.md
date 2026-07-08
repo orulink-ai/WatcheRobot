@@ -52,6 +52,7 @@ cd WatcheRobot
 | macOS | Git、Python 3.11+、必要时安装 USB 串口驱动、本地构建时需要 ESP-IDF v5.2.1 |
 | Linux | Git、Python 3.11+、`dialout` 或等价串口权限、本地构建时需要 ESP-IDF v5.2.1 |
 
+Windows 和 macOS 的 ESP-IDF v5.2.1 从零安装、激活和验证步骤见 [ESP-IDF 安装指引](docs/esp-idf-setup_zh.md)。
 串口驱动、端口识别、ESP32/STM32 刷写和平台差异见 [docs/flashing.md](docs/flashing.md)。
 
 ### 3. 获取固件和行为资源
@@ -115,6 +116,7 @@ hardware/
   assembly/       后续装配图片或装配文档
 
 docs/
+  esp-idf-setup_zh.md     Windows/macOS ESP-IDF v5.2.1 安装指引
   flashing.md             固件刷写和工具链说明
   sd-card-assets.md       SD 卡行为资源说明
   behavior-flash-skill.md 活动现场行为资源操作 checklist
@@ -133,6 +135,7 @@ tools/
 
 ## 参赛者文档入口
 
+- [ESP-IDF 安装指引](docs/esp-idf-setup_zh.md)
 - [刷写说明](docs/flashing.md)
 - [SD 卡行为资源](docs/sd-card-assets.md)
 - [行为资源现场 checklist](docs/behavior-flash-skill.md)

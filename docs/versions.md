@@ -6,6 +6,7 @@ Use this document to find the source of truth for each public WatcheRobot compon
 
 | Component | Current public source | Version signal | Notes |
 | --- | --- | --- | --- |
+| WatcheRobot repository package | Root `VERSION` | `0.1.0` | Current public source package version for this repository. |
 | Repository default branch | GitHub `main` | Git commit SHA | Public release readiness is gated by CI and release assets. |
 | ESP32-S3 firmware | `firmware/esp32-s3/CMakeLists.txt` | `PROJECT_VER`, currently `V2.3.0` on this branch | `origin/dev` may carry newer firmware work that is not merged to `main`. |
 | ESP32 behavior assets | `firmware/esp32-s3/tools/generate_anim_assets.py` | `PROJECT_VERSION`, currently `V2.3.0` on this branch | Must match the firmware release package when publishing. |
@@ -23,6 +24,7 @@ Use this document to find the source of truth for each public WatcheRobot compon
 
 ## Known Current State
 
+- Current public source package version is `0.1.0`.
 - No public GitHub Release is currently listed.
 - `docs/compatibility.md` records the open compatibility matrix format.
 - Cross-end protocol contract gaps are tracked in [GitHub issue #5](https://github.com/orulink-ai/WatcheRobot/issues/5).

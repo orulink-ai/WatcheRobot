@@ -1,14 +1,24 @@
 idf_component_register(
     SRCS
+        "src/animation_registry_generated.c"
+        "src/animation_controller_core.c"
+        "src/animation_playback_policy.c"
+        "src/animation_service_sync_adapter.c"
+        "src/animation_service_runtime.c"
         "src/anim_storage.c"
         "src/anim_player.c"
-        "src/anim_meta.c"
+        "src/anim_player_event_queue.c"
+        "src/anim_fault_injection.c"
+        "src/anim_frame_pool_core.c"
+        "src/anim_player_lifecycle.c"
+        "src/anim_prepare_watchdog.c"
+        "src/anim_rgb565_fade.c"
+        "src/anim_worker_scheduler.c"
         "src/display_ui.c"
     INCLUDE_DIRS "include"
     REQUIRES
         "lvgl"
         "spiffs"
-        "json"
     PRIV_REQUIRES
         "sensecap-watcher"
         "esp_lvgl_port"

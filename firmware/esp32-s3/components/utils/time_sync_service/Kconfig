@@ -1,0 +1,18 @@
+menu "Watcher Time Sync"
+
+    config WATCHER_TIME_SYNC_DEFAULT_TZ
+        string "Default POSIX timezone"
+        default "CST-8"
+        help
+            Default POSIX TZ string used before user or server timezone settings
+            exist. CST-8 means UTC+8 for China Standard Time.
+
+    config WATCHER_TIME_SYNC_NTP_SERVER_1
+        string "Primary NTP server"
+        default "pool.ntp.org"
+
+    config WATCHER_TIME_SYNC_NTP_SERVER_2
+        string "Secondary NTP server"
+        default "time.google.com"
+
+endmenu

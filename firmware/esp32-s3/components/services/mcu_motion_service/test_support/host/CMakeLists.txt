@@ -20,4 +20,6 @@ target_include_directories(mcu_motion_service_host_tests PRIVATE
     "${MCU_MOTION_COMPONENT_DIR}/include"
 )
 
+target_compile_definitions(mcu_motion_service_host_tests PRIVATE MCU_MOTION_HOST_TEST=1)
+
 add_test(NAME mcu_motion_service_host_tests COMMAND mcu_motion_service_host_tests)

@@ -1,6 +1,6 @@
 # WatcheRobot S3 Development Workflow
 
-本文记录 `firmware/esp32-s3` 的通用开发和 PR 合并前检查规则。协议、动画、BLE、相机等专题设计仍以各自文档为准；本文只定义跨模块工程流程。
+本文记录 `firmware/s3` 的通用开发和 PR 合并前检查规则。协议、动画、BLE、相机等专题设计仍以各自文档为准；本文只定义跨模块工程流程。
 
 ## PR Merge 前质量门禁
 

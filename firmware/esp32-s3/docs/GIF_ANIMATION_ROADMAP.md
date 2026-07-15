@@ -22,9 +22,9 @@ The current branch baseline is complete and validated for:
 
 ## Phase 2: Release Packaging Completed
 
-- Promote the GIF / AnimPack branch baseline into the maintained GitHub Release track.
+- Promote the GIF / AnimPack branch baseline into the maintained release track.
 - Package firmware flash binaries and SD-card animation assets as separate
-  GitHub Release assets.
+  deliverables under `release/V2.2.1/`.
 - Refresh top-level release documentation so `V2.2.1` is the current
   baseline for validation and distribution.
 
@@ -32,14 +32,12 @@ The current branch baseline is complete and validated for:
 
 - Refresh action data alongside the final animation pack so behavior playback
   matches the new GIF-authored state set.
-- Add a single branch-level asset configuration file so FPS, loop policy, and
-  optional aliases are not encoded only in script defaults.
+- Keep Registry codegen and `--check` in CI so IDs, names, aliases and loop
+  policy cannot drift between firmware and asset tooling.
 - Improve runtime diagnostics for missing or malformed `animpack` files with
   clearer file-path and type-level logs.
 - Add a lightweight smoke-test checklist for boot animation, standby text, and
   multi-state animation switching after each animation asset refresh.
-- Decide whether `anim_meta.json` should remain optional or become a generated
-  artifact in the toolchain.
 
 ## Phase 4: Robustness
 

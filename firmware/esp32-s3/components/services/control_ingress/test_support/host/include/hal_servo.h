@@ -15,6 +15,7 @@ typedef enum {
     HAL_SERVO_MOTION_SOURCE_BLE = 2,
     HAL_SERVO_MOTION_SOURCE_WS = 3,
     HAL_SERVO_MOTION_SOURCE_RECOVERY = 4,
+    HAL_SERVO_MOTION_SOURCE_RELAY_W1 = 5,
 } hal_servo_motion_source_t;
 
 static inline esp_err_t hal_servo_move_sync_with_source_and_seq(int x_deg, int y_deg, int duration_ms,
@@ -36,6 +37,30 @@ static inline esp_err_t hal_servo_move_smooth_with_source_and_seq(servo_axis_t a
     (void)axis;
     (void)angle_deg;
     (void)duration_ms;
+    (void)source;
+    if (out_seq != NULL) {
+        *out_seq = 0;
+    }
+    return ESP_OK;
+}
+
+static inline esp_err_t hal_servo_set_direct_with_source_and_seq(servo_axis_t axis, int angle_deg,
+                                                                 hal_servo_motion_source_t source,
+                                                                 uint32_t *out_seq) {
+    (void)axis;
+    (void)angle_deg;
+    (void)source;
+    if (out_seq != NULL) {
+        *out_seq = 0;
+    }
+    return ESP_OK;
+}
+
+static inline esp_err_t hal_servo_set_direct_sync_with_source_and_seq(int x_deg, int y_deg,
+                                                                      hal_servo_motion_source_t source,
+                                                                      uint32_t *out_seq) {
+    (void)x_deg;
+    (void)y_deg;
     (void)source;
     if (out_seq != NULL) {
         *out_seq = 0;

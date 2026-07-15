@@ -1,0 +1,6 @@
+# Diagnostic-only overlay for task-level heap ownership.
+# Do not include this in normal builds: heap task tracking adds per-block overhead.
+# CONFIG_HEAP_POISONING_DISABLED is not set
+CONFIG_HEAP_POISONING_LIGHT=y
+CONFIG_HEAP_TASK_TRACKING=y
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y

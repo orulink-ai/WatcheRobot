@@ -1,6 +1,8 @@
 #ifndef BEHAVIOR_TYPES_H
 #define BEHAVIOR_TYPES_H
 
+#include "animation_service.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -12,6 +14,8 @@ extern "C" {
 #define BEHAVIOR_STATE_ID_LEN 32
 #define BEHAVIOR_TEXT_LEN 128
 #define BEHAVIOR_SOUND_ID_LEN 32
+#define BEHAVIOR_LIGHT_EFFECT_LEN 24
+#define BEHAVIOR_LIGHT_ZONE_LEN 16
 
 #define BEHAVIOR_ACTION_DEFAULT_X_DEG 90
 #define BEHAVIOR_ACTION_DEFAULT_Y_DEG 120
@@ -38,6 +42,9 @@ typedef struct {
 
 typedef struct {
     uint32_t at_ms;
+    animation_playback_mode_t playback_mode;
+    uint16_t repeat_count;
+    uint16_t fade_in_ms;
     char anim[BEHAVIOR_STATE_ID_LEN];
     char text[BEHAVIOR_TEXT_LEN];
     int font_size;
@@ -49,16 +56,33 @@ typedef struct {
 } behavior_sound_event_t;
 
 typedef struct {
+    uint32_t at_ms;
+    char effect[BEHAVIOR_LIGHT_EFFECT_LEN];
+    char zone[BEHAVIOR_LIGHT_ZONE_LEN];
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+    uint8_t brightness;
+    uint16_t period_ms;
+    uint16_t repeat_count;
+} behavior_light_event_t;
+
+typedef struct {
     char id[BEHAVIOR_STATE_ID_LEN];
     bool loop;
     bool hold_until_replaced;
     uint32_t timeline_end_ms;
+    char animation_complete_anim[BEHAVIOR_STATE_ID_LEN];
+    char animation_complete_state[BEHAVIOR_STATE_ID_LEN];
+    char animation_failure_state[BEHAVIOR_STATE_ID_LEN];
     behavior_motion_event_t *motion;
     int motion_count;
     behavior_expression_event_t *expression;
     int expression_count;
     behavior_sound_event_t *sound;
     int sound_count;
+    behavior_light_event_t *light;
+    int light_count;
 } behavior_state_def_t;
 
 typedef struct {

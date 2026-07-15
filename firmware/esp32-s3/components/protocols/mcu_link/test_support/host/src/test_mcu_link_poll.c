@@ -8,6 +8,8 @@
 #include <string.h>
 
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+#define TEST_SERVO_AXIS_MASK_X 0x01u
+#define TEST_SERVO_AXIS_MASK_Y 0x02u
 
 typedef struct {
     bool ready;
@@ -109,13 +111,43 @@ static mcu_link_test_packet_t make_ack_packet(uint32_t seq, uint32_t ref_seq) {
 
 static mcu_link_test_packet_t make_hello_rsp_packet(uint32_t seq) {
     mcu_frame_header_t header;
-    uint8_t payload[9] = {
+    uint8_t payload[MCU_HELLO_BASE_PAYLOAD_LEN] = {
         0x01u, 0x00u, 0x01u, 0x00u, 0x01u, 0x20u, 0x00u, 0x00u, 0x01u,
     };
     mcu_link_test_packet_t packet = {0};
 
     mcu_frame_header_init(&header, MCU_FRAME_CLASS_SYS, MCU_SYS_MSG_HELLO_RSP, MCU_FRAME_FLAG_RESPONSE, seq,
                           sizeof(payload));
+    assert(mcu_link_test_support_make_packet(&header, payload, &packet) == ESP_OK);
+    return packet;
+}
+
+static mcu_link_test_packet_t make_hello_rsp_with_git_packet(uint32_t seq) {
+    static const char branch[] = "stm32-dev";
+    static const char commit[] = "8c509c5";
+    mcu_frame_header_t header;
+    uint8_t payload[MCU_FRAME_MAX_PAYLOAD_SIZE] = {
+        0x01u, 0x00u, 0x01u, 0x00u, 0x01u, 0x20u, 0x00u, 0x00u, 0x01u,
+    };
+    size_t offset = MCU_HELLO_BASE_PAYLOAD_LEN;
+    mcu_link_test_packet_t packet = {0};
+
+    payload[offset++] = MCU_HELLO_TLV_GIT_BRANCH;
+    payload[offset++] = (uint8_t)(sizeof(branch) - 1u);
+    memcpy(&payload[offset], branch, sizeof(branch) - 1u);
+    offset += sizeof(branch) - 1u;
+
+    payload[offset++] = MCU_HELLO_TLV_GIT_COMMIT;
+    payload[offset++] = (uint8_t)(sizeof(commit) - 1u);
+    memcpy(&payload[offset], commit, sizeof(commit) - 1u);
+    offset += sizeof(commit) - 1u;
+
+    payload[offset++] = MCU_HELLO_TLV_GIT_DIRTY;
+    payload[offset++] = 1u;
+    payload[offset++] = 1u;
+
+    mcu_frame_header_init(&header, MCU_FRAME_CLASS_SYS, MCU_SYS_MSG_HELLO_RSP, MCU_FRAME_FLAG_RESPONSE, seq,
+                          (uint16_t)offset);
     assert(mcu_link_test_support_make_packet(&header, payload, &packet) == ESP_OK);
     return packet;
 }
@@ -139,6 +171,23 @@ static mcu_link_test_packet_t make_motion_done_packet(uint32_t seq, uint32_t ref
     payload[9] = 0xB4u;
     payload[10] = 0x00u;
 
+    assert(mcu_link_test_support_make_packet(&header, payload, &packet) == ESP_OK);
+    return packet;
+}
+
+static mcu_link_test_packet_t make_servo_feedback_packet(uint32_t seq) {
+    mcu_frame_header_t header;
+    uint8_t payload[9] = {
+        TEST_SERVO_AXIS_MASK_X | TEST_SERVO_AXIS_MASK_Y,
+        0x57u, 0x04u,
+        0xDEu, 0x00u,
+        0x05u, 0x0Du,
+        0xBCu, 0x01u,
+    };
+    mcu_link_test_packet_t packet = {0};
+
+    mcu_frame_header_init(&header, MCU_FRAME_CLASS_MOTION, MCU_MOTION_MSG_SERVO_FEEDBACK, MCU_FRAME_FLAG_RESPONSE, seq,
+                          sizeof(payload));
     assert(mcu_link_test_support_make_packet(&header, payload, &packet) == ESP_OK);
     return packet;
 }
@@ -217,6 +266,33 @@ static void test_poll_keeps_second_frame_from_single_uart_read(void) {
     expect_stats(&link, 0u);
 }
 
+static void test_poll_captures_hello_rsp_git_metadata(void) {
+    mcu_link_t link = {0};
+    mcu_link_event_t event = {0};
+    mcu_link_peer_info_t info = {0};
+    const mcu_link_test_packet_t hello_rsp = make_hello_rsp_with_git_packet(21u);
+
+    fake_uart_reset();
+    fake_uart_enqueue(hello_rsp.wire, hello_rsp.wire_len);
+
+    assert(mcu_link_init(&link) == ESP_OK);
+    assert(mcu_link_begin_handshake(&link) == ESP_OK);
+    assert(mcu_link_poll(&link, &event) == ESP_OK);
+    assert(event.type == MCU_LINK_RX_EVENT_HELLO_RSP);
+    assert(event.frame.header.seq == 21u);
+    assert(mcu_link_copy_peer_info(&link, &info) == ESP_OK);
+    assert(info.version_valid);
+    assert(info.fw_major == 0u);
+    assert(info.fw_minor == 1u);
+    assert(info.fw_patch == 0u);
+    assert(info.hw_version == 1u);
+    assert(info.git_valid);
+    assert(info.git_dirty);
+    assert(strcmp(info.git_branch, "stm32-dev") == 0);
+    assert(strcmp(info.git_commit, "8c509c5") == 0);
+    expect_stats(&link, 0u);
+}
+
 static void test_poll_decodes_interleaved_burst_across_uart_chunks(void) {
     mcu_link_t link = {0};
     mcu_link_event_t event = {0};
@@ -256,6 +332,24 @@ static void test_poll_decodes_interleaved_burst_across_uart_chunks(void) {
     expect_stats(&link, 0u);
 }
 
+static void test_poll_decodes_compact_servo_feedback_frame(void) {
+    mcu_link_t link = {0};
+    mcu_link_event_t event = {0};
+    const mcu_link_test_packet_t feedback = make_servo_feedback_packet(13u);
+
+    fake_uart_reset();
+    fake_uart_enqueue(feedback.wire, feedback.wire_len);
+
+    assert(mcu_link_init(&link) == ESP_OK);
+    assert(mcu_link_begin_handshake(&link) == ESP_OK);
+    assert(mcu_link_poll(&link, &event) == ESP_OK);
+    assert(event.type == MCU_LINK_RX_EVENT_SERVO_FEEDBACK);
+    assert(event.frame.header.seq == 13u);
+    assert(event.frame.header.payload_len == 9u);
+    assert(event.frame.payload[0] == (TEST_SERVO_AXIS_MASK_X | TEST_SERVO_AXIS_MASK_Y));
+    expect_stats(&link, 0u);
+}
+
 int main(void) {
     const struct {
         const char *name;
@@ -263,7 +357,9 @@ int main(void) {
     } tests[] = {
         {"single_ack_frame", test_poll_decodes_single_ack_frame},
         {"multi_frame_single_read", test_poll_keeps_second_frame_from_single_uart_read},
+        {"hello_rsp_git_metadata", test_poll_captures_hello_rsp_git_metadata},
         {"interleaved_burst_across_chunks", test_poll_decodes_interleaved_burst_across_uart_chunks},
+        {"compact_servo_feedback", test_poll_decodes_compact_servo_feedback_frame},
     };
     size_t i;
 

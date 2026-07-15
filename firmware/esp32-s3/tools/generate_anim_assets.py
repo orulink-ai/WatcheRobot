@@ -14,10 +14,14 @@ streamed directly into a ring buffer on-device.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
+import json
 import re
 import shutil
 import struct
 import sys
+from datetime import date, datetime
 from pathlib import Path
 
 try:
@@ -27,48 +31,33 @@ except ImportError as exc:  # pragma: no cover - runtime dependency check
     raise SystemExit("Pillow is required. Install it with: python -m pip install Pillow") from exc
 
 
-PROJECT_VERSION = "V2.3.0"
+PROJECT_VERSION = "V2.4.1"
+DEFAULT_PRODUCT = "WatcheRobot-S3"
+DEFAULT_BUNDLE_ID = "default-sd-resources"
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "assets" / "gif"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "release" / PROJECT_VERSION / "sdcard" / "anim"
+DEFAULT_BEHAVIOR_CATALOG = PROJECT_ROOT / "spiffs" / "behavior" / "states.json"
+
+REGISTRY_MODULE_PATH = SCRIPT_DIR / "animation_registry_generated.py"
 
 
-ANIM_TYPES = [
-    "boot",
-    "happy",
-    "error",
-    "bluetooth",
-    "speaking",
-    "listening",
-    "processing",
-    "standby",
-    "thinking",
-    "custom1",
-    "custom2",
-    "custom3",
-    "standby1",
-    "standby2",
-    "standby3",
-    "standby4",
-    "disconnect",
-    "shock",
-    "sunglasses",
-    "sad",
-    "get",
-    "smile",
-    "recharge",
-    "speechless",
-    "concentration",
-    "fondle_love",
-    "fondle_anger",
-    "blink",
-    "upgrade",
-]
+def load_generated_registry():
+    spec = importlib.util.spec_from_file_location("animation_registry_generated", REGISTRY_MODULE_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load generated animation registry: {REGISTRY_MODULE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-NON_LOOP_ANIM_TYPES = {
-    "fondle_love",
-}
+
+_REGISTRY = load_generated_registry()
+DEFAULT_FPS = _REGISTRY.DEFAULT_FPS
+ANIMATIONS = _REGISTRY.ANIMATIONS
+ANIMATION_BY_NAME = _REGISTRY.ANIMATION_BY_NAME
+ANIM_TYPES = [entry["name"] for entry in ANIMATIONS]
+NON_LOOP_ANIM_TYPES = {entry["name"] for entry in ANIMATIONS if not entry["default_loop"]}
 
 NAME_LEN = 24
 PATH_LEN = 96
@@ -81,71 +70,11 @@ FRAME_DESC_SIZE = struct.calcsize(FRAME_DESC_FMT)
 MANIFEST_ENTRY_FMT = f"<HHHHHB3x{NAME_LEN}s{PATH_LEN}s"
 PACK_HEADER_FMT = "<4sHHHHBBHIII"
 FRAME_FLAG_INDEXED8 = 0x0001
-
+RAW_FRAME_ANIM_TYPES = {entry["name"] for entry in ANIMATIONS if entry["encoding"] == "rgb565"}
 LEGACY_IMPORT_MAP = {
-    "watcher-boot": "boot",
-    "watcher-error": "error",
-    "watcher-happy": "happy",
-    "watcher-bluetooth": "bluetooth",
-    "watcher-listening": "listening",
-    "watcher-processing": "processing",
-    "watcher-custom1": "custom1",
-    "watcher-custom2": "custom2",
-    "watcher-custom3": "custom3",
-    "watcher-processing2": "custom3",
-    "watcher-speaking": "speaking",
-    "watcher-standby": "standby",
-    "watcher-thinking": "thinking",
-    "watcher-standby1": "standby1",
-    "watcher-standby2": "standby2",
-    "watcher-standby3": "standby3",
-    "watcher-standby4": "standby4",
-    "watcher-disconnect": "disconnect",
-    "watcher-shock": "shock",
-    "watcher-sunglasses": "sunglasses",
-    "watcher-sad": "sad",
-    "watcher-get": "get",
-    "watcher-smile": "smile",
-    "watcher-recharge": "recharge",
-    "watcher-speechless": "speechless",
-    "watcher-concentration": "concentration",
-    "watcher-fondle-love": "fondle_love",
-    "watcher-fondle-anger": "fondle_anger",
-    "watcher-blink": "blink",
-    "watcher-upgrade": "upgrade",
+    legacy_dir: entry["name"] for entry in ANIMATIONS for legacy_dir in entry["legacy_directories"]
 }
-
-GIF_CANDIDATES = {
-    "boot": ["boot.gif", "watcher-boot.gif"],
-    "happy": ["happy.gif", "watcher-happy.gif"],
-    "error": ["error.gif", "watcher-error.gif"],
-    "bluetooth": ["bluetooth.gif", "watcher-bluetooth.gif"],
-    "speaking": ["speaking.gif", "watcher-speaking.gif"],
-    "listening": ["listening.gif", "watcher-listening.gif"],
-    "processing": ["processing.gif", "watcher-processing.gif"],
-    "standby": ["standby.gif", "watcher-standby.gif"],
-    "thinking": ["thinking.gif", "watcher-thinking.gif"],
-    "custom1": ["custom1.gif", "watcher-custom1.gif"],
-    "custom2": ["custom2.gif", "watcher-custom2.gif"],
-    "custom3": ["custom3.gif", "watcher-custom3.gif", "watcher-processing2.gif"],
-    "standby1": ["standby1.gif", "watcher-standby1.gif"],
-    "standby2": ["standby2.gif", "watcher-standby2.gif"],
-    "standby3": ["standby3.gif", "watcher-standby3.gif"],
-    "standby4": ["standby4.gif", "watcher-standby4.gif"],
-    "disconnect": ["disconnect.gif", "watcher-disconnect.gif"],
-    "shock": ["shock.gif", "watcher-shock.gif"],
-    "sunglasses": ["sunglasses.gif", "watcher-sunglasses.gif"],
-    "sad": ["sad.gif", "watcher-sad.gif"],
-    "get": ["get.gif", "watcher-get.gif"],
-    "smile": ["smile.gif", "watcher-smile.gif"],
-    "recharge": ["recharge.gif", "watcher-recharge.gif"],
-    "speechless": ["speechless.gif", "watcher-speechless.gif"],
-    "concentration": ["concentration.gif", "watcher-concentration.gif"],
-    "fondle_love": ["fondle_love.gif", "watcher-fondle-love.gif", "watcher-fondle_love.gif"],
-    "fondle_anger": ["fondle_anger.gif", "watcher-fondle-anger.gif", "watcher-fondle_anger.gif"],
-    "blink": ["blink.gif", "watcher-blink.gif"],
-    "upgrade": ["upgrade.gif", "watcher-upgrade.gif"],
-}
+GIF_CANDIDATES = {entry["name"]: list(entry["source_candidates"]) for entry in ANIMATIONS}
 
 
 def encode_c_string(value: str, size: int) -> bytes:
@@ -153,6 +82,92 @@ def encode_c_string(value: str, size: int) -> bytes:
     if len(data) >= size:
         raise ValueError(f"Value too long for fixed field ({size} bytes): {value}")
     return data + b"\0" * (size - len(data))
+
+
+def default_resource_version(today: date | None = None) -> str:
+    if today is None:
+        today = date.today()
+    return f"res-{today:%Y.%m.%d}.1"
+
+
+def hash_anim_bundle(output_dir: Path) -> str:
+    digest = hashlib.sha256()
+    files = [output_dir / "anim_manifest.bin"]
+    files.extend(sorted(output_dir.glob("*.animpack"), key=lambda path: path.name.lower()))
+
+    for path in files:
+        if not path.is_file():
+            continue
+        rel = path.relative_to(output_dir.parent).as_posix().encode("utf-8")
+        digest.update(rel)
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def stage_behavior_catalog(sdcard_dir: Path, source_path: Path = DEFAULT_BEHAVIOR_CATALOG) -> Path:
+    if not source_path.is_file():
+        raise ValueError(f"Behavior catalog does not exist: {source_path}")
+    target_path = sdcard_dir / "behavior" / "states.json"
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, target_path)
+    return target_path
+
+
+def write_resource_manifest(
+    output_dir: Path,
+    bundle_id: str,
+    bundle_version: str,
+    generated_at: str | None = None,
+) -> Path:
+    sdcard_dir = output_dir.parent
+    manifest_path = sdcard_dir / "resource_manifest.json"
+    behavior_path = sdcard_dir / "behavior" / "states.json"
+    anim_count = len([path for path in output_dir.glob("*.animpack") if path.is_file()])
+    if generated_at is None:
+        generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+
+    manifest = {
+        "schema_version": 1,
+        "product": DEFAULT_PRODUCT,
+        "bundle_id": bundle_id,
+        "bundle_version": bundle_version,
+        "generated_at": generated_at,
+        "compatibility": {
+            "animation_registry": {
+                "count": _REGISTRY.REGISTRY_COUNT,
+                "fingerprint": _REGISTRY.REGISTRY_FINGERPRINT,
+                "id_policy": "contiguous-append-only",
+            }
+        },
+        "contents": {
+            "anim": {
+                "path": "anim/anim_manifest.bin",
+                "format": f"animpack-v{PACK_VERSION}",
+                "count": anim_count,
+                "bundle_sha256": hash_anim_bundle(output_dir),
+            }
+        },
+    }
+    if behavior_path.is_file():
+        manifest["contents"]["behavior"] = {
+            "path": "behavior/states.json",
+            "format": "behavior-states-v1",
+            "sha256": file_sha256(behavior_path),
+        }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return manifest_path
 
 
 def extract_frame_index(stem: str) -> int:
@@ -254,6 +269,14 @@ def load_source_frames(import_dir: Path, anim_type: str, default_delay_ms: int) 
     return []
 
 
+def animation_source_exists(import_dir: Path, anim_type: str) -> bool:
+    if resolve_gif_source(import_dir, anim_type) is not None:
+        return True
+
+    legacy_dirs = [name for name, mapped_type in LEGACY_IMPORT_MAP.items() if mapped_type == anim_type]
+    return any(any((import_dir / legacy_dir).glob("*.png")) for legacy_dir in legacy_dirs)
+
+
 def write_animpack(
     output_dir: Path,
     anim_type: str,
@@ -269,8 +292,9 @@ def write_animpack(
         raise ValueError(f"Frame size mismatch in {anim_type}")
 
     encoded_frames: list[tuple[bytes, int]] = []
+    use_raw_frames = anim_type in RAW_FRAME_ANIM_TYPES
     for payload in raw_payloads:
-        indexed_payload = encode_indexed8_exact(payload)
+        indexed_payload = None if use_raw_frames else encode_indexed8_exact(payload)
         if indexed_payload is not None:
             encoded_frames.append((indexed_payload, FRAME_FLAG_INDEXED8))
         else:
@@ -328,20 +352,43 @@ def build_manifest(
     default_fps: int,
     swap_bytes: bool,
     clean: bool,
+    extra_anim_types: list[str] | None = None,
 ) -> dict[str, int]:
+    unknown_types = sorted(set(extra_anim_types or []) - set(ANIM_TYPES))
+    if unknown_types:
+        raise ValueError(
+            "Animation type(s) not registered in animation_registry.json: " + ", ".join(unknown_types)
+        )
+
+    missing_required = [
+        entry["name"]
+        for entry in ANIMATIONS
+        if entry["required"] and not animation_source_exists(import_dir, entry["name"])
+    ]
+    if missing_required:
+        raise ValueError(
+            "Required animation source(s) missing: " + ", ".join(missing_required)
+        )
+
     if clean and output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     default_delay_ms = max(1, int(round(1000 / max(default_fps, 1))))
 
+    anim_types = list(ANIM_TYPES)
+
     manifest_entries = []
     manifest_counts: dict[str, int] = {}
-    for type_id, anim_type in enumerate(ANIM_TYPES):
+    for anim_type in anim_types:
         frames = load_source_frames(import_dir, anim_type, default_delay_ms)
         if not frames:
+            if ANIMATION_BY_NAME[anim_type]["required"]:
+                raise ValueError(f"Required animation source contains no frames: {anim_type}")
             continue
 
-        should_loop = anim_type not in NON_LOOP_ANIM_TYPES
+        registry_entry = ANIMATION_BY_NAME[anim_type]
+        type_id = registry_entry["id"]
+        should_loop = registry_entry["default_loop"]
         pack_info = write_animpack(output_dir, anim_type, frames, default_fps, swap_bytes, should_loop)
         entry = struct.pack(
             MANIFEST_ENTRY_FMT,
@@ -364,7 +411,7 @@ def build_manifest(
 
     print(f"Wrote {manifest_path}")
     print(f"Generated {len(manifest_entries)} manifest entries in {output_dir}")
-    for anim_type in ANIM_TYPES:
+    for anim_type in anim_types:
         if anim_type in manifest_counts:
             print(f"  {anim_type}: {manifest_counts[anim_type]} frame(s)")
     return manifest_counts
@@ -384,7 +431,12 @@ def main() -> int:
         default=str(DEFAULT_OUTPUT_DIR),
         help="Where generated animpack assets should be written",
     )
-    parser.add_argument("--fps", type=int, default=10, help="Default FPS stored in manifest entries")
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=DEFAULT_FPS,
+        help=f"Default FPS stored in manifest entries (Registry default: {DEFAULT_FPS})",
+    )
     parser.add_argument(
         "--clean",
         action=argparse.BooleanOptionalAction,
@@ -396,15 +448,39 @@ def main() -> int:
         action="store_true",
         help="Write RGB565 payloads in LVGL-native swapped 16-bit byte order",
     )
+    parser.add_argument(
+        "--resource-version",
+        default=None,
+        help="SD resource bundle version written to resource_manifest.json",
+    )
+    parser.add_argument(
+        "--bundle-id",
+        default=DEFAULT_BUNDLE_ID,
+        help="Stable SD resource bundle id written to resource_manifest.json",
+    )
+    parser.add_argument(
+        "--extra-anim-type",
+        action="append",
+        default=[],
+        help="Additional animation type to include in anim_manifest.bin; repeat for multiple Feishu-defined types",
+    )
     args = parser.parse_args()
 
     import_dir = Path(args.input_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
+    resource_version = args.resource_version or default_resource_version()
 
     if not import_dir.is_dir():
         raise SystemExit(f"Import directory does not exist: {import_dir}")
 
-    build_manifest(import_dir, output_dir, args.fps, args.lv_color_16_swap, args.clean)
+    build_manifest(import_dir, output_dir, args.fps, args.lv_color_16_swap, args.clean, args.extra_anim_type)
+    stage_behavior_catalog(output_dir.parent)
+    manifest_path = write_resource_manifest(output_dir, args.bundle_id, resource_version)
+    if args.resource_version:
+        print(f"Resource bundle version: {resource_version}")
+    else:
+        print(f"Resource bundle version: {resource_version} (auto)")
+    print(f"Wrote {manifest_path}")
     return 0
 
 

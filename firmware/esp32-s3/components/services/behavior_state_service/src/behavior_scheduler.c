@@ -17,7 +17,8 @@ bool behavior_scheduler_action_should_loop(const behavior_state_def_t *state, co
     return state->loop || state->hold_until_replaced;
 }
 
-bool behavior_scheduler_all_action_events_dispatched(const behavior_action_def_t *action, int next_action_motion_index) {
+bool behavior_scheduler_all_action_events_dispatched(const behavior_action_def_t *action,
+                                                     int next_action_motion_index) {
     return action == NULL || next_action_motion_index >= action->motion_count;
 }
 
@@ -31,7 +32,8 @@ bool behavior_scheduler_all_state_events_dispatched(const behavior_scheduler_sna
     motion_count = behavior_scheduler_state_motion_overridden(snapshot->action) ? 0 : snapshot->state->motion_count;
     return snapshot->next_motion_index >= motion_count &&
            snapshot->next_expression_index >= snapshot->state->expression_count &&
-           snapshot->next_sound_index >= snapshot->state->sound_count;
+           snapshot->next_sound_index >= snapshot->state->sound_count &&
+           snapshot->next_light_index >= snapshot->state->light_count;
 }
 
 uint32_t behavior_scheduler_non_loop_done_at_ms(const behavior_state_def_t *state, const behavior_action_def_t *action,
@@ -48,6 +50,28 @@ uint32_t behavior_scheduler_non_loop_done_at_ms(const behavior_state_def_t *stat
     }
 
     return done_at_ms;
+}
+
+const char *behavior_scheduler_animation_transition_target(const behavior_state_def_t *state,
+                                                           const char *completed_animation) {
+    if (state == NULL || completed_animation == NULL || completed_animation[0] == '\0' ||
+        state->animation_complete_anim[0] == '\0' || state->animation_complete_state[0] == '\0' ||
+        strcmp(state->animation_complete_anim, completed_animation) != 0) {
+        return NULL;
+    }
+
+    return state->animation_complete_state;
+}
+
+bool behavior_scheduler_should_defer_animation_transition_target(const behavior_state_def_t *state,
+                                                                 const char *requested_state,
+                                                                 const char *completed_animation) {
+    if (state == NULL || requested_state == NULL || state->animation_complete_state[0] == '\0' ||
+        strcmp(state->animation_complete_state, requested_state) != 0) {
+        return false;
+    }
+
+    return behavior_scheduler_animation_transition_target(state, completed_animation) == NULL;
 }
 
 static bool append_command(behavior_scheduler_tick_result_t *result, const behavior_scheduler_command_t *command) {
@@ -84,6 +108,28 @@ static bool action_motion_can_prequeue(const behavior_scheduler_tick_input_t *in
            current->at_ms <= input->action_elapsed_ms + BEHAVIOR_SCHEDULER_ACTION_MOTION_LOOKAHEAD_MS;
 }
 
+static bool expression_is_valid_primary_animation(const behavior_state_def_t *state, int expression_index) {
+    const behavior_expression_event_t *expression;
+    int index;
+
+    if (state == NULL || expression_index < 0 || expression_index >= state->expression_count) {
+        return false;
+    }
+    expression = &state->expression[expression_index];
+    if (expression->anim[0] == '\0') {
+        return true;
+    }
+    if (expression->at_ms != 0U) {
+        return false;
+    }
+    for (index = 0; index < expression_index; ++index) {
+        if (state->expression[index].anim[0] != '\0') {
+            return false;
+        }
+    }
+    return true;
+}
+
 void behavior_scheduler_collect_due_events(const behavior_scheduler_tick_input_t *input,
                                            behavior_scheduler_tick_result_t *out_result) {
     behavior_scheduler_command_t command;
@@ -101,6 +147,7 @@ void behavior_scheduler_collect_due_events(const behavior_scheduler_tick_input_t
     out_result->next_action_motion_index = input->next_action_motion_index;
     out_result->next_expression_index = input->next_expression_index;
     out_result->next_sound_index = input->next_sound_index;
+    out_result->next_light_index = input->next_light_index;
 
     if (input->state == NULL) {
         return;
@@ -133,13 +180,19 @@ void behavior_scheduler_collect_due_events(const behavior_scheduler_tick_input_t
 
     while (out_result->next_expression_index < input->state->expression_count &&
            input->state->expression[out_result->next_expression_index].at_ms <= input->state_elapsed_ms) {
+        int expression_index = out_result->next_expression_index;
+
+        out_result->next_expression_index++;
+        if (!expression_is_valid_primary_animation(input->state, expression_index)) {
+            continue;
+        }
         memset(&command, 0, sizeof(command));
         command.type = BEHAVIOR_SCHEDULER_COMMAND_EXPRESSION;
-        command.expression = &input->state->expression[out_result->next_expression_index];
+        command.expression = &input->state->expression[expression_index];
         if (!append_command(out_result, &command)) {
+            out_result->next_expression_index = expression_index;
             return;
         }
-        out_result->next_expression_index++;
     }
 
     while (out_result->next_sound_index < input->state->sound_count &&
@@ -151,5 +204,16 @@ void behavior_scheduler_collect_due_events(const behavior_scheduler_tick_input_t
             return;
         }
         out_result->next_sound_index++;
+    }
+
+    while (out_result->next_light_index < input->state->light_count &&
+           input->state->light[out_result->next_light_index].at_ms <= input->state_elapsed_ms) {
+        memset(&command, 0, sizeof(command));
+        command.type = BEHAVIOR_SCHEDULER_COMMAND_LIGHT;
+        command.light = &input->state->light[out_result->next_light_index];
+        if (!append_command(out_result, &command)) {
+            return;
+        }
+        out_result->next_light_index++;
     }
 }

@@ -4,10 +4,11 @@
  */
 
 #include "anim_storage.h"
-#include "anim_meta.h"
+#include "anim_fault_injection.h"
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -57,24 +58,26 @@ static const char *k_manifest_magic = "ANIM";
 static const char *k_pack_magic = "ANPK";
 static const int k_frame_read_attempts = 3;
 
-static const char *emoji_names[EMOJI_ANIM_COUNT] = {
-    "boot",          "happy",       "error",        "bluetooth", "speaking", "listening", "processing", "standby",
-    "thinking",      "custom1",     "custom2",      "custom3",   "standby1", "standby2",  "standby3",   "standby4",
-    "disconnect",    "shock",       "sunglasses",   "sad",       "get",      "smile",     "recharge",   "speechless",
-    "concentration", "fondle_love", "fondle_anger", "blink",     "upgrade",
-};
-
 static bool g_catalog_initialized = false;
 static anim_catalog_type_info_t g_catalog[EMOJI_ANIM_COUNT];
 static anim_frame_buffer_t g_legacy_frame = {0};
+
+static uint16_t anim_storage_default_fps(void) {
+#ifdef CONFIG_WATCHER_ANIM_FPS
+    return (uint16_t)CONFIG_WATCHER_ANIM_FPS;
+#else
+    return (uint16_t)ANIMATION_REGISTRY_DEFAULT_FPS;
+#endif
+}
 
 static void reset_catalog(void) {
     memset(g_catalog, 0, sizeof(g_catalog));
     for (int index = 0; index < EMOJI_ANIM_COUNT; ++index) {
         g_catalog[index].type = (emoji_anim_type_t)index;
-        strncpy(g_catalog[index].name, emoji_names[index], sizeof(g_catalog[index].name) - 1);
-        g_catalog[index].fps = (uint16_t)anim_meta_get_fps((emoji_anim_type_t)index);
-        g_catalog[index].loop = anim_meta_should_loop((emoji_anim_type_t)index);
+        strncpy(g_catalog[index].name, animation_registry_name((emoji_anim_type_t)index),
+                sizeof(g_catalog[index].name) - 1);
+        g_catalog[index].fps = anim_storage_default_fps();
+        g_catalog[index].loop = animation_registry_default_loop((emoji_anim_type_t)index);
     }
 }
 
@@ -101,6 +104,9 @@ static int anim_stream_reopen_file(anim_stream_t *stream) {
         return -1;
     }
 
+    if (anim_fault_injection_should_fail(ANIM_FAULT_SD_OPEN)) {
+        return -1;
+    }
     FILE *reopened = fopen(stream->info.pack_path, "rb");
     if (reopened == NULL) {
         ESP_LOGW(TAG, "Failed to reopen animpack %s: errno=%d (%s)", stream->info.pack_path, errno, strerror(errno));
@@ -135,6 +141,7 @@ static int load_manifest_from_path(const char *manifest_path) {
         return -1;
     }
 
+    bool loaded_types[EMOJI_ANIM_COUNT] = {false};
     int loaded = 0;
     for (uint16_t index = 0; index < header.type_count; ++index) {
         anim_manifest_entry_t entry = {0};
@@ -142,7 +149,29 @@ static int load_manifest_from_path(const char *manifest_path) {
             break;
         }
 
-        if (entry.type_id >= EMOJI_ANIM_COUNT || entry.frame_count == 0) {
+        if (entry.type_id >= EMOJI_ANIM_COUNT || entry.frame_count == 0 || entry.width == 0 || entry.height == 0) {
+            ESP_LOGW(TAG, "Ignoring invalid animation manifest entry id=%u name=%.*s", (unsigned)entry.type_id,
+                     (int)sizeof(entry.name), entry.name);
+            continue;
+        }
+
+        emoji_anim_type_t type = (emoji_anim_type_t)entry.type_id;
+        const char *canonical_name = animation_registry_name(type);
+        size_t entry_name_len = strnlen(entry.name, sizeof(entry.name));
+        size_t entry_path_len = strnlen(entry.pack_path, sizeof(entry.pack_path));
+        if (entry_name_len == sizeof(entry.name) || strcmp(entry.name, canonical_name) != 0) {
+            ESP_LOGW(TAG, "Ignoring animation manifest name mismatch id=%u expected=%s actual=%.*s",
+                     (unsigned)entry.type_id, canonical_name, (int)sizeof(entry.name), entry.name);
+            continue;
+        }
+        if (entry_path_len == 0 || entry_path_len == sizeof(entry.pack_path)) {
+            ESP_LOGW(TAG, "Ignoring invalid animation manifest pack path id=%u name=%s", (unsigned)entry.type_id,
+                     canonical_name);
+            continue;
+        }
+        if (loaded_types[entry.type_id]) {
+            ESP_LOGW(TAG, "Ignoring duplicate animation manifest entry id=%u name=%s", (unsigned)entry.type_id,
+                     canonical_name);
             continue;
         }
 
@@ -150,13 +179,20 @@ static int load_manifest_from_path(const char *manifest_path) {
         info->available = true;
         info->width = entry.width;
         info->height = entry.height;
-        info->fps = entry.fps > 0 ? entry.fps : (uint16_t)anim_meta_get_fps((emoji_anim_type_t)entry.type_id);
+        info->fps = entry.fps > 0 ? entry.fps : anim_storage_default_fps();
         info->loop = entry.loop != 0;
         info->frame_count = entry.frame_count;
-        if (entry.name[0] != '\0') {
-            strncpy(info->name, entry.name, sizeof(info->name) - 1);
-        }
+        strncpy(info->name, canonical_name, sizeof(info->name) - 1);
         normalize_pack_path(entry.pack_path, info->pack_path, sizeof(info->pack_path));
+        if (info->pack_path[0] == '\0') {
+            ESP_LOGW(TAG, "Ignoring animation manifest entry without pack path id=%u name=%s", (unsigned)entry.type_id,
+                     canonical_name);
+            memset(info, 0, sizeof(*info));
+            info->type = type;
+            strncpy(info->name, canonical_name, sizeof(info->name) - 1);
+            continue;
+        }
+        loaded_types[entry.type_id] = true;
         ++loaded;
     }
 
@@ -173,7 +209,6 @@ static int ensure_manifest_loaded(void) {
         return 0;
     }
 
-    anim_meta_init();
     reset_catalog();
     if (load_manifest_from_path(ANIM_MANIFEST_PATH) != 0 && load_manifest_from_path(ANIM_MANIFEST_FALLBACK_PATH) != 0) {
         ESP_LOGW(TAG, "No SD animation manifest available under %s", ANIM_STORAGE_ROOT);
@@ -187,12 +222,12 @@ static int ensure_manifest_loaded(void) {
 static int anim_frame_buffer_ensure(anim_frame_buffer_t *buffer, uint16_t width, uint16_t height) {
     size_t expected_size = (size_t)width * (size_t)height * 2U;
     if (buffer == NULL || expected_size == 0) {
-        return -1;
+        return ANIM_STORAGE_INVALID_RESOURCE;
     }
 
     if (buffer->img_data != NULL && buffer->data_size == expected_size && buffer->width == width &&
         buffer->height == height) {
-        return 0;
+        return ANIM_STORAGE_OK;
     }
 
     anim_frame_buffer_free(buffer);
@@ -209,11 +244,11 @@ static uint16_t anim_stream_output_height(const anim_stream_t *stream) {
 
 static int anim_stream_ensure_scratch(anim_stream_t *stream, size_t data_size) {
     if (stream == NULL || data_size == 0) {
-        return -1;
+        return ANIM_STORAGE_INVALID_RESOURCE;
     }
 
     if (stream->scratch_data != NULL && stream->scratch_size >= data_size) {
-        return 0;
+        return ANIM_STORAGE_OK;
     }
 
     if (stream->scratch_data != NULL) {
@@ -222,14 +257,91 @@ static int anim_stream_ensure_scratch(anim_stream_t *stream, size_t data_size) {
         stream->scratch_size = 0;
     }
 
+    if (anim_fault_injection_should_fail(ANIM_FAULT_PSRAM_STREAM_SCRATCH_ALLOC)) {
+        return ANIM_STORAGE_NO_MEMORY;
+    }
     stream->scratch_data = (uint8_t *)heap_caps_malloc(data_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (stream->scratch_data == NULL) {
         ESP_LOGE(TAG, "Failed to allocate %u bytes for indexed animation scratch", (unsigned)data_size);
-        return -1;
+        return ANIM_STORAGE_NO_MEMORY;
     }
 
     stream->scratch_size = data_size;
-    return 0;
+    return ANIM_STORAGE_OK;
+}
+
+static bool anim_frame_payload_limits(uint16_t width, uint16_t height, size_t *rgb565_out, size_t *indexed8_out) {
+    if (width == 0 || height == 0) {
+        return false;
+    }
+
+    uint64_t pixels = (uint64_t)width * (uint64_t)height;
+    uint64_t rgb565_size = pixels * 2ULL;
+    uint64_t indexed8_size = sizeof(uint16_t) + (256ULL * 2ULL) + pixels;
+    if (rgb565_size > SIZE_MAX || indexed8_size > SIZE_MAX) {
+        return false;
+    }
+
+    if (rgb565_out != NULL) {
+        *rgb565_out = (size_t)rgb565_size;
+    }
+    if (indexed8_out != NULL) {
+        *indexed8_out = (size_t)indexed8_size;
+    }
+    return true;
+}
+
+static bool anim_frame_desc_is_valid(const char *name, uint16_t width, uint16_t height, uint32_t payload_size,
+                                     int frame_index, const anim_pack_frame_desc_t *frame) {
+    size_t rgb565_size = 0;
+    size_t indexed8_max_size = 0;
+    const char *safe_name = name != NULL ? name : "<unknown>";
+
+    if (frame == NULL || !anim_frame_payload_limits(width, height, &rgb565_size, &indexed8_max_size)) {
+        ESP_LOGW(TAG, "Invalid animpack geometry for %s: %ux%u", safe_name, (unsigned)width, (unsigned)height);
+        return false;
+    }
+
+    bool indexed8 = (frame->flags & ANIM_FRAME_FLAG_INDEXED8) != 0;
+    if ((frame->flags & ~ANIM_FRAME_KNOWN_FLAGS) != 0) {
+        ESP_LOGW(TAG, "Unsupported frame flags for %s frame %d: 0x%04x", safe_name, frame_index, frame->flags);
+        return false;
+    }
+    if (frame->size == 0) {
+        ESP_LOGW(TAG, "Invalid empty frame for %s frame %d", safe_name, frame_index);
+        return false;
+    }
+    if (frame->offset > payload_size || frame->size > payload_size - frame->offset) {
+        ESP_LOGW(TAG, "Frame range outside payload for %s frame %d: offset=%u size=%u payload=%u", safe_name,
+                 frame_index, (unsigned)frame->offset, (unsigned)frame->size, (unsigned)payload_size);
+        return false;
+    }
+    if (!indexed8 && frame->size != rgb565_size) {
+        ESP_LOGW(TAG, "Invalid RGB565 frame size for %s frame %d: size=%u expected=%u", safe_name, frame_index,
+                 (unsigned)frame->size, (unsigned)rgb565_size);
+        return false;
+    }
+    if (indexed8 && (frame->size < sizeof(uint16_t) || frame->size > indexed8_max_size)) {
+        ESP_LOGW(TAG, "Invalid indexed frame size for %s frame %d: size=%u max=%u", safe_name, frame_index,
+                 (unsigned)frame->size, (unsigned)indexed8_max_size);
+        return false;
+    }
+
+    return true;
+}
+
+static bool anim_frame_table_is_valid(const char *name, const anim_pack_header_t *header,
+                                      const anim_pack_frame_desc_t *frames, uint32_t payload_size) {
+    if (header == NULL || frames == NULL) {
+        return false;
+    }
+
+    for (uint16_t index = 0; index < header->frame_count; ++index) {
+        if (!anim_frame_desc_is_valid(name, header->width, header->height, payload_size, index, &frames[index])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static int decode_indexed8_frame(const anim_stream_t *stream, const anim_pack_frame_desc_t *frame,
@@ -356,10 +468,6 @@ int emoji_get_frame_count(emoji_anim_type_t type) {
         return 0;
     }
 
-    anim_config_t *cfg = anim_meta_get_config(type);
-    if (cfg->frame_count > 0 && cfg->frame_count < info->frame_count) {
-        return cfg->frame_count;
-    }
     return info->frame_count;
 }
 
@@ -394,10 +502,7 @@ int emoji_get_loop_duration_ms(emoji_anim_type_t type) {
         }
     }
 
-    int fps = info->fps > 0 ? info->fps : anim_meta_get_fps(type);
-    if (fps <= 0) {
-        fps = anim_meta_get_default_fps();
-    }
+    int fps = info->fps > 0 ? info->fps : anim_storage_default_fps();
     if (fps <= 0) {
         return 0;
     }
@@ -417,22 +522,22 @@ int emoji_get_loop_duration_ms(emoji_anim_type_t type) {
 }
 
 const char *emoji_type_name(emoji_anim_type_t type) {
-    if (type < 0 || type >= EMOJI_ANIM_COUNT) {
-        return "unknown";
-    }
-    return emoji_names[type];
+    return animation_registry_name(type);
 }
 
 int anim_frame_buffer_init(anim_frame_buffer_t *buffer, uint16_t width, uint16_t height) {
     if (buffer == NULL || width == 0 || height == 0) {
-        return -1;
+        return ANIM_STORAGE_INVALID_RESOURCE;
     }
 
     size_t data_size = (size_t)width * (size_t)height * 2U;
+    if (anim_fault_injection_should_fail(ANIM_FAULT_PSRAM_FRAME_BUFFER_ALLOC)) {
+        return ANIM_STORAGE_NO_MEMORY;
+    }
     uint8_t *img_data = (uint8_t *)heap_caps_malloc(data_size, MALLOC_CAP_SPIRAM);
     if (img_data == NULL) {
         ESP_LOGE(TAG, "Failed to allocate %u bytes for animation frame buffer", (unsigned)data_size);
-        return -1;
+        return ANIM_STORAGE_NO_MEMORY;
     }
 
     memset(buffer, 0, sizeof(*buffer));
@@ -447,7 +552,7 @@ int anim_frame_buffer_init(anim_frame_buffer_t *buffer, uint16_t width, uint16_t
     buffer->img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
     buffer->img_dsc.data_size = (uint32_t)data_size;
     buffer->img_dsc.data = img_data;
-    return 0;
+    return ANIM_STORAGE_OK;
 }
 
 void anim_frame_buffer_free(anim_frame_buffer_t *buffer) {
@@ -464,37 +569,89 @@ void anim_frame_buffer_free(anim_frame_buffer_t *buffer) {
 int anim_stream_open(emoji_anim_type_t type, anim_stream_t *out_stream) {
     const anim_catalog_type_info_t *catalog_info = anim_catalog_get_type_info(type);
     if (catalog_info == NULL || !catalog_info->available || catalog_info->pack_path[0] == '\0' || out_stream == NULL) {
-        return -1;
+        return ANIM_STORAGE_INVALID_RESOURCE;
     }
 
+    if (anim_fault_injection_should_fail(ANIM_FAULT_SD_OPEN)) {
+        return ANIM_STORAGE_SD_OPEN_FAILED;
+    }
     FILE *handle = fopen(catalog_info->pack_path, "rb");
     if (handle == NULL) {
         ESP_LOGW(TAG, "Failed to open animpack: %s", catalog_info->pack_path);
-        return -1;
+        return ANIM_STORAGE_SD_OPEN_FAILED;
     }
     anim_pack_header_t header = {0};
-    if (fread(&header, sizeof(header), 1, handle) != 1) {
+    if (anim_fault_injection_should_fail(ANIM_FAULT_SD_HEADER_READ) || fread(&header, sizeof(header), 1, handle) != 1) {
+        ESP_LOGW(TAG, "Failed to read animpack header: %s", catalog_info->pack_path);
         fclose(handle);
-        return -1;
+        return ANIM_STORAGE_SD_READ_FAILED;
     }
 
     if (memcmp(header.magic, k_pack_magic, sizeof(header.magic)) != 0 || header.version != ANIM_PACK_VERSION) {
         ESP_LOGW(TAG, "Invalid animpack header: %s", catalog_info->pack_path);
         fclose(handle);
-        return -1;
+        return ANIM_STORAGE_PACK_CORRUPT;
+    }
+    if (header.width == 0 || header.height == 0 || header.frame_count == 0 || header.frame_data_size == 0) {
+        ESP_LOGW(TAG, "Invalid animpack metadata: %s width=%u height=%u frames=%u payload=%u", catalog_info->pack_path,
+                 (unsigned)header.width, (unsigned)header.height, (unsigned)header.frame_count,
+                 (unsigned)header.frame_data_size);
+        fclose(handle);
+        return ANIM_STORAGE_PACK_CORRUPT;
+    }
+    if (header.width != catalog_info->width || header.height != catalog_info->height ||
+        header.frame_count != catalog_info->frame_count || (header.loop != 0) != catalog_info->loop) {
+        ESP_LOGW(TAG, "Animpack metadata does not match manifest: %s manifest=%ux%u/%u/loop=%d pack=%ux%u/%u/loop=%d",
+                 catalog_info->pack_path, (unsigned)catalog_info->width, (unsigned)catalog_info->height,
+                 (unsigned)catalog_info->frame_count, catalog_info->loop ? 1 : 0, (unsigned)header.width,
+                 (unsigned)header.height, (unsigned)header.frame_count, header.loop != 0 ? 1 : 0);
+        fclose(handle);
+        return ANIM_STORAGE_PACK_CORRUPT;
     }
     size_t table_size = (size_t)header.frame_count * sizeof(anim_pack_frame_desc_t);
+    long file_size = 0;
+    if (fseek(handle, 0, SEEK_END) != 0 || (file_size = ftell(handle)) < 0) {
+        ESP_LOGW(TAG, "Failed to stat animpack: %s errno=%d (%s)", catalog_info->pack_path, errno, strerror(errno));
+        fclose(handle);
+        return ANIM_STORAGE_SD_READ_FAILED;
+    }
+    uint64_t toc_end = (uint64_t)header.toc_offset + (uint64_t)table_size;
+    if (header.toc_offset < sizeof(header) || toc_end > (uint64_t)header.payload_offset ||
+        header.payload_offset > (uint64_t)file_size) {
+        ESP_LOGW(TAG, "Invalid animpack bounds: %s toc=%u toc_end=%llu payload=%u file=%ld", catalog_info->pack_path,
+                 (unsigned)header.toc_offset, (unsigned long long)toc_end, (unsigned)header.payload_offset, file_size);
+        fclose(handle);
+        return ANIM_STORAGE_PACK_CORRUPT;
+    }
+    uint64_t payload_size64 = (uint64_t)file_size - (uint64_t)header.payload_offset;
+    if (payload_size64 > UINT32_MAX) {
+        ESP_LOGW(TAG, "Animpack payload too large: %s payload=%llu", catalog_info->pack_path,
+                 (unsigned long long)payload_size64);
+        fclose(handle);
+        return ANIM_STORAGE_PACK_CORRUPT;
+    }
+    uint32_t payload_size = (uint32_t)payload_size64;
     anim_pack_frame_desc_t *frames = (anim_pack_frame_desc_t *)malloc(table_size);
     if (frames == NULL) {
+        ESP_LOGW(TAG, "Failed to allocate animpack TOC: %s bytes=%u", catalog_info->pack_path, (unsigned)table_size);
         fclose(handle);
-        return -1;
+        return ANIM_STORAGE_NO_MEMORY;
     }
 
-    if (fseek(handle, (long)header.toc_offset, SEEK_SET) != 0 ||
+    if (anim_fault_injection_should_fail(ANIM_FAULT_SD_TOC_READ) ||
+        fseek(handle, (long)header.toc_offset, SEEK_SET) != 0 ||
         fread(frames, sizeof(anim_pack_frame_desc_t), header.frame_count, handle) != header.frame_count) {
+        ESP_LOGW(TAG, "Failed to read animpack TOC: %s", catalog_info->pack_path);
         free(frames);
         fclose(handle);
-        return -1;
+        return ANIM_STORAGE_SD_READ_FAILED;
+    }
+
+    if (!anim_frame_table_is_valid(catalog_info->name, &header, frames, payload_size)) {
+        ESP_LOGW(TAG, "Invalid animpack frame table: %s", catalog_info->pack_path);
+        free(frames);
+        fclose(handle);
+        return ANIM_STORAGE_PACK_CORRUPT;
     }
 
     memset(out_stream, 0, sizeof(*out_stream));
@@ -508,9 +665,10 @@ int anim_stream_open(emoji_anim_type_t type, anim_stream_t *out_stream) {
     out_stream->frame_count = header.frame_count;
     out_stream->payload_offset = header.payload_offset;
     out_stream->frame_data_size = header.frame_data_size;
+    out_stream->payload_size = payload_size;
     out_stream->file_pos = header.toc_offset + (uint32_t)table_size;
     out_stream->file_pos_valid = true;
-    return 0;
+    return ANIM_STORAGE_OK;
 }
 
 void anim_stream_close(anim_stream_t *stream) {
@@ -544,45 +702,45 @@ int anim_stream_get_frame_delay_ms(const anim_stream_t *stream, int frame_index)
         return 1000 / stream->info.fps;
     }
 
-    return 1000 / anim_meta_get_default_fps();
+    return 1000 / anim_storage_default_fps();
 }
 
 int anim_stream_read_frame(anim_stream_t *stream, int frame_index, anim_frame_buffer_t *buffer) {
     if (stream == NULL || stream->file == NULL || stream->frames == NULL || buffer == NULL) {
-        return -1;
+        return ANIM_STORAGE_INVALID_RESOURCE;
     }
     if (frame_index < 0 || frame_index >= stream->frame_count) {
-        return -1;
+        return ANIM_STORAGE_INVALID_RESOURCE;
     }
-
-    uint16_t output_width = anim_stream_output_width(stream);
-    uint16_t output_height = anim_stream_output_height(stream);
-    if (anim_frame_buffer_ensure(buffer, output_width, output_height) != 0) {
-        return -1;
+    if (anim_fault_injection_should_fail(ANIM_FAULT_SD_FRAME_READ)) {
+        return ANIM_STORAGE_SD_READ_FAILED;
     }
 
     anim_pack_frame_desc_t *frame = &stream->frames[frame_index];
     bool indexed8 = (frame->flags & ANIM_FRAME_FLAG_INDEXED8) != 0;
-    if ((frame->flags & ~ANIM_FRAME_KNOWN_FLAGS) != 0) {
-        ESP_LOGW(TAG, "Unsupported frame flags for %s frame %d: 0x%04x", stream->info.name, frame_index, frame->flags);
-        return -1;
+    if (!anim_frame_desc_is_valid(stream->info.name, stream->info.width, stream->info.height, stream->payload_size,
+                                  frame_index, frame)) {
+        return ANIM_STORAGE_PACK_CORRUPT;
     }
 
-    if (!indexed8 && frame->size > stream->frame_data_size) {
-        ESP_LOGW(TAG, "Frame payload too large for buffer: %u > %u", (unsigned)frame->size,
-                 (unsigned)stream->frame_data_size);
-        return -1;
+    uint16_t output_width = anim_stream_output_width(stream);
+    uint16_t output_height = anim_stream_output_height(stream);
+    int buffer_result = anim_frame_buffer_ensure(buffer, output_width, output_height);
+    if (buffer_result != ANIM_STORAGE_OK) {
+        return buffer_result;
     }
 
     uint8_t *read_buffer = stream->scratch_data;
-    if (anim_stream_ensure_scratch(stream, frame->size) != 0) {
-        return -1;
+    int scratch_result = anim_stream_ensure_scratch(stream, frame->size);
+    if (scratch_result != ANIM_STORAGE_OK) {
+        return scratch_result;
     }
     read_buffer = stream->scratch_data;
 
     if (indexed8) {
-        if (anim_stream_ensure_scratch(stream, frame->size) != 0) {
-            return -1;
+        scratch_result = anim_stream_ensure_scratch(stream, frame->size);
+        if (scratch_result != ANIM_STORAGE_OK) {
+            return scratch_result;
         }
         read_buffer = stream->scratch_data;
     }
@@ -596,18 +754,20 @@ int anim_stream_read_frame(anim_stream_t *stream, int frame_index, anim_frame_bu
         if (positioned || fseek(stream->file, (long)target_pos, SEEK_SET) == 0) {
             stream->file_pos = target_pos;
             stream->file_pos_valid = true;
-            size_t bytes_read = fread(read_buffer, 1, frame->size, stream->file);
+            size_t bytes_read = anim_fault_injection_should_fail(ANIM_FAULT_SD_SHORT_READ)
+                                    ? (frame->size > 0U ? frame->size - 1U : 0U)
+                                    : fread(read_buffer, 1, frame->size, stream->file);
             stream->file_pos += (uint32_t)bytes_read;
             if (bytes_read == frame->size) {
                 if (indexed8 && decode_indexed8_frame(stream, frame, read_buffer, buffer) != 0) {
-                    return -1;
+                    return ANIM_STORAGE_PACK_CORRUPT;
                 }
                 if (!indexed8 && decode_rgb565_scaled_frame(stream, frame, read_buffer, buffer) != 0) {
-                    return -1;
+                    return ANIM_STORAGE_PACK_CORRUPT;
                 }
                 buffer->img_dsc.data = buffer->img_data;
                 buffer->img_dsc.data_size = (uint32_t)buffer->data_size;
-                return 0;
+                return ANIM_STORAGE_OK;
             }
 
             ESP_LOGW(TAG, "Short read for %s frame %d: got=%u expected=%u errno=%d ferror=%d feof=%d (attempt %d/%d)",
@@ -626,7 +786,7 @@ int anim_stream_read_frame(anim_stream_t *stream, int frame_index, anim_frame_bu
         break;
     }
 
-    return -1;
+    return ANIM_STORAGE_SD_READ_FAILED;
 }
 
 int anim_load_static_frame(emoji_anim_type_t type, int frame_index, anim_frame_buffer_t *buffer) {

@@ -289,7 +289,7 @@ esp_err_t bsp_knob_btn_init(void *param);
 uint8_t bsp_knob_btn_get_key_value(void *param);
 esp_err_t bsp_knob_btn_deinit(void *param);
 void bsp_set_btn_long_press_cb(void (*cb)(void));
-void bsp_set_btn_long_press_ms_cb(uint16_t press_time_ms, void (*cb)(void));
+esp_err_t bsp_set_btn_long_press_ms_cb(uint16_t press_time_ms, void (*cb)(void));
 void bsp_set_btn_long_release_cb(void (*cb)(void));
 esp_err_t bsp_set_btn_single_click_cb(void (*cb)(void));
 
@@ -309,6 +309,7 @@ lv_disp_t *bsp_lvgl_init_with_cfg(const bsp_display_cfg_t *cfg);
 lv_disp_t *bsp_lvgl_get_disp(void);
 
 sscma_client_handle_t bsp_sscma_client_init();
+esp_err_t bsp_sscma_client_deinit(void);
 sscma_client_flasher_handle_t bsp_sscma_flasher_init();
 
 esp_io_expander_handle_t bsp_io_expander_init();
@@ -330,6 +331,8 @@ esp_codec_dev_handle_t bsp_audio_codec_speaker_init(void);
 esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void);
 esp_err_t bsp_i2s_read(void *audio_buffer, size_t len, size_t *bytes_read, uint32_t timeout_ms);
 esp_err_t bsp_i2s_write(void *audio_buffer, size_t len, size_t *bytes_written, uint32_t timeout_ms);
+/** Wait until every TX DMA descriptor that could contain previously written audio has completed. */
+esp_err_t bsp_i2s_wait_tx_drain(uint32_t timeout_ms);
 esp_err_t bsp_codec_set_fs(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t ch);
 esp_err_t bsp_codec_volume_set(int volume, int *volume_set);
 esp_err_t bsp_codec_mute_set(bool enable);
@@ -337,6 +340,7 @@ esp_err_t bsp_codec_dev_stop(void);
 esp_err_t bsp_codec_dev_resume(void);
 
 esp_err_t bsp_codec_init(void);
+esp_err_t bsp_codec_deinit(void);
 esp_codec_dev_handle_t bsp_codec_speaker_get(void);
 esp_codec_dev_handle_t bsp_codec_microphone_get(void);
 esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer_len);

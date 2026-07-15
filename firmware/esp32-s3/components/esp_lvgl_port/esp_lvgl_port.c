@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "watcher_input_router.h"
 
 #include "lvgl.h"
 
@@ -41,11 +42,6 @@ LV_IMG_DECLARE(img_cursor)
 #endif
 
 static const char *TAG = "LVGL";
-
-#ifdef ESP_LVGL_PORT_TOUCH_COMPONENT
-#define LVGL_TOUCH_READ_FAIL_BACKOFF_THRESHOLD 3
-#define LVGL_TOUCH_READ_FAIL_BACKOFF_MS 5000
-#endif
 
 /*******************************************************************************
 * Types definitions
@@ -90,6 +86,7 @@ typedef struct lvgl_port_ctx_s {
     size_t task_stack_words;
 #endif
     bool running;
+    volatile bool panel_direct_draw_pending;
     int task_max_sleep_ms;
 #ifdef ESP_LVGL_PORT_USB_HOST_HID_COMPONENT
     lvgl_port_usb_hid_ctx_t hid_ctx;
@@ -108,8 +105,6 @@ typedef struct {
     esp_lcd_touch_handle_t handle; /* LCD touch IO handle */
     lv_indev_drv_t indev_drv;      /* LVGL input device driver */
     int16_t sensitivity;           /* Touch sensitivity (0 - 255) */
-    uint8_t consecutive_failures;  /* Consecutive touch read failures */
-    TickType_t suppress_until;     /* Backoff window for repeated I2C failures */
 } lvgl_port_touch_ctx_t;
 #endif
 
@@ -118,7 +113,7 @@ typedef struct {
     knob_handle_t knob_handle;  /* Encoder knob handlers */
     button_handle_t btn_handle; /* Encoder button handlers */
     lv_indev_drv_t indev_drv;   /* LVGL input device driver */
-    bool btn_enter;             /* Encoder button enter state */
+    lv_indev_t *indev;          /* Registered LVGL input device */
 } lvgl_port_encoder_ctx_t;
 #endif
 
@@ -467,8 +462,6 @@ lv_indev_t *lvgl_port_add_encoder(const lvgl_port_encoder_cfg_t *encoder_cfg) {
     ESP_ERROR_CHECK(iot_button_register_cb(encoder_ctx->btn_handle, BUTTON_PRESS_UP, lvgl_port_encoder_btn_up_handler,
                                            encoder_ctx));
 
-    encoder_ctx->btn_enter = false;
-
     /* Register a encoder input device */
     lv_indev_drv_init(&encoder_ctx->indev_drv);
     encoder_ctx->indev_drv.type = LV_INDEV_TYPE_ENCODER;
@@ -476,6 +469,7 @@ lv_indev_t *lvgl_port_add_encoder(const lvgl_port_encoder_cfg_t *encoder_cfg) {
     encoder_ctx->indev_drv.read_cb = lvgl_port_encoder_read;
     encoder_ctx->indev_drv.user_data = encoder_ctx;
     indev = lv_indev_drv_register(&encoder_ctx->indev_drv);
+    encoder_ctx->indev = indev;
 
 err:
     if (ret != ESP_OK) {
@@ -878,13 +872,17 @@ static bool lvgl_port_flush_ready_callback(esp_lcd_panel_io_handle_t panel_io, e
                                            void *user_ctx) {
     (void)panel_io;
     (void)edata;
-    (void)user_ctx;
-    if (lvgl_port_ctx.panel_trans_done != NULL) {
+    lv_disp_drv_t *disp_drv = (lv_disp_drv_t *)user_ctx;
+    if (lvgl_port_ctx.panel_direct_draw_pending && lvgl_port_ctx.panel_trans_done != NULL) {
         BaseType_t high_task_woken = pdFALSE;
+        lvgl_port_ctx.panel_direct_draw_pending = false;
         xSemaphoreGiveFromISR(lvgl_port_ctx.panel_trans_done, &high_task_woken);
         if (high_task_woken == pdTRUE) {
             portYIELD_FROM_ISR();
         }
+    } else {
+        assert(disp_drv != NULL);
+        lv_disp_flush_ready(disp_drv);
     }
     return false;
 }
@@ -895,12 +893,17 @@ static esp_err_t lvgl_port_panel_draw_bitmap_locked(esp_lcd_panel_handle_t panel
     if (panel_handle == NULL || color_data == NULL || lvgl_port_ctx.panel_trans_done == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (lvgl_port_ctx.panel_direct_draw_pending) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     while (xSemaphoreTake(lvgl_port_ctx.panel_trans_done, 0) == pdTRUE) {
     }
 
+    lvgl_port_ctx.panel_direct_draw_pending = true;
     esp_err_t ret = esp_lcd_panel_draw_bitmap(panel_handle, x_start, y_start, x_end, y_end, color_data);
     if (ret != ESP_OK) {
+        lvgl_port_ctx.panel_direct_draw_pending = false;
         return ret;
     }
 
@@ -909,6 +912,7 @@ static esp_err_t lvgl_port_panel_draw_bitmap_locked(esp_lcd_panel_handle_t panel
         return ESP_ERR_TIMEOUT;
     }
 
+    lvgl_port_ctx.panel_direct_draw_pending = false;
     return ESP_OK;
 }
 
@@ -922,12 +926,12 @@ static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, 
     const int offsety1 = area->y1;
     const int offsety2 = area->y2;
     // copy a buffer's content to a specific area of the display
-    esp_err_t ret = lvgl_port_panel_draw_bitmap(disp_ctx->panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1,
-                                                color_map, 0);
+    esp_err_t ret =
+        esp_lcd_panel_draw_bitmap(disp_ctx->panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Panel flush failed: %s", esp_err_to_name(ret));
+        lv_disp_flush_ready(drv);
     }
-    lv_disp_flush_ready(drv);
 }
 
 static void lvgl_port_update_callback(lv_disp_drv_t *drv) {
@@ -997,36 +1001,15 @@ static void lvgl_port_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *
     uint16_t touchpad_y[1] = {0};
     uint16_t touchpad_strength[1] = {0};
     uint8_t touchpad_cnt = 0;
-    TickType_t now = xTaskGetTickCount();
-
-    if (touch_ctx->suppress_until != 0 && now < touch_ctx->suppress_until) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
 
     /* Read data from touch controller into memory */
-    esp_err_t ret = esp_lcd_touch_read_data(touch_ctx->handle);
-    if (ret != ESP_OK) {
-        touch_ctx->consecutive_failures++;
-        if (touch_ctx->consecutive_failures >= LVGL_TOUCH_READ_FAIL_BACKOFF_THRESHOLD) {
-            touch_ctx->consecutive_failures = 0;
-            touch_ctx->suppress_until = now + pdMS_TO_TICKS(LVGL_TOUCH_READ_FAIL_BACKOFF_MS);
-            ESP_LOGW(TAG, "Touch read failed repeatedly, backing off polling for %d ms",
-                     LVGL_TOUCH_READ_FAIL_BACKOFF_MS);
-        }
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-    touch_ctx->consecutive_failures = 0;
-    touch_ctx->suppress_until = 0;
+    esp_lcd_touch_read_data(touch_ctx->handle);
 
     /* Read data from touch controller */
     bool touchpad_pressed =
         esp_lcd_touch_get_coordinates(touch_ctx->handle, touchpad_x, touchpad_y, touchpad_strength, &touchpad_cnt, 1);
 
-    /* Filter by sensitivity (if configured) */
-    if (touchpad_pressed && touchpad_cnt > 0 &&
-        (touch_ctx->sensitivity == 0 || touchpad_strength[0] > touch_ctx->sensitivity)) {
+    if (touchpad_pressed && touchpad_cnt > 0 && touchpad_strength[0] > touch_ctx->sensitivity) {
         data->point.x = touchpad_x[0];
         data->point.y = touchpad_y[0];
         data->state = LV_INDEV_STATE_PRESSED;
@@ -1039,6 +1022,7 @@ static void lvgl_port_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *
 #ifdef ESP_LVGL_PORT_KNOB_COMPONENT
 static void lvgl_port_encoder_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
     static int32_t last_v = 0;
+    bool cancelled = false;
 
     assert(indev_drv);
     lvgl_port_encoder_ctx_t *ctx = (lvgl_port_encoder_ctx_t *)indev_drv->user_data;
@@ -1049,11 +1033,17 @@ static void lvgl_port_encoder_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *d
 
     if (last_v ^ invd) {
         last_v = invd;
-        data->enc_diff = (KNOB_LEFT == event) ? (-1) : ((KNOB_RIGHT == event) ? (1) : (0));
+        const int32_t diff = (KNOB_LEFT == event) ? (-1) : ((KNOB_RIGHT == event) ? (1) : (0));
+        const watcher_input_result_t result = watcher_input_router_global_on_rotate(diff);
+        data->enc_diff = result.owner == WATCHER_INPUT_OWNER_LVGL ? diff : 0;
     } else {
         data->enc_diff = 0;
     }
-    data->state = (true == ctx->btn_enter) ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    data->state =
+        watcher_input_router_global_lvgl_button_pressed(&cancelled) ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    if (cancelled && ctx->indev != NULL) {
+        lv_indev_reset(ctx->indev, NULL);
+    }
 }
 
 static void lvgl_port_encoder_btn_down_handler(void *arg, void *arg2) {
@@ -1062,7 +1052,10 @@ static void lvgl_port_encoder_btn_down_handler(void *arg, void *arg2) {
     if (ctx && button) {
         /* ENTER */
         if (button == ctx->btn_handle) {
-            ctx->btn_enter = true;
+            const watcher_input_result_t result =
+                watcher_input_router_global_on_button_down((uint32_t)(esp_timer_get_time() / 1000LL));
+            ESP_LOGI(TAG, "input context=%s event=%s owner=%s", watcher_input_context_name(result.scope.context),
+                     watcher_input_event_name(result.event), watcher_input_owner_name(result.owner));
         }
     }
 }
@@ -1073,7 +1066,18 @@ static void lvgl_port_encoder_btn_up_handler(void *arg, void *arg2) {
     if (ctx && button) {
         /* ENTER */
         if (button == ctx->btn_handle) {
-            ctx->btn_enter = false;
+            const watcher_input_result_t result =
+                watcher_input_router_global_on_button_up((uint32_t)(esp_timer_get_time() / 1000LL));
+            if (result.event == WATCHER_INPUT_EVENT_REJECTED) {
+                ESP_LOGI(TAG, "input context=%s event=%s owner=%s reject=%s duration_ms=%lu",
+                         watcher_input_context_name(result.scope.context), watcher_input_event_name(result.event),
+                         watcher_input_owner_name(result.owner), watcher_input_reject_name(result.reject),
+                         (unsigned long)result.duration_ms);
+            } else {
+                ESP_LOGI(TAG, "input context=%s event=%s owner=%s duration_ms=%lu",
+                         watcher_input_context_name(result.scope.context), watcher_input_event_name(result.event),
+                         watcher_input_owner_name(result.owner), (unsigned long)result.duration_ms);
+            }
         }
     }
 }

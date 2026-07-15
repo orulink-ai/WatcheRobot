@@ -1,8 +1,13 @@
 idf_component_register(
     SRCS
         "src/behavior_action_parser.c"
+        "src/behavior_animation_policy.c"
+        "src/behavior_animation_reducer.c"
         "src/behavior_catalog_parser.c"
+        "src/behavior_catalog_loader.c"
         "src/behavior_executor.c"
+        "src/behavior_memory.c"
+        "src/behavior_motion_sequence.c"
         "src/behavior_scheduler.c"
         "src/behavior_state_service.c"
         "src/behavior_types.c"
@@ -12,7 +17,10 @@ idf_component_register(
         "freertos"
         "hal_servo"
         "json"
+        "sensecap-watcher"
         "sfx_service"
+        "mcu_led_service"
     PRIV_REQUIRES
+        "heap"
         "esp_timer"
 )

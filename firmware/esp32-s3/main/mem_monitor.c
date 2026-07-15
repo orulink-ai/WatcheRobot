@@ -1,5 +1,6 @@
 #include "mem_monitor.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -10,6 +11,10 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+
+#if CONFIG_HEAP_TASK_TRACKING
+#include "esp_heap_task_info.h"
+#endif
 
 #define TAG "MEM_MON"
 
@@ -24,6 +29,8 @@
 #define MEM_MONITOR_CRITICAL_DMA_LARGEST_BYTES ((size_t)CONFIG_WATCHER_MEM_MONITOR_CRITICAL_DMA_LARGEST_KB * 1024U)
 #define MEM_MONITOR_TASK_PRIORITY 1
 #define MEM_MONITOR_INTEGRITY_MIN_STACK_HWM 1024U
+#define MEM_MONITOR_CONTEXT_VALUE_LEN 32
+#define MEM_MONITOR_TASK_OWNER_MAX_TASKS 12U
 #ifdef CONFIG_WATCHER_MEM_MONITOR_TASK_STACK_SIZE
 #define MEM_MONITOR_TASK_STACK_SIZE CONFIG_WATCHER_MEM_MONITOR_TASK_STACK_SIZE
 #else
@@ -55,6 +62,7 @@ static StackType_t *s_monitor_task_stack = NULL;
 static TaskHandle_t s_monitor_task = NULL;
 static mem_monitor_level_t s_last_level = MEM_MONITOR_LEVEL_OK;
 static int64_t s_last_alert_log_us = 0;
+static mem_monitor_context_cb_t s_context_cb = NULL;
 #if CONFIG_WATCHER_MEM_MONITOR_CHECK_INTEGRITY_ON_CRITICAL
 static int64_t s_last_integrity_check_us = 0;
 #endif
@@ -90,6 +98,29 @@ static const char *mem_monitor_level_to_string(mem_monitor_level_t level) {
 
 static unsigned mem_monitor_bytes_to_kb(size_t bytes) {
     return (unsigned)(bytes / 1024U);
+}
+
+static void mem_monitor_set_context_default(char *buf, size_t buf_size, const char *value) {
+    if (buf == NULL || buf_size == 0) {
+        return;
+    }
+    (void)snprintf(buf, buf_size, "%s", value != NULL ? value : "unknown");
+}
+
+static void mem_monitor_collect_context(char *app_buf, size_t app_buf_size, char *resource_buf, size_t resource_buf_size) {
+    mem_monitor_set_context_default(app_buf, app_buf_size, "none");
+    mem_monitor_set_context_default(resource_buf, resource_buf_size, "unknown");
+
+    if (s_context_cb != NULL) {
+        s_context_cb(app_buf, app_buf_size, resource_buf, resource_buf_size);
+    }
+
+    if (app_buf != NULL && app_buf_size > 0 && app_buf[0] == '\0') {
+        mem_monitor_set_context_default(app_buf, app_buf_size, "none");
+    }
+    if (resource_buf != NULL && resource_buf_size > 0 && resource_buf[0] == '\0') {
+        mem_monitor_set_context_default(resource_buf, resource_buf_size, "unknown");
+    }
 }
 
 static void mem_monitor_collect_heap_caps(uint32_t caps, multi_heap_info_t *info, size_t *minimum_free) {
@@ -175,12 +206,16 @@ static void mem_monitor_log_snapshot(const char *stage, const mem_monitor_snapsh
                                      mem_monitor_level_t level, const char *reason, bool recovery) {
     const char *safe_stage = (stage != NULL && stage[0] != '\0') ? stage : "periodic";
     const char *safe_reason = (reason != NULL && reason[0] != '\0') ? reason : "none";
+    char app_ctx[MEM_MONITOR_CONTEXT_VALUE_LEN];
+    char resource_ctx[MEM_MONITOR_CONTEXT_VALUE_LEN];
     UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
 
     if (snapshot == NULL) {
         ESP_LOGW(TAG, "[%s] heap snapshot unavailable", safe_stage);
         return;
     }
+
+    mem_monitor_collect_context(app_ctx, sizeof(app_ctx), resource_ctx, sizeof(resource_ctx));
 
     const char *status = recovery ? "recovered" : mem_monitor_level_to_string(level);
 
@@ -192,7 +227,7 @@ static void mem_monitor_log_snapshot(const char *stage, const mem_monitor_snapsh
 #if CONFIG_SPIRAM
             " psram{free=%uKB largest=%uKB min=%uKB}"
 #endif
-            " stack_hwm=%u",
+            " stack_hwm=%u ctx{app=%s resource=%s}",
             safe_stage, status, safe_reason, mem_monitor_bytes_to_kb(snapshot->internal.total_free_bytes),
             mem_monitor_bytes_to_kb(snapshot->internal.largest_free_block),
             mem_monitor_bytes_to_kb(snapshot->min_internal), mem_monitor_bytes_to_kb(snapshot->dma.total_free_bytes),
@@ -205,7 +240,7 @@ static void mem_monitor_log_snapshot(const char *stage, const mem_monitor_snapsh
             mem_monitor_bytes_to_kb(snapshot->spiram.largest_free_block), mem_monitor_bytes_to_kb(snapshot->min_spiram)
 #endif
                                                                               ,
-            (unsigned)stack_hwm);
+            (unsigned)stack_hwm, app_ctx, resource_ctx);
         return;
     }
 
@@ -217,7 +252,7 @@ static void mem_monitor_log_snapshot(const char *stage, const mem_monitor_snapsh
 #if CONFIG_SPIRAM
             " psram{free=%uKB largest=%uKB min=%uKB}"
 #endif
-            " stack_hwm=%u",
+            " stack_hwm=%u ctx{app=%s resource=%s}",
             safe_stage, status, safe_reason, mem_monitor_bytes_to_kb(snapshot->internal.total_free_bytes),
             mem_monitor_bytes_to_kb(snapshot->internal.largest_free_block),
             mem_monitor_bytes_to_kb(snapshot->min_internal), mem_monitor_bytes_to_kb(snapshot->dma.total_free_bytes),
@@ -230,7 +265,7 @@ static void mem_monitor_log_snapshot(const char *stage, const mem_monitor_snapsh
             mem_monitor_bytes_to_kb(snapshot->spiram.largest_free_block), mem_monitor_bytes_to_kb(snapshot->min_spiram)
 #endif
                                                                               ,
-            (unsigned)stack_hwm);
+            (unsigned)stack_hwm, app_ctx, resource_ctx);
         return;
     }
 
@@ -240,7 +275,7 @@ static void mem_monitor_log_snapshot(const char *stage, const mem_monitor_snapsh
 #if CONFIG_SPIRAM
              " psram{free=%uKB largest=%uKB min=%uKB}"
 #endif
-             " stack_hwm=%u",
+             " stack_hwm=%u ctx{app=%s resource=%s}",
              safe_stage, status, mem_monitor_bytes_to_kb(snapshot->internal.total_free_bytes),
              mem_monitor_bytes_to_kb(snapshot->internal.largest_free_block),
              mem_monitor_bytes_to_kb(snapshot->min_internal), mem_monitor_bytes_to_kb(snapshot->dma.total_free_bytes),
@@ -254,7 +289,7 @@ static void mem_monitor_log_snapshot(const char *stage, const mem_monitor_snapsh
              mem_monitor_bytes_to_kb(snapshot->spiram.largest_free_block), mem_monitor_bytes_to_kb(snapshot->min_spiram)
 #endif
                                                                                ,
-             (unsigned)stack_hwm);
+             (unsigned)stack_hwm, app_ctx, resource_ctx);
 }
 
 #if CONFIG_WATCHER_MEM_MONITOR_CHECK_INTEGRITY_ON_CRITICAL
@@ -382,8 +417,137 @@ void mem_monitor_init(void) {
     }
 }
 
+void mem_monitor_set_context_callback(mem_monitor_context_cb_t callback) {
+    s_context_cb = callback;
+}
+
 void mem_monitor_snapshot(const char *stage) {
     mem_monitor_sample(stage, CONFIG_WATCHER_MEM_MONITOR_LOG_STAGE_SNAPSHOTS);
+}
+
+#if CONFIG_HEAP_TASK_TRACKING
+static size_t mem_monitor_task_total_bytes(const heap_task_totals_t *total) {
+    if (total == NULL) {
+        return 0;
+    }
+
+    size_t sum = 0;
+    for (size_t index = 0; index < NUM_HEAP_TASK_CAPS; ++index) {
+        sum += total->size[index];
+    }
+    return sum;
+}
+
+static void mem_monitor_sort_task_totals(heap_task_totals_t *totals, size_t count) {
+    if (totals == NULL) {
+        return;
+    }
+
+    for (size_t left = 0; left < count; ++left) {
+        size_t best = left;
+        for (size_t right = left + 1; right < count; ++right) {
+            if (mem_monitor_task_total_bytes(&totals[right]) > mem_monitor_task_total_bytes(&totals[best])) {
+                best = right;
+            }
+        }
+        if (best != left) {
+            heap_task_totals_t tmp = totals[left];
+            totals[left] = totals[best];
+            totals[best] = tmp;
+        }
+    }
+}
+
+static const char *mem_monitor_task_name(TaskHandle_t task, const TaskStatus_t *tasks, UBaseType_t task_count) {
+    if (task == NULL) {
+        return "pre_scheduler";
+    }
+
+    if (tasks == NULL) {
+        return "task_name_unavailable";
+    }
+
+    for (UBaseType_t index = 0; index < task_count; ++index) {
+        if (tasks[index].xHandle == task) {
+            return tasks[index].pcTaskName != NULL ? tasks[index].pcTaskName : "unnamed_task";
+        }
+    }
+
+    return "deleted_or_unknown";
+}
+#endif
+
+void mem_monitor_dump_task_owners(const char *stage) {
+    const char *safe_stage = (stage != NULL && stage[0] != '\0') ? stage : "manual";
+
+#if CONFIG_HEAP_TASK_TRACKING
+    heap_task_totals_t *totals =
+        (heap_task_totals_t *)heap_caps_calloc(MEM_MONITOR_TASK_OWNER_MAX_TASKS, sizeof(heap_task_totals_t),
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (totals == NULL) {
+        totals = (heap_task_totals_t *)calloc(MEM_MONITOR_TASK_OWNER_MAX_TASKS, sizeof(heap_task_totals_t));
+    }
+    if (totals == NULL) {
+        ESP_LOGW(TAG, "evt=heap_tasks status=no_mem stage=%s max_tasks=%u", safe_stage,
+                 (unsigned)MEM_MONITOR_TASK_OWNER_MAX_TASKS);
+        return;
+    }
+
+    UBaseType_t task_status_capacity = uxTaskGetNumberOfTasks() + 4U;
+    TaskStatus_t *task_statuses =
+        (TaskStatus_t *)heap_caps_calloc(task_status_capacity, sizeof(TaskStatus_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (task_statuses == NULL) {
+        task_statuses = (TaskStatus_t *)calloc(task_status_capacity, sizeof(TaskStatus_t));
+    }
+    UBaseType_t task_status_count = 0;
+    if (task_statuses != NULL) {
+        task_status_count = uxTaskGetSystemState(task_statuses, task_status_capacity, NULL);
+    }
+
+    size_t total_count = 0;
+    heap_task_info_params_t params = {0};
+    params.caps[0] = MALLOC_CAP_DMA;
+    params.mask[0] = MALLOC_CAP_DMA;
+    params.caps[1] = MALLOC_CAP_SPIRAM;
+    params.mask[1] = MALLOC_CAP_SPIRAM;
+    params.caps[2] = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    params.mask[2] = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    params.caps[3] = 0;
+    params.mask[3] = 0;
+    params.totals = totals;
+    params.num_totals = &total_count;
+    params.max_totals = MEM_MONITOR_TASK_OWNER_MAX_TASKS;
+
+    (void)heap_caps_get_per_task_info(&params);
+    mem_monitor_sort_task_totals(totals, total_count);
+
+    ESP_LOGI(TAG, "evt=heap_tasks status=enabled stage=%s tasks=%u max_tasks=%u caps=dma_spiram_internal_other",
+             safe_stage, (unsigned)total_count, (unsigned)MEM_MONITOR_TASK_OWNER_MAX_TASKS);
+
+    for (size_t index = 0; index < total_count; ++index) {
+        const heap_task_totals_t *item = &totals[index];
+        const size_t dma_region = item->size[0];
+        const size_t psram = item->size[1];
+        const size_t other_internal = item->size[2];
+        const size_t other = item->size[3];
+        const size_t internal = dma_region + other_internal;
+        const size_t total = internal + psram + other;
+        ESP_LOGI(TAG,
+                 "evt=heap_task rank=%u task=%s total=%u internal=%u dma_region=%u psram=%u other=%u blocks=%u",
+                 (unsigned)(index + 1U), mem_monitor_task_name(item->task, task_statuses, task_status_count),
+                 (unsigned)mem_monitor_bytes_to_kb(total),
+                 (unsigned)mem_monitor_bytes_to_kb(internal), (unsigned)mem_monitor_bytes_to_kb(dma_region),
+                 (unsigned)mem_monitor_bytes_to_kb(psram), (unsigned)mem_monitor_bytes_to_kb(other),
+                 (unsigned)(item->count[0] + item->count[1] + item->count[2] + item->count[3]));
+    }
+
+    free(task_statuses);
+    free(totals);
+#else
+    ESP_LOGW(TAG,
+             "evt=heap_tasks status=disabled stage=%s reason=CONFIG_HEAP_TASK_TRACKING_OFF overhead=per_heap_block",
+             safe_stage);
+#endif
 }
 
 bool mem_monitor_check_integrity(const char *stage) {
@@ -408,8 +572,17 @@ bool mem_monitor_check_integrity(const char *stage) {
 
 void mem_monitor_init(void) {}
 
+void mem_monitor_set_context_callback(mem_monitor_context_cb_t callback) {
+    (void)callback;
+}
+
 void mem_monitor_snapshot(const char *stage) {
     (void)stage;
+}
+
+void mem_monitor_dump_task_owners(const char *stage) {
+    ESP_LOGW(TAG, "evt=heap_tasks status=disabled stage=%s reason=CONFIG_WATCHER_MEM_MONITOR_ENABLE_OFF",
+             stage != NULL ? stage : "manual");
 }
 
 bool mem_monitor_check_integrity(const char *stage) {

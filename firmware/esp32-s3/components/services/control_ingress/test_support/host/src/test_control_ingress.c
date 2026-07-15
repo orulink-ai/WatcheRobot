@@ -8,11 +8,14 @@
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 int64_t control_ingress_host_esp_timer_now_us = 0;
+unsigned control_ingress_host_last_task_stack_depth = 0;
 
 typedef struct {
     int interrupt_calls;
     int move_sync_calls;
     int move_axis_calls;
+    int move_sync_direct_calls;
+    int move_axis_direct_calls;
     int jog_axis_calls;
     int jog_vector_calls;
     int stop_calls;
@@ -69,6 +72,29 @@ static esp_err_t stub_move_axis(bool is_x_axis, int angle_deg, int duration_ms, 
     return ESP_OK;
 }
 
+static esp_err_t stub_move_sync_direct(int x_deg, int y_deg, control_motion_source_t source, uint32_t *out_seq) {
+    s_stub.move_sync_direct_calls++;
+    s_stub.last_x = x_deg;
+    s_stub.last_y = y_deg;
+    s_stub.last_source = source;
+    if (out_seq != NULL) {
+        *out_seq = s_stub.next_seq;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t stub_move_axis_direct(bool is_x_axis, int angle_deg, control_motion_source_t source,
+                                       uint32_t *out_seq) {
+    s_stub.move_axis_direct_calls++;
+    s_stub.last_is_x_axis = is_x_axis;
+    s_stub.last_angle = angle_deg;
+    s_stub.last_source = source;
+    if (out_seq != NULL) {
+        *out_seq = s_stub.next_seq;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t stub_jog_axis(bool is_x_axis, int velocity_deg_per_sec, int timeout_ms, control_motion_source_t source,
                                uint32_t *out_seq) {
     s_stub.jog_axis_calls++;
@@ -106,6 +132,8 @@ static void install_stub_ops(void) {
         .interrupt_action = stub_interrupt_action,
         .move_sync = stub_move_sync,
         .move_axis = stub_move_axis,
+        .move_sync_direct = stub_move_sync_direct,
+        .move_axis_direct = stub_move_axis_direct,
         .jog_axis = stub_jog_axis,
         .jog_vector = stub_jog_vector,
         .stop = stub_stop,
@@ -157,6 +185,7 @@ static void test_single_axis_request_interrupts_once_and_preserves_source(void) 
     assert(seq == 42u);
     assert(s_stub.interrupt_calls == 1);
     assert(s_stub.move_axis_calls == 1);
+    assert(s_stub.move_axis_direct_calls == 0);
     assert(s_stub.move_sync_calls == 0);
     assert(s_stub.last_is_x_axis);
     assert(s_stub.last_angle == 45);
@@ -179,10 +208,10 @@ static void test_dual_axis_request_preserves_source(void) {
     assert(control_ingress_submit_servo(&req) == ESP_OK);
     assert(s_stub.interrupt_calls == 1);
     assert(s_stub.move_axis_calls == 0);
-    assert(s_stub.move_sync_calls == 1);
+    assert(s_stub.move_sync_calls == 0);
+    assert(s_stub.move_sync_direct_calls == 1);
     assert(s_stub.last_x == 80);
     assert(s_stub.last_y == 120);
-    assert(s_stub.last_duration == 300);
     assert(s_stub.last_source == CONTROL_MOTION_SOURCE_WS);
     assert(control_ingress_is_manual_touch_suppressed());
     assert(control_ingress_manual_touch_remaining_ms() == 10000u);
@@ -210,6 +239,27 @@ static void test_behavior_source_does_not_suppress_manual_touch(void) {
     reset_stub();
     assert(control_ingress_submit_servo(&req) == ESP_OK);
     assert(!control_ingress_is_manual_touch_suppressed());
+}
+
+static void test_ws_single_axis_request_uses_direct_target(void) {
+    control_servo_request_t req = {
+        .has_y = true,
+        .y_deg = 110,
+        .duration_ms = 250,
+        .source = CONTROL_MOTION_SOURCE_WS,
+    };
+    uint32_t seq = 0;
+
+    install_stub_ops();
+    reset_stub();
+    assert(control_ingress_submit_servo_with_seq(&req, &seq) == ESP_OK);
+    assert(seq == 42u);
+    assert(s_stub.interrupt_calls == 1);
+    assert(s_stub.move_axis_calls == 0);
+    assert(s_stub.move_axis_direct_calls == 1);
+    assert(!s_stub.last_is_x_axis);
+    assert(s_stub.last_angle == 110);
+    assert(s_stub.last_source == CONTROL_MOTION_SOURCE_WS);
 }
 
 static void test_jog_request_interrupts_and_preserves_source(void) {
@@ -272,15 +322,156 @@ static void test_jog_vector_request_interrupts_and_preserves_both_axes(void) {
     assert(s_stub.last_source == CONTROL_MOTION_SOURCE_BLE);
 }
 
+static void test_jog_vector_stream_interrupts_only_on_stream_start(void) {
+    control_jog_vector_request_t req = {
+        .has_x = true,
+        .has_y = true,
+        .x_velocity_deg_per_sec = 60,
+        .y_velocity_deg_per_sec = -45,
+        .timeout_ms = 240,
+        .source = CONTROL_MOTION_SOURCE_BLE,
+    };
+
+    install_stub_ops();
+    reset_stub();
+    assert(control_ingress_submit_jog_vector(&req) == ESP_OK);
+    assert(s_stub.interrupt_calls == 1);
+    assert(s_stub.jog_vector_calls == 1);
+
+    control_ingress_host_esp_timer_now_us = 120000;
+    req.x_velocity_deg_per_sec = 80;
+    req.y_velocity_deg_per_sec = -20;
+    assert(control_ingress_submit_jog_vector(&req) == ESP_OK);
+    assert(s_stub.interrupt_calls == 1);
+    assert(s_stub.jog_vector_calls == 2);
+    assert(s_stub.last_x_velocity == 80);
+    assert(s_stub.last_y_velocity == -20);
+
+    control_ingress_host_esp_timer_now_us = 361000;
+    req.x_velocity_deg_per_sec = -70;
+    req.y_velocity_deg_per_sec = 30;
+    assert(control_ingress_submit_jog_vector(&req) == ESP_OK);
+    assert(s_stub.interrupt_calls == 2);
+    assert(s_stub.jog_vector_calls == 3);
+    assert(s_stub.last_x_velocity == -70);
+    assert(s_stub.last_y_velocity == 30);
+}
+
 static void test_state_queue_reports_timeout_when_full(void) {
     control_state_set_request_t req = {.state_id = "standby"};
     int i;
 
     assert(control_ingress_init() == ESP_OK);
+    control_ingress_reset_state_queue_for_test();
     for (i = 0; i < 16; ++i) {
         assert(control_ingress_submit_state_set(&req) == ESP_OK);
     }
     assert(control_ingress_submit_state_set(&req) == ESP_ERR_TIMEOUT);
+}
+
+static void test_state_task_has_crash_safe_stack_budget(void) {
+    control_ingress_host_last_task_stack_depth = 0;
+
+    assert(control_ingress_init() == ESP_OK);
+    assert(control_ingress_host_last_task_stack_depth >= 10240u);
+    assert(control_ingress_state_stack_size() == control_ingress_host_last_task_stack_depth);
+}
+
+static void assert_normalizes_resource(const char *raw, const char *expected) {
+    char normalized[64];
+
+    memset(normalized, 0xa5, sizeof(normalized));
+    control_ingress_normalize_resource_name_for_test(raw, normalized, sizeof(normalized));
+    assert(strcmp(normalized, expected) == 0);
+}
+
+static void test_resource_names_accept_design_export_aliases(void) {
+    assert_normalizes_resource("watcher_smile_10fps.json", "smile");
+    assert_normalizes_resource("2026.05.09/actions/watcher_fondle_love_10fps.json", "fondle_love");
+    assert_normalizes_resource("watcher-fondle-anger-10fps.json", "fondle_anger");
+    assert_normalizes_resource("look1.gif", "standby1");
+    assert_normalizes_resource("look2", "standby2");
+    assert_normalizes_resource("look3.gif", "standby3");
+    assert_normalizes_resource("look4.gif", "standby4");
+}
+
+static void test_ai_status_voice_flow_states_clear_text(void) {
+    control_ai_status_request_t req = {0};
+    const char *text;
+
+    snprintf(req.status, sizeof(req.status), "%s", "thinking");
+    snprintf(req.message, sizeof(req.message), "%s", "Thinking about reply");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
+
+    memset(&req, 0, sizeof(req));
+    snprintf(req.status, sizeof(req.status), "%s", "brain_update");
+    snprintf(req.message, sizeof(req.message), "%s", "processing request");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
+
+    memset(&req, 0, sizeof(req));
+    snprintf(req.image_name, sizeof(req.image_name), "%s", "watcher_speaking_10fps.json");
+    snprintf(req.message, sizeof(req.message), "%s", "Speaking response");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
+}
+
+static void test_ai_status_empty_message_clears_text(void) {
+    control_ai_status_request_t req = {0};
+    const char *text;
+
+    snprintf(req.status, sizeof(req.status), "%s", "happy");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
+}
+
+static void test_ai_status_non_voice_flow_clears_text(void) {
+    control_ai_status_request_t req = {0};
+    const char *text;
+
+    snprintf(req.status, sizeof(req.status), "%s", "error");
+    snprintf(req.message, sizeof(req.message), "%s", "Cloud Offline");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
+}
+
+static void test_custom2_status_is_deferred_until_tts_completes(void) {
+    control_ai_status_request_t req = {0};
+
+    control_ingress_reset_deferred_ai_status_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "custom2");
+    req.defer_ui_until_tts_complete = true;
+
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(control_ingress_has_deferred_ai_status_for_test());
+    assert(strcmp(control_ingress_deferred_ai_status_for_test(), "custom2") == 0);
+}
+
+static void test_deferred_ai_status_keeps_only_latest_until_tts_completes(void) {
+    control_ai_status_request_t req = {0};
+
+    control_ingress_reset_deferred_ai_status_for_test();
+    assert(control_ingress_init() == ESP_OK);
+    control_ingress_reset_state_queue_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "processing");
+    req.defer_ui_until_tts_complete = true;
+
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(control_ingress_has_deferred_ai_status_for_test());
+    assert(strcmp(control_ingress_deferred_ai_status_for_test(), "processing") == 0);
+
+    snprintf(req.status, sizeof(req.status), "%s", "sunglasses");
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(strcmp(control_ingress_deferred_ai_status_for_test(), "sunglasses") == 0);
+
+    assert(control_ingress_flush_deferred_ai_status_after_tts() == ESP_OK);
+    assert(!control_ingress_has_deferred_ai_status_for_test());
 }
 
 int main(void) {
@@ -293,10 +484,21 @@ int main(void) {
          test_single_axis_request_interrupts_once_and_preserves_source},
         {"dual_axis_request_preserves_source", test_dual_axis_request_preserves_source},
         {"behavior_source_does_not_suppress_manual_touch", test_behavior_source_does_not_suppress_manual_touch},
+        {"ws_single_axis_request_uses_direct_target", test_ws_single_axis_request_uses_direct_target},
         {"jog_request_interrupts_and_preserves_source", test_jog_request_interrupts_and_preserves_source},
         {"stop_interrupts_action_loop_before_servo_stop", test_stop_interrupts_action_loop_before_servo_stop},
         {"jog_vector_request_interrupts_and_preserves_both_axes",
          test_jog_vector_request_interrupts_and_preserves_both_axes},
+        {"jog_vector_stream_interrupts_only_on_stream_start",
+         test_jog_vector_stream_interrupts_only_on_stream_start},
+        {"state_task_has_crash_safe_stack_budget", test_state_task_has_crash_safe_stack_budget},
+        {"resource_names_accept_design_export_aliases", test_resource_names_accept_design_export_aliases},
+        {"ai_status_voice_flow_states_clear_text", test_ai_status_voice_flow_states_clear_text},
+        {"ai_status_empty_message_clears_text", test_ai_status_empty_message_clears_text},
+        {"ai_status_non_voice_flow_clears_text", test_ai_status_non_voice_flow_clears_text},
+        {"custom2_status_is_deferred_until_tts_completes", test_custom2_status_is_deferred_until_tts_completes},
+        {"deferred_ai_status_keeps_only_latest_until_tts_completes",
+         test_deferred_ai_status_keeps_only_latest_until_tts_completes},
         {"state_queue_reports_timeout_when_full", test_state_queue_reports_timeout_when_full},
     };
     size_t i;

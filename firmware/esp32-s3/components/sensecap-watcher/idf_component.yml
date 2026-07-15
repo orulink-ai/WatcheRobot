@@ -19,6 +19,7 @@ dependencies:
 
   espressif/esp_codec_dev:
     version: "1.2.0"
+    override_path: "../esp_codec_dev"
     public: true
 
   espressif/esp_io_expander:
@@ -38,3 +39,4 @@ dependencies:
     public: true
 
   # sscma_client and esp_io_expander_pca95xx_16bit are defined in main/idf_component.yml
+

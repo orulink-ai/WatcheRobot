@@ -22,6 +22,73 @@ static uint32_t mcu_link_alloc_tx_seq(mcu_link_t *link) {
     return seq;
 }
 
+static void mcu_link_copy_payload_text(char *dst, size_t dst_size, const uint8_t *src, uint8_t src_len) {
+    size_t copy_len;
+
+    if (dst == NULL || dst_size == 0u) {
+        return;
+    }
+
+    dst[0] = '\0';
+    if (src == NULL || src_len == 0u) {
+        return;
+    }
+
+    copy_len = src_len;
+    if (copy_len >= dst_size) {
+        copy_len = dst_size - 1u;
+    }
+    memcpy(dst, src, copy_len);
+    dst[copy_len] = '\0';
+}
+
+static void mcu_link_parse_hello_rsp_peer_info(mcu_link_t *link, const mcu_frame_t *frame) {
+    size_t offset = MCU_HELLO_BASE_PAYLOAD_LEN;
+
+    if (link == NULL) {
+        return;
+    }
+
+    memset(&link->peer_info, 0, sizeof(link->peer_info));
+    if (frame == NULL || frame->header.payload_len < MCU_HELLO_BASE_PAYLOAD_LEN) {
+        return;
+    }
+
+    link->peer_info.version_valid = true;
+    link->peer_info.fw_major = frame->payload[1];
+    link->peer_info.fw_minor = frame->payload[2];
+    link->peer_info.fw_patch = frame->payload[3];
+    link->peer_info.hw_version = frame->payload[4];
+
+    while ((offset + 2u) <= frame->header.payload_len) {
+        const uint8_t type = frame->payload[offset++];
+        const uint8_t len = frame->payload[offset++];
+
+        if ((offset + len) > frame->header.payload_len) {
+            break;
+        }
+
+        switch (type) {
+        case MCU_HELLO_TLV_GIT_BRANCH:
+            mcu_link_copy_payload_text(link->peer_info.git_branch, sizeof(link->peer_info.git_branch),
+                                       &frame->payload[offset], len);
+            link->peer_info.git_valid = link->peer_info.git_branch[0] != '\0';
+            break;
+        case MCU_HELLO_TLV_GIT_COMMIT:
+            mcu_link_copy_payload_text(link->peer_info.git_commit, sizeof(link->peer_info.git_commit),
+                                       &frame->payload[offset], len);
+            break;
+        case MCU_HELLO_TLV_GIT_DIRTY:
+            link->peer_info.git_dirty = len > 0u && frame->payload[offset] != 0u;
+            break;
+        default:
+            break;
+        }
+
+        offset += len;
+    }
+}
+
 static bool mcu_link_parse_hello_rsp_snapshot_supported(const mcu_frame_t *frame, uint8_t *out_default_profile) {
     const uint8_t *payload;
 
@@ -29,7 +96,7 @@ static bool mcu_link_parse_hello_rsp_snapshot_supported(const mcu_frame_t *frame
         return false;
     }
 
-    if (frame->header.payload_len < 9u) {
+    if (frame->header.payload_len < MCU_HELLO_BASE_PAYLOAD_LEN) {
         if (out_default_profile != NULL) {
             *out_default_profile = 0u;
         }
@@ -65,10 +132,11 @@ static esp_err_t mcu_link_handle_frame(mcu_link_t *link, const mcu_frame_t *fram
             uint8_t default_stream_profile = 0u;
             mcu_link_state_t previous_state = mcu_link_get_state(link);
 
-            if (frame->header.payload_len < 9u) {
+            if (frame->header.payload_len < MCU_HELLO_BASE_PAYLOAD_LEN) {
                 return ESP_ERR_NOT_FOUND;
             }
 
+            mcu_link_parse_hello_rsp_peer_info(link, frame);
             snapshot_supported = mcu_link_parse_hello_rsp_snapshot_supported(frame, &default_stream_profile);
             if (default_stream_profile != 0x01u) {
                 (void)mcu_link_mark_degraded(link);
@@ -148,6 +216,24 @@ static esp_err_t mcu_link_handle_frame(mcu_link_t *link, const mcu_frame_t *fram
             }
             if (out_event != NULL) {
                 out_event->type = MCU_LINK_RX_EVENT_MOTION_DONE;
+            }
+            return ESP_OK;
+        }
+        if ((mcu_motion_msg_id_t)frame->header.msg_id == MCU_MOTION_MSG_MOTION_STATE) {
+            if (frame->header.payload_len < 13u) {
+                return ESP_ERR_NOT_FOUND;
+            }
+            if (out_event != NULL) {
+                out_event->type = MCU_LINK_RX_EVENT_SERVO_FEEDBACK;
+            }
+            return ESP_OK;
+        }
+        if ((mcu_motion_msg_id_t)frame->header.msg_id == MCU_MOTION_MSG_SERVO_FEEDBACK_RSP) {
+            if (frame->header.payload_len < 9u) {
+                return ESP_ERR_NOT_FOUND;
+            }
+            if (out_event != NULL) {
+                out_event->type = MCU_LINK_RX_EVENT_SERVO_FEEDBACK_RSP;
             }
             return ESP_OK;
         }
@@ -304,6 +390,7 @@ esp_err_t mcu_link_init(mcu_link_t *link) {
     }
 
     mcu_link_stats_init(&link->stats);
+    memset(&link->peer_info, 0, sizeof(link->peer_info));
     link->next_tx_seq = 1u;
     link->rx.stream_len = 0u;
     link->rx.pending_len = 0u;
@@ -316,6 +403,7 @@ esp_err_t mcu_link_reset(mcu_link_t *link) {
     }
 
     link->next_tx_seq = 1u;
+    memset(&link->peer_info, 0, sizeof(link->peer_info));
     link->rx.stream_len = 0u;
     link->rx.pending_len = 0u;
     return mcu_link_fsm_init(&link->fsm);
@@ -395,6 +483,15 @@ esp_err_t mcu_link_copy_stats(const mcu_link_t *link, mcu_link_stats_t *out_stat
     }
 
     mcu_link_stats_copy(out_stats, &link->stats);
+    return ESP_OK;
+}
+
+esp_err_t mcu_link_copy_peer_info(const mcu_link_t *link, mcu_link_peer_info_t *out_info) {
+    if (link == NULL || out_info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *out_info = link->peer_info;
     return ESP_OK;
 }
 

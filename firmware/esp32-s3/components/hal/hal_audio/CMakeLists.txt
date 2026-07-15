@@ -5,4 +5,5 @@ idf_component_register(
     INCLUDE_DIRS "include"
     PRIV_REQUIRES
         "sensecap-watcher"
+        "esp_audio_codec"
 )

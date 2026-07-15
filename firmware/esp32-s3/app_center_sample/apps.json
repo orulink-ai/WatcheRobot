@@ -1,0 +1,11 @@
+{
+  "apps": [
+    {
+      "id": "pixel-game",
+      "name": "Pixel Game",
+      "description": "A tiny downloaded app-pack demo",
+      "packageUrl": "pixel_game.example.pkg",
+      "version": "game-v1"
+    }
+  ]
+}

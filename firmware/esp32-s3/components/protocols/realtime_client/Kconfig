@@ -1,0 +1,66 @@
+menu "Watcher Realtime Agent Client"
+
+    config WATCHER_AGENT_REALTIME_URL
+        string "Agent Realtime WebSocket URL"
+        default "ws://192.168.1.130:8776/v1/realtime"
+        help
+            OpenAI Realtime-compatible WebSocket endpoint exposed by the local
+            Hugging Face speech-to-speech service on Spark.
+
+    config WATCHER_AGENT_API_KEY
+        string "Agent Realtime API key"
+        default "not-needed"
+        help
+            API key value sent through the WebSocket Authorization header when
+            configured. The local Spark deployment accepts not-needed.
+
+    config WATCHER_AGENT_VOICE
+        string "Agent Realtime voice"
+        default "Aiden"
+        help
+            Voice name sent in session.update. The Spark canary currently uses
+            Qwen3-TTS CustomVoice speaker Aiden.
+
+    config WATCHER_AGENT_CONNECT_TIMEOUT_MS
+        int "Agent Realtime connect timeout (ms)"
+        default 10000
+        range 1000 60000
+
+    config WATCHER_AGENT_RESPONSE_TIMEOUT_MS
+        int "Agent Realtime response timeout (ms)"
+        default 30000
+        range 5000 120000
+
+    config WATCHER_AGENT_AUDIO_QUEUE_DEPTH
+        int "Agent TTS playback queue depth"
+        default 32
+        range 4 64
+        help
+            Number of decoded Realtime audio chunks buffered in PSRAM before
+            playback. Larger queues tolerate bursty TTS delivery.
+
+    config WATCHER_AGENT_AUDIO_GAIN_Q8
+        int "Agent TTS playback PCM gain (Q8)"
+        default 362
+        range 256 512
+        help
+            Fixed-point playback gain applied to decoded TTS PCM before it is
+            sent to the codec. 256 means 1.0x; 362 is about +3 dB.
+
+    config WATCHER_AGENT_AUDIO_TAIL_PAD_MS
+        int "Agent TTS playback tail silence padding (ms)"
+        default 100
+        range 0 500
+        help
+            Silence appended after the final TTS chunk so the codec/I2S path
+            is not closed before the audible tail drains.
+
+    config WATCHER_AGENT_AUDIO_DRAIN_MS
+        int "Agent TTS playback drain guard (ms)"
+        default 120
+        range 0 500
+        help
+            Delay after tail padding before the playback path enters idle.
+            This gives hardware buffers time to finish the last samples.
+
+endmenu

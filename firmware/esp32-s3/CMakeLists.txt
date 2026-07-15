@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(PROJECT_VER "V2.3.0")
+set(PROJECT_VER "V3.1")
+
+if(NOT DEFINED APP_CENTER_FIRMWARE_APP)
+    if(CMAKE_BINARY_DIR MATCHES "build-phone-control-app")
+        set(APP_CENTER_FIRMWARE_APP "PHONE_CONTROL")
+    endif()
+endif()
+
+if(DEFINED APP_CENTER_FIRMWARE_APP)
+    string(TOUPPER "${APP_CENTER_FIRMWARE_APP}" APP_CENTER_FIRMWARE_APP_UPPER)
+    if(APP_CENTER_FIRMWARE_APP_UPPER STREQUAL "PHONE_CONTROL")
+        add_compile_definitions(WATCHER_PHONE_CONTROL_FIRMWARE_APP=1)
+    elseif(NOT APP_CENTER_FIRMWARE_APP_UPPER STREQUAL "OFF")
+        message(FATAL_ERROR "APP_CENTER_FIRMWARE_APP must be PHONE_CONTROL or OFF")
+    endif()
+endif()
 
 # Extra component directories (nested structure)
 # ESP-IDF only scans components/ directly, so we need to specify subdirectories
@@ -17,8 +32,13 @@ set(EXTRA_COMPONENT_DIRS
     "components/protocols/ble_service"
     "components/protocols/discovery"
     "components/protocols/mcu_link"
+    "components/protocols/realtime_client"
+    "components/protocols/server_pairing"
     "components/protocols/ws_client"
+    # SDK
+    "components/sdk/watcher_sdk"
     # Services
+    "components/services/agent_audio_player"
     "components/services/anim_service"
     "components/services/behavior_state_service"
     "components/services/camera_service"
@@ -28,10 +48,14 @@ set(EXTRA_COMPONENT_DIRS
     "components/services/mcu_power_service"
     "components/services/mcu_sensor_service"
     "components/services/ota_service"
+    "components/services/power_monitor_service"
+    "components/services/provision_manager"
     "components/services/sfx_service"
     "components/services/voice_service"
+    "components/services/watcher_input_router"
     # Utils
     "components/utils/boot_anim"
+    "components/utils/time_sync_service"
     "components/utils/wifi_manager"
 )
 
@@ -59,7 +83,7 @@ if(EXISTS "${ANIM_GIF_DIR}")
     endif()
 endif()
 
-set(ANIM_OUTPUT_DIR ${CMAKE_BINARY_DIR}/generated/sdcard/anim)
+set(ANIM_OUTPUT_DIR ${CMAKE_SOURCE_DIR}/release/${PROJECT_VER}/sdcard/anim)
 set(ANIM_GENERATOR_ARGS
     --output-dir ${ANIM_OUTPUT_DIR}
     --input-dir ${ANIM_IMPORT_DIR}
@@ -75,6 +99,7 @@ add_custom_target(anim_assets_gen
             ${ANIM_GENERATOR_ARGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     BYPRODUCTS
+        ${CMAKE_SOURCE_DIR}/release/${PROJECT_VER}/sdcard/resource_manifest.json
         ${ANIM_OUTPUT_DIR}/anim_manifest.bin
     COMMENT "Generating SD-card animpack assets and manifest")
 

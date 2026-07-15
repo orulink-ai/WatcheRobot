@@ -20,6 +20,7 @@
 #define WIFI_STATUS_CALLBACK_MAX 4
 
 static EventGroupHandle_t wifi_event_group;
+static esp_netif_t *s_sta_netif = NULL;
 static wifi_status_callback_t s_status_cbs[WIFI_STATUS_CALLBACK_MAX];
 static bool s_initialized = false;
 static bool s_wifi_started = false;
@@ -122,7 +123,7 @@ static void wifi_apply_sta_defaults(wifi_sta_config_t *sta_cfg,
     memcpy(sta_cfg->password, password, pass_len);
     sta_cfg->scan_method = WIFI_ALL_CHANNEL_SCAN;
     sta_cfg->sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-    sta_cfg->threshold.authmode = WIFI_AUTH_WPA_PSK;
+    sta_cfg->threshold.authmode = pass_len == 0 ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_PSK;
     sta_cfg->pmf_cfg.capable = true;
     sta_cfg->pmf_cfg.required = false;
     sta_cfg->sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
@@ -147,8 +148,26 @@ static void wifi_set_status(wifi_status_t status)
     wifi_notify_status();
 }
 
+static int wifi_ensure_initialized(const char *source)
+{
+    if (s_initialized) {
+        return 0;
+    }
+
+    if (wifi_init() != 0) {
+        ESP_LOGE(TAG, "WiFi init failed before %s", source ? source : "operation");
+        return -1;
+    }
+
+    return 0;
+}
+
 static void wifi_refresh_saved_config(void)
 {
+    if (!s_initialized) {
+        return;
+    }
+
     wifi_config_t wifi_cfg = {0};
     if (esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg) == ESP_OK && wifi_cfg.sta.ssid[0] != '\0') {
         strncpy(s_saved_ssid, (const char *)wifi_cfg.sta.ssid, sizeof(s_saved_ssid) - 1);
@@ -266,22 +285,36 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 
         if (s_credentials_present) {
             uint8_t reason = event ? event->reason : 0;
+            bool reconnect_requested = s_connect_requested;
 #if CONFIG_WATCHER_WIFI_REASON_NAME_LOGS
-            ESP_LOGW(TAG,
-                     "Disconnected from AP (reason=%u:%s, connect_requested=%d, sta_started=%d), retrying...",
-                     (unsigned)reason,
-                     wifi_disconnect_reason_name(reason),
-                     s_connect_requested ? 1 : 0,
-                     s_wifi_started ? 1 : 0);
+            if (reconnect_requested) {
+                ESP_LOGW(TAG,
+                         "Disconnected from AP (reason=%u:%s, connect_requested=1, sta_started=%d), retrying...",
+                         (unsigned)reason,
+                         wifi_disconnect_reason_name(reason),
+                         s_wifi_started ? 1 : 0);
+            } else {
+                ESP_LOGI(TAG,
+                         "Disconnected from AP (reason=%u:%s, connect_requested=0, sta_started=%d), not retrying",
+                         (unsigned)reason,
+                         wifi_disconnect_reason_name(reason),
+                         s_wifi_started ? 1 : 0);
+            }
 #else
-            ESP_LOGW(TAG,
-                     "Disconnected from AP (reason=%u, connect_requested=%d, sta_started=%d), retrying...",
-                     (unsigned)reason,
-                     s_connect_requested ? 1 : 0,
-                     s_wifi_started ? 1 : 0);
+            if (reconnect_requested) {
+                ESP_LOGW(TAG,
+                         "Disconnected from AP (reason=%u, connect_requested=1, sta_started=%d), retrying...",
+                         (unsigned)reason,
+                         s_wifi_started ? 1 : 0);
+            } else {
+                ESP_LOGI(TAG,
+                         "Disconnected from AP (reason=%u, connect_requested=0, sta_started=%d), not retrying",
+                         (unsigned)reason,
+                         s_wifi_started ? 1 : 0);
+            }
 #endif
             wifi_set_status(WIFI_STATUS_DISCONNECTED);
-            if (s_connect_requested) {
+            if (reconnect_requested) {
                 if (wifi_request_connect("sta_disconnected") == 0) {
                     wifi_set_status(WIFI_STATUS_CONNECTING);
                 }
@@ -303,11 +336,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 
 int wifi_init(void)
 {
+    esp_err_t ret;
+
     if (s_initialized) {
         return 0;
     }
 
-    esp_err_t ret = nvs_flash_init();
+    ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
@@ -321,8 +356,23 @@ int wifi_init(void)
     }
 
     ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    ret = esp_event_loop_create_default();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Failed to create default event loop: %s", esp_err_to_name(ret));
+        vEventGroupDelete(wifi_event_group);
+        wifi_event_group = NULL;
+        return -1;
+    }
+
+    if (s_sta_netif == NULL) {
+        s_sta_netif = esp_netif_create_default_wifi_sta();
+        if (s_sta_netif == NULL) {
+            ESP_LOGE(TAG, "Failed to create default WiFi STA netif");
+            vEventGroupDelete(wifi_event_group);
+            wifi_event_group = NULL;
+            return -1;
+        }
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -347,11 +397,19 @@ int wifi_init(void)
 int wifi_resume_background(void)
 {
     if (!s_initialized) {
-        ESP_LOGE(TAG, "WiFi not initialized");
-        return -1;
+        if (wifi_init() != 0) {
+            ESP_LOGE(TAG, "WiFi init failed before background resume");
+            return -1;
+        }
     }
 
     wifi_refresh_saved_config();
+
+    if (is_connected || s_connect_requested || s_connection_in_progress) {
+        ESP_LOGD(TAG, "WiFi background resume skipped because connection is already active");
+        return 0;
+    }
+
     xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
 
     if (!s_credentials_present) {
@@ -419,7 +477,10 @@ int wifi_wait_for_connection(int timeout_ms)
 
 int wifi_provision(const char *ssid, const char *password)
 {
-    if (!s_initialized || !ssid || !password) {
+    if (!ssid || !password) {
+        return -1;
+    }
+    if (wifi_ensure_initialized("wifi_provision") != 0) {
         return -1;
     }
 
@@ -466,7 +527,10 @@ int wifi_provision(const char *ssid, const char *password)
 
 int wifi_store_credentials(const char *ssid, const char *password)
 {
-    if (!s_initialized || !ssid || !password) {
+    if (!ssid || !password) {
+        return -1;
+    }
+    if (wifi_ensure_initialized("wifi_store_credentials") != 0) {
         return -1;
     }
 
@@ -503,7 +567,7 @@ int wifi_store_credentials(const char *ssid, const char *password)
 
 int wifi_clear_credentials(void)
 {
-    if (!s_initialized) {
+    if (wifi_ensure_initialized("wifi_clear_credentials") != 0) {
         return -1;
     }
 
@@ -584,6 +648,20 @@ void wifi_register_status_callback(wifi_status_callback_t cb)
     ESP_LOGW(TAG, "WiFi status callback list full, dropping callback");
 }
 
+void wifi_unregister_status_callback(wifi_status_callback_t cb)
+{
+    if (!cb) {
+        return;
+    }
+
+    for (size_t i = 0; i < WIFI_STATUS_CALLBACK_MAX; ++i) {
+        if (s_status_cbs[i] == cb) {
+            s_status_cbs[i] = NULL;
+            return;
+        }
+    }
+}
+
 int wifi_is_connected(void)
 {
     return is_connected ? 1 : 0;
@@ -608,6 +686,91 @@ void wifi_disconnect(void)
     s_ip_addr[0] = '\0';
     xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
     wifi_set_status(s_credentials_present ? WIFI_STATUS_DISCONNECTED : WIFI_STATUS_UNCONFIGURED);
+}
+
+void wifi_stop_station(void)
+{
+    esp_err_t err;
+
+    if (!s_initialized) {
+        return;
+    }
+
+    s_connect_requested = false;
+    s_connection_in_progress = false;
+    is_connected = false;
+    s_ip_addr[0] = '\0';
+    xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+
+    err = esp_wifi_disconnect();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_STARTED && err != ESP_ERR_WIFI_CONN) {
+        ESP_LOGW(TAG, "esp_wifi_disconnect before STA stop returned: %s", esp_err_to_name(err));
+    }
+
+    if (s_wifi_started || s_wifi_start_requested) {
+        err = esp_wifi_stop();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_STARTED) {
+            ESP_LOGW(TAG, "esp_wifi_stop returned: %s", esp_err_to_name(err));
+        } else {
+            s_wifi_started = false;
+            s_wifi_start_requested = false;
+        }
+    }
+
+    wifi_set_status(s_credentials_present ? WIFI_STATUS_DISCONNECTED : WIFI_STATUS_UNCONFIGURED);
+}
+
+esp_err_t wifi_release_station(void)
+{
+    esp_err_t err;
+    esp_err_t status = ESP_OK;
+
+    if (!s_initialized) {
+        return ESP_OK;
+    }
+
+    wifi_stop_station();
+
+    err = esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "WiFi event handler unregister returned: %s", esp_err_to_name(err));
+        status = err;
+    }
+
+    err = esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "IP event handler unregister returned: %s", esp_err_to_name(err));
+        if (status == ESP_OK) {
+            status = err;
+        }
+    }
+
+    err = esp_wifi_deinit();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "esp_wifi_deinit returned: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    if (s_sta_netif != NULL) {
+        esp_netif_destroy_default_wifi(s_sta_netif);
+        s_sta_netif = NULL;
+    }
+
+    if (wifi_event_group != NULL) {
+        vEventGroupDelete(wifi_event_group);
+        wifi_event_group = NULL;
+    }
+
+    s_initialized = false;
+    s_wifi_started = false;
+    s_wifi_start_requested = false;
+    s_connect_requested = false;
+    s_connection_in_progress = false;
+    is_connected = false;
+    s_ip_addr[0] = '\0';
+    wifi_set_status(s_credentials_present ? WIFI_STATUS_DISCONNECTED : WIFI_STATUS_UNCONFIGURED);
+    ESP_LOGI(TAG, "WiFi STA driver released");
+    return status;
 }
 
 void wifi_suspend_for_ble(void)

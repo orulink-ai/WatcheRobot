@@ -1,6 +1,7 @@
 file(GLOB_RECURSE IMAGE_SOURCES images/*.c)
 
-idf_component_register(SRCS "esp_lvgl_port.c" ${IMAGE_SOURCES} INCLUDE_DIRS "include" REQUIRES "esp_lcd" PRIV_REQUIRES "esp_timer")
+idf_component_register(SRCS "esp_lvgl_port.c" ${IMAGE_SOURCES} INCLUDE_DIRS "include" REQUIRES "esp_lcd"
+                       PRIV_REQUIRES "esp_timer" "watcher_input_router")
 
 idf_build_get_property(build_components BUILD_COMPONENTS)
 if("espressif__button" IN_LIST build_components)

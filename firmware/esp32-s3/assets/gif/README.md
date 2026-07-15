@@ -33,10 +33,14 @@ Recommended canonical filenames:
 - `fondle_anger.gif`
 - `blink.gif`
 - `upgrade.gif`
+- `standby_start.gif`
+- `standby_loop.gif`
+- `standby_end.gif`
+- `music.gif`
 
 Legacy names such as `watcher-boot.gif` are still accepted for compatibility.
 
-Typical workflow from `firmware/esp32-s3`:
+Typical workflow from `firmware/s3`:
 
 ```powershell
 python tools/generate_anim_assets.py
@@ -45,12 +49,19 @@ python tools/sync_anim_sdcard.py --target-root F:\
 
 Generated output is written to:
 
-- `build/generated/sdcard/anim/`
+- `release/V2.4.1/sdcard/resource_manifest.json`
+- `release/V2.4.1/sdcard/anim/`
+
+Use `--resource-version res-YYYY.MM.DD.N` when a specific SD resource bundle
+version should be written. If omitted, the generator writes an automatic daily
+version such as `res-2026.07.08.1`.
 
 Current release note:
 
 - The runtime pipeline is already integrated into the current release flow.
-- The current packaged animation set includes 29 generated types.
+- The current packaged animation set includes 33 generated types.
+- `standby_start`, `standby_loop`, and `standby_end` support the Voice App sleep/wake expression flow.
+- `music` is packaged for the new music expression.
 - `custom1`, `custom2`, `custom3`, and `standby1` through `standby4` are packaged in the current release.
 - Extended WebSocket-callable animations such as `disconnect`, `sad`, `blink`,
   `upgrade`, `fondle_love`, and `fondle_anger` are also packaged in the current release.

@@ -32,6 +32,7 @@ void behavior_free_catalog(behavior_catalog_t *catalog) {
             free(catalog->states[i].motion);
             free(catalog->states[i].expression);
             free(catalog->states[i].sound);
+            free(catalog->states[i].light);
         }
     }
 

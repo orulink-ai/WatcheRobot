@@ -13,6 +13,12 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#define HAL_SERVO_AXIS_MASK_X 0x01u
+#define HAL_SERVO_AXIS_MASK_Y 0x02u
+#define HAL_SERVO_TRAJECTORY_MAX_FRAMES 64u
 
 /** Servo axis selector */
 typedef enum {
@@ -29,12 +35,31 @@ typedef enum {
     HAL_SERVO_MOTION_SOURCE_BLE = 2,
     HAL_SERVO_MOTION_SOURCE_WS = 3,
     HAL_SERVO_MOTION_SOURCE_RECOVERY = 4,
+    HAL_SERVO_MOTION_SOURCE_RELAY_W1 = 5,
 } hal_servo_motion_source_t;
 
 typedef enum {
     HAL_SERVO_MOTION_PROFILE_LINEAR = 0,
     HAL_SERVO_MOTION_PROFILE_EASE_IN_OUT = 1,
 } hal_servo_motion_profile_t;
+
+typedef struct {
+    uint8_t axis_mask;
+    int16_t x_deg_x10;
+    int16_t y_deg_x10;
+    uint16_t duration_ms;
+    hal_servo_motion_profile_t motion_profile;
+} hal_servo_trajectory_frame_t;
+
+typedef struct {
+    uint8_t axis_mask;
+    uint16_t x_raw;
+    int16_t x_angle_x10;
+    uint16_t y_raw;
+    int16_t y_angle_x10;
+} hal_servo_feedback_t;
+
+typedef void (*hal_servo_feedback_cb_t)(const hal_servo_feedback_t *feedback, void *ctx);
 
 /**
  * @brief Initialize servo compatibility facade.
@@ -56,6 +81,10 @@ esp_err_t hal_servo_init(void);
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG if angle out of range
  */
 esp_err_t hal_servo_set_angle(servo_axis_t axis, int angle_deg);
+esp_err_t hal_servo_set_direct_with_source_and_seq(servo_axis_t axis, int angle_deg, hal_servo_motion_source_t source,
+                                                   uint32_t *out_seq);
+esp_err_t hal_servo_set_direct_sync_with_source_and_seq(int x_deg, int y_deg, hal_servo_motion_source_t source,
+                                                        uint32_t *out_seq);
 
 /**
  * @brief Move servo to angle with smooth interpolation.
@@ -88,16 +117,15 @@ esp_err_t hal_servo_move_sync_with_source(int x_deg, int y_deg, int duration_ms,
 esp_err_t hal_servo_move_sync_with_source_and_seq(int x_deg, int y_deg, int duration_ms,
                                                   hal_servo_motion_source_t source, uint32_t *out_seq);
 esp_err_t hal_servo_move_sync_with_profile_and_seq(int x_deg, int y_deg, int duration_ms,
-                                                   hal_servo_motion_source_t source,
-                                                   hal_servo_motion_profile_t profile, uint32_t *out_seq);
+                                                   hal_servo_motion_source_t source, hal_servo_motion_profile_t profile,
+                                                   uint32_t *out_seq);
 
 esp_err_t hal_servo_jog_with_source_and_seq(servo_axis_t axis, int velocity_deg_per_sec, int timeout_ms,
                                             hal_servo_motion_source_t source, uint32_t *out_seq);
 esp_err_t hal_servo_jog_with_source(servo_axis_t axis, int velocity_deg_per_sec, int timeout_ms,
                                     hal_servo_motion_source_t source);
 esp_err_t hal_servo_jog_vector_with_source_and_seq(int x_velocity_deg_per_sec, int y_velocity_deg_per_sec,
-                                                   int timeout_ms, hal_servo_motion_source_t source,
-                                                   uint32_t *out_seq);
+                                                   int timeout_ms, hal_servo_motion_source_t source, uint32_t *out_seq);
 esp_err_t hal_servo_jog_vector_with_source(int x_velocity_deg_per_sec, int y_velocity_deg_per_sec, int timeout_ms,
                                            hal_servo_motion_source_t source);
 
@@ -121,6 +149,11 @@ esp_err_t hal_servo_send_cmd(const char *id, int angle_deg, int duration_ms);
  */
 esp_err_t hal_servo_cancel_all(void);
 esp_err_t hal_servo_cancel_all_with_source(hal_servo_motion_source_t source);
+esp_err_t hal_servo_pwm_unlock(uint8_t axis_mask);
+esp_err_t hal_servo_pwm_lock(uint8_t axis_mask);
+esp_err_t hal_servo_play_trajectory(const hal_servo_trajectory_frame_t *frames, size_t frame_count,
+                                    hal_servo_motion_source_t source);
+esp_err_t hal_servo_set_feedback_callback(hal_servo_feedback_cb_t cb, void *ctx);
 
 /**
  * @brief Get the last commanded servo angle.

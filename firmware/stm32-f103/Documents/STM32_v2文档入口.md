@@ -1,12 +1,10 @@
 # STM32 v2 文档入口
 
-> 公开阅读提示：本文保留为 STM32F103 协处理器后续开发参考。若只需要当前公开协议概览，请优先阅读 [通信协议总览](../../COMMUNICATION_PROTOCOLS_zh.md)。
->
 > 本文是 `watcherobot_stm32` 后续 STM32 协处理器路线的主文档入口。
 > 当前固定引用：
 >
 > ```text
-> Protocol baseline: orulink-ai/WatcheRobot@proto/v2.0.0-stm32-align-20260416
+> Protocol baseline: Ro-In-AI/WatcheRobot-Firmware@proto/v2.0.0-stm32-align-20260416
 > ```
 
 ## 1. 本文用途
@@ -63,7 +61,7 @@
 
 当前固定引用的上游真源文件位于：
 
-- `orulink-ai/WatcheRobot`
+- `Ro-In-AI/WatcheRobot-Firmware`
 - `firmware/integration_docs/STM32_UART_PROTOCOL.md`
 - `firmware/integration_docs/STM32_COPROC_REFACTOR_PLAN.md`
 - `firmware/integration_docs/IMPLEMENTATION_STATUS.md`

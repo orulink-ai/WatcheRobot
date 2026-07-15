@@ -7,6 +7,7 @@
 #include "coproc_runtime.h"
 #include "coproc_stress_sim.h"
 #include "coproc_tx_builder.h"
+#include "watcher_build_info.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,6 +78,7 @@ typedef struct
     uint32_t nowMs;
     uint8_t servoSetCount;
     uint8_t servoStopCount;
+    uint8_t servoReleaseCount;
     uint8_t feedbackReadCount;
     uint8_t feedbackFail;
     uint8_t ledRgbCount;
@@ -89,6 +91,7 @@ typedef struct
     uint8_t bottomLedOffCount;
     uint8_t lastServoIndex;
     uint8_t lastServoAngle;
+    int16_t lastServoDegX10;
     uint8_t commandAngle[3];
     uint8_t feedbackAngle[3];
     uint8_t lastLedCount;
@@ -198,6 +201,36 @@ static size_t Test_CountDecodedFramesByType(const TxCapture *capture, uint8_t ms
     return count;
 }
 
+static const uint8_t *Test_FindHelloTlv(const CoprocFrame *frame, uint8_t type, size_t *outLength)
+{
+    size_t offset = COPROC_HELLO_BASE_PAYLOAD_LEN;
+
+    if (outLength != NULL) {
+        *outLength = 0u;
+    }
+    if (frame == NULL || frame->header.payloadLength < COPROC_HELLO_BASE_PAYLOAD_LEN) {
+        return NULL;
+    }
+
+    while ((offset + 2u) <= frame->header.payloadLength) {
+        uint8_t itemType = frame->payload[offset++];
+        uint8_t itemLength = frame->payload[offset++];
+
+        if ((offset + itemLength) > frame->header.payloadLength) {
+            return NULL;
+        }
+        if (itemType == type) {
+            if (outLength != NULL) {
+                *outLength = itemLength;
+            }
+            return &frame->payload[offset];
+        }
+        offset += itemLength;
+    }
+
+    return NULL;
+}
+
 static uint32_t Test_AllocSeq(void *ctx)
 {
     uint32_t *nextSeq = (uint32_t *)ctx;
@@ -254,6 +287,30 @@ static uint8_t Test_RuntimeSetServoAngle(void *ctx, uint8_t servoIndex, uint8_t 
     return 1u;
 }
 
+static uint8_t Test_RuntimeSetServoDegX10(void *ctx, uint8_t servoIndex, int16_t degX10, uint16_t *pulseUs)
+{
+    RuntimeStub *stub = (RuntimeStub *)ctx;
+    uint8_t angle;
+
+    if (stub == NULL || degX10 < 0 || degX10 > 1800) {
+        return 0u;
+    }
+
+    angle = (uint8_t)(((uint16_t)degX10 + 5u) / 10u);
+    stub->servoSetCount++;
+    stub->lastServoIndex = servoIndex;
+    stub->lastServoAngle = angle;
+    stub->lastServoDegX10 = degX10;
+    if (servoIndex < 3u) {
+        stub->commandAngle[servoIndex] = angle;
+        stub->feedbackAngle[servoIndex] = angle;
+    }
+    if (pulseUs != NULL) {
+        *pulseUs = (uint16_t)(500u + (((uint32_t)(uint16_t)degX10 * 2000u + 900u) / 1800u));
+    }
+    return 1u;
+}
+
 static uint8_t Test_RuntimeStopServo(void *ctx, uint8_t servoIndex)
 {
     RuntimeStub *stub = (RuntimeStub *)ctx;
@@ -263,6 +320,19 @@ static uint8_t Test_RuntimeStopServo(void *ctx, uint8_t servoIndex)
     }
 
     stub->servoStopCount++;
+    return 1u;
+}
+
+static uint8_t Test_RuntimeReleaseServo(void *ctx, uint8_t servoIndex)
+{
+    RuntimeStub *stub = (RuntimeStub *)ctx;
+
+    if (stub == NULL || servoIndex == 0u) {
+        return 0u;
+    }
+
+    stub->servoReleaseCount++;
+    stub->lastServoIndex = servoIndex;
     return 1u;
 }
 
@@ -455,6 +525,9 @@ static void Test_RuntimeDispatchObs(void *ctx, const CoprocDispatchEvent *event)
         case COPROC_DISPATCH_EVENT_MOTION_DONE:
             capture->events[capture->count].type = COPROC_OBS_EVENT_MOTION_DONE;
             break;
+        case COPROC_DISPATCH_EVENT_MOTION_STATE:
+            capture->events[capture->count].type = COPROC_OBS_EVENT_MOTION_STATE;
+            break;
         case COPROC_DISPATCH_EVENT_LED_SET_RGB:
             capture->events[capture->count].type = COPROC_OBS_EVENT_LED_SET_RGB;
             break;
@@ -499,8 +572,14 @@ static void Test_InitRuntime(CoprocRuntime *runtime, RuntimeStub *stub)
     config.readTouchCtx = stub;
     config.setServoAngleFn = Test_RuntimeSetServoAngle;
     config.setServoAngleCtx = stub;
+    config.setServoDegX10Fn = Test_RuntimeSetServoDegX10;
+    config.setServoDegX10Ctx = stub;
     config.stopServoFn = Test_RuntimeStopServo;
     config.stopServoCtx = stub;
+    config.releaseServoFn = Test_RuntimeReleaseServo;
+    config.releaseServoCtx = stub;
+    config.readServoFeedbackFn = Test_RuntimeReadServoFeedback;
+    config.readServoFeedbackCtx = stub;
     config.setPower5VFn = Test_RuntimeSetPower5V;
     config.setPower5VCtx = stub;
     config.touchDebounceMs = 30u;
@@ -688,6 +767,8 @@ static void test_tx_builder_vectors(void)
     CoprocTxMessage helloRspMessage;
     CoprocFrame frame;
     size_t payloadLength = 0u;
+    const uint8_t *tlvValue;
+    size_t tlvLength = 0u;
 
     ASSERT_EQ_STATUS(CoprocTxBuilder_BuildAck(10u, 42u, &ackMessage), COPROC_STATUS_OK);
     ASSERT_EQ_STATUS(Test_DecodeWireMessage(ackMessage.wire, ackMessage.wireLength, &frame, &payloadLength), COPROC_STATUS_OK);
@@ -709,9 +790,22 @@ static void test_tx_builder_vectors(void)
     ASSERT_EQ_STATUS(CoprocTxBuilder_BuildHelloRsp(13u, &helloRspMessage), COPROC_STATUS_OK);
     ASSERT_EQ_STATUS(Test_DecodeWireMessage(helloRspMessage.wire, helloRspMessage.wireLength, &frame, &payloadLength), COPROC_STATUS_OK);
     ASSERT_EQ_U32(frame.header.msgId, COPROC_SYS_MSG_HELLO_RSP);
+    ASSERT_TRUE(payloadLength >= COPROC_HELLO_BASE_PAYLOAD_LEN);
     ASSERT_EQ_U32(frame.payload[5], COPROC_CAPABILITY_MOTION | COPROC_CAPABILITY_TOUCH | COPROC_CAPABILITY_POWER);
     ASSERT_EQ_U32(frame.payload[6], COPROC_SENSOR_TOUCH);
     ASSERT_EQ_U32(frame.payload[8], COPROC_DEFAULT_STREAM_PROFILE_V1);
+    tlvValue = Test_FindHelloTlv(&frame, COPROC_HELLO_TLV_GIT_BRANCH, &tlvLength);
+    ASSERT_TRUE(tlvValue != NULL);
+    ASSERT_EQ_SIZE(tlvLength, strlen(WATCHER_BUILD_GIT_BRANCH));
+    ASSERT_TRUE(memcmp(tlvValue, WATCHER_BUILD_GIT_BRANCH, tlvLength) == 0);
+    tlvValue = Test_FindHelloTlv(&frame, COPROC_HELLO_TLV_GIT_COMMIT, &tlvLength);
+    ASSERT_TRUE(tlvValue != NULL);
+    ASSERT_EQ_SIZE(tlvLength, strlen(WATCHER_BUILD_GIT_COMMIT));
+    ASSERT_TRUE(memcmp(tlvValue, WATCHER_BUILD_GIT_COMMIT, tlvLength) == 0);
+    tlvValue = Test_FindHelloTlv(&frame, COPROC_HELLO_TLV_GIT_DIRTY, &tlvLength);
+    ASSERT_TRUE(tlvValue != NULL);
+    ASSERT_EQ_SIZE(tlvLength, 1u);
+    ASSERT_EQ_U32(tlvValue[0], WATCHER_BUILD_GIT_DIRTY != 0 ? 1u : 0u);
 
     ASSERT_EQ_STATUS(CoprocTxBuilder_BuildMotionDone(14u, 88u, COPROC_MOTION_RESULT_SUCCESS, 600, 1100, 180u, &ackMessage),
                      COPROC_STATUS_OK);
@@ -753,6 +847,8 @@ static void test_protocol_hello_req_ack_hello_rsp(void)
     CoprocFrame ackFrame;
     CoprocFrame helloRspFrame;
     size_t payloadLength = 0u;
+    const uint8_t *tlvValue;
+    size_t tlvLength = 0u;
     const CoprocProtocolStats *stats;
 
     CoprocProtocol_Init(&protocol);
@@ -768,9 +864,13 @@ static void test_protocol_hello_req_ack_hello_rsp(void)
 
     ASSERT_EQ_STATUS(Test_DecodeWireMessage(txCapture.message[1], txCapture.length[1], &helloRspFrame, &payloadLength), COPROC_STATUS_OK);
     ASSERT_EQ_U32(helloRspFrame.header.msgId, COPROC_SYS_MSG_HELLO_RSP);
+    ASSERT_TRUE(payloadLength >= COPROC_HELLO_BASE_PAYLOAD_LEN);
     ASSERT_EQ_U32(helloRspFrame.payload[5], COPROC_CAPABILITY_MOTION | COPROC_CAPABILITY_TOUCH | COPROC_CAPABILITY_POWER);
     ASSERT_EQ_U32(helloRspFrame.payload[6], COPROC_SENSOR_TOUCH);
     ASSERT_EQ_U32(helloRspFrame.payload[8], COPROC_DEFAULT_STREAM_PROFILE_V1);
+    tlvValue = Test_FindHelloTlv(&helloRspFrame, COPROC_HELLO_TLV_GIT_BRANCH, &tlvLength);
+    ASSERT_TRUE(tlvValue != NULL);
+    ASSERT_EQ_SIZE(tlvLength, strlen(WATCHER_BUILD_GIT_BRANCH));
 
     ASSERT_TRUE(obsCapture.count >= 5u);
     ASSERT_EQ_U32(obsCapture.events[0].type, COPROC_OBS_EVENT_FRAME_CANDIDATE);
@@ -886,6 +986,48 @@ static void test_protocol_strict_sys_payload_lengths(void)
     }
 }
 
+static void test_protocol_accepts_extended_hello_rsp_metadata(void)
+{
+    CoprocProtocol protocol;
+    ObsCapture obsCapture = {0};
+    CoprocFrameHeader header;
+    uint8_t payload[COPROC_FRAME_MAX_PAYLOAD_SIZE] = {
+        COPROC_DEVICE_ROLE_STM32_COPROC,
+        COPROC_FW_VERSION_MAJOR,
+        COPROC_FW_VERSION_MINOR,
+        COPROC_FW_VERSION_PATCH,
+        COPROC_HW_VERSION,
+        COPROC_CAPABILITY_MOTION,
+        0u,
+        COPROC_BOOT_REASON_POWER_ON,
+        COPROC_DEFAULT_STREAM_PROFILE_V1,
+    };
+    uint8_t wire[COPROC_FRAME_MAX_WIRE_SIZE];
+    size_t wireLength = 0u;
+    size_t payloadLength = COPROC_HELLO_BASE_PAYLOAD_LEN;
+
+    payload[payloadLength++] = COPROC_HELLO_TLV_GIT_BRANCH;
+    payload[payloadLength++] = 5u;
+    memcpy(&payload[payloadLength], "dev-x", 5u);
+    payloadLength += 5u;
+
+    CoprocProtocol_Init(&protocol);
+    CoprocFrameCodec_InitHeader(&header,
+                                COPROC_MSG_CLASS_SYS,
+                                COPROC_SYS_MSG_HELLO_RSP,
+                                COPROC_FRAME_FLAG_RESP,
+                                77u,
+                                (uint16_t)payloadLength);
+    ASSERT_EQ_STATUS(Test_EncodeWireFrame(&header, payload, wire, sizeof(wire), &wireLength), COPROC_STATUS_OK);
+    ASSERT_EQ_STATUS(CoprocProtocol_IngestBytes(&protocol, wire, wireLength), COPROC_STATUS_OK);
+    ASSERT_EQ_STATUS(CoprocProtocol_Process(&protocol, Test_TxCapture, NULL, Test_ObsCapture, &obsCapture),
+                     COPROC_STATUS_OK);
+
+    ASSERT_EQ_U32(Test_CountObsType(&obsCapture, COPROC_OBS_EVENT_FRAME_DECODE_OK), 1u);
+    ASSERT_EQ_U32(Test_CountObsType(&obsCapture, COPROC_OBS_EVENT_DISPATCH_FAIL), 0u);
+    ASSERT_EQ_U32(Test_CountObsType(&obsCapture, COPROC_OBS_EVENT_HELLO_RSP), 1u);
+}
+
 static void test_runtime_servo_move_delayed_motion_done(void)
 {
     RuntimeStub stub = {0};
@@ -899,6 +1041,10 @@ static void test_runtime_servo_move_delayed_motion_done(void)
     uint8_t payload[COPROC_PAYLOAD_LEN_SERVO_MOVE] = {0x01u, 0x58u, 0x02u, 0x00u, 0x00u, 0x64u, 0x00u, 0x00u, 0x01u};
 
     Test_InitRuntime(&runtime, &stub);
+    runtime.config.servoFeedbackStateEnabled = 1u;
+    runtime.config.servoFeedbackStateIntervalMs = 1000u;
+    runtime.lastServoFeedbackStateTxMs = 1u;
+    stub.feedbackAngle[2] = 30u;
     CoprocFrameCodec_InitHeader(&frame.header,
                                 COPROC_MSG_CLASS_MOTION,
                                 COPROC_MOTION_MSG_SERVO_MOVE,
@@ -920,6 +1066,7 @@ static void test_runtime_servo_move_delayed_motion_done(void)
     ASSERT_EQ_U32(stub.servoSetCount, 1u);
     ASSERT_EQ_U32(stub.lastServoIndex, 2u);
     ASSERT_EQ_U32(stub.lastServoAngle, 90u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
     ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_SYS, COPROC_SYS_MSG_ACK), 1u);
     ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_DONE), 0u);
 
@@ -941,6 +1088,7 @@ static void test_runtime_servo_move_delayed_motion_done(void)
     ASSERT_EQ_U32(decoded.payload[4], COPROC_MOTION_RESULT_SUCCESS);
     ASSERT_EQ_U32((uint16_t)decoded.payload[5] | ((uint16_t)decoded.payload[6] << 8u), 600u);
     ASSERT_EQ_U32(CoprocRuntime_GetStats(&runtime)->motionDoneTxCount, 1u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
 }
 
 static void test_runtime_servo_move_ease_in_out_profile(void)
@@ -1057,6 +1205,209 @@ static void test_runtime_touch_active_low_press_release(void)
     ASSERT_EQ_U32(obsCapture.events[1].touchCode, COPROC_TOUCH_EVENT_RELEASE);
 }
 
+static void test_runtime_periodic_servo_feedback_state(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame decoded;
+    size_t payloadLength = 0u;
+    uint32_t nextSeq = 1u;
+
+    Test_InitRuntime(&runtime, &stub);
+    runtime.config.readServoFeedbackFn = Test_RuntimeReadServoFeedback;
+    runtime.config.readServoFeedbackCtx = &stub;
+    runtime.config.servoFeedbackStateEnabled = 1u;
+    runtime.config.servoFeedbackStateIntervalMs = 50u;
+    stub.nowMs = 50u;
+
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_STATE),
+                  1u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 2u);
+    ASSERT_EQ_STATUS(Test_DecodeWireMessage(txCapture.message[0], txCapture.length[0], &decoded, &payloadLength),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(payloadLength, COPROC_PAYLOAD_LEN_MOTION_STATE);
+    ASSERT_EQ_U32(decoded.payload[0], 50u);
+    ASSERT_EQ_U32(decoded.payload[4], 0x03u);
+    ASSERT_EQ_U32(decoded.payload[5], 0x84u);
+    ASSERT_EQ_U32(decoded.payload[6], 0x03u);
+    ASSERT_EQ_U32(decoded.payload[7], 0x84u);
+    ASSERT_EQ_U32(decoded.payload[8], 0x03u);
+    ASSERT_EQ_U32(Test_CountObsType(&obsCapture, COPROC_OBS_EVENT_MOTION_STATE), 1u);
+}
+
+static void test_runtime_servo_feedback_state_defaults_off(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    uint32_t nextSeq = 1u;
+
+    Test_InitRuntime(&runtime, &stub);
+    stub.nowMs = 50u;
+
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_STATE),
+                  0u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
+}
+
+static void test_runtime_servo_pwm_unlock_enables_feedback_state(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    uint32_t nextSeq = 1u;
+    uint8_t payload[COPROC_PAYLOAD_LEN_SERVO_PWM] = {0x03u, 0x03u};
+
+    Test_InitRuntime(&runtime, &stub);
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_PWM_UNLOCK,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                302u,
+                                COPROC_PAYLOAD_LEN_SERVO_PWM);
+    memcpy(frame.payload, payload, sizeof(payload));
+
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_SYS, COPROC_SYS_MSG_ACK), 1u);
+    ASSERT_EQ_U32(stub.servoReleaseCount, 2u);
+
+    txCapture.count = 0u;
+    obsCapture.count = 0u;
+    stub.nowMs = 1u;
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_STATE),
+                  1u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 2u);
+}
+
+static void test_runtime_servo_pwm_unlock_reports_only_unlocked_axis(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    CoprocFrame decoded;
+    size_t payloadLength = 0u;
+    uint32_t nextSeq = 1u;
+    uint8_t payload[COPROC_PAYLOAD_LEN_SERVO_PWM] = {0x01u, 0x03u};
+
+    Test_InitRuntime(&runtime, &stub);
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_PWM_UNLOCK,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                305u,
+                                COPROC_PAYLOAD_LEN_SERVO_PWM);
+    memcpy(frame.payload, payload, sizeof(payload));
+
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    txCapture.count = 0u;
+    obsCapture.count = 0u;
+    stub.nowMs = 1u;
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_STATE),
+                  1u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 1u);
+    ASSERT_EQ_STATUS(Test_DecodeWireMessage(txCapture.message[0], txCapture.length[0], &decoded, &payloadLength),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(decoded.payload[4], 0x01u);
+}
+
+static void test_runtime_servo_pwm_lock_disables_feedback_state(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    uint32_t nextSeq = 1u;
+    uint8_t payload[COPROC_PAYLOAD_LEN_SERVO_PWM] = {0x03u, 0x03u};
+
+    Test_InitRuntime(&runtime, &stub);
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_PWM_UNLOCK,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                303u,
+                                COPROC_PAYLOAD_LEN_SERVO_PWM);
+    memcpy(frame.payload, payload, sizeof(payload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_PWM_LOCK,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                304u,
+                                COPROC_PAYLOAD_LEN_SERVO_PWM);
+    memcpy(frame.payload, payload, sizeof(payload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    txCapture.count = 0u;
+    obsCapture.count = 0u;
+    stub.feedbackReadCount = 0u;
+    stub.nowMs = 100u;
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_STATE),
+                  0u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
+}
+
 static void test_runtime_servo_jog_updates_until_stop(void)
 {
     RuntimeStub stub = {0};
@@ -1073,6 +1424,10 @@ static void test_runtime_servo_jog_updates_until_stop(void)
     uint8_t stopPayload[COPROC_PAYLOAD_LEN_SERVO_STOP] = {0x01u, 0x02u};
 
     Test_InitRuntime(&runtime, &stub);
+    runtime.config.servoFeedbackStateEnabled = 1u;
+    runtime.config.servoFeedbackStateIntervalMs = 1000u;
+    runtime.lastServoFeedbackStateTxMs = 1u;
+    stub.feedbackAngle[2] = 30u;
     CoprocFrameCodec_InitHeader(&frame.header,
                                 COPROC_MSG_CLASS_MOTION,
                                 COPROC_MOTION_MSG_SERVO_JOG,
@@ -1100,6 +1455,7 @@ static void test_runtime_servo_jog_updates_until_stop(void)
     ASSERT_EQ_U32(stub.servoSetCount, 1u);
     ASSERT_EQ_U32(stub.lastServoIndex, 2u);
     ASSERT_EQ_U32(stub.lastServoAngle, 96u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
 
     CoprocFrameCodec_InitHeader(&frame.header,
                                 COPROC_MSG_CLASS_MOTION,
@@ -1129,6 +1485,7 @@ static void test_runtime_servo_jog_updates_until_stop(void)
                                         Test_RuntimeDispatchObs, &obsCapture),
                      COPROC_STATUS_OK);
     ASSERT_EQ_U32(stub.servoSetCount, 1u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
 }
 
 static void test_runtime_servo_jog_refresh_does_not_interrupt_previous_jog(void)
@@ -1209,6 +1566,454 @@ static void test_runtime_servo_jog_refresh_does_not_interrupt_previous_jog(void)
     ASSERT_EQ_U32(decoded.payload[4], COPROC_MOTION_RESULT_STOPPED);
 }
 
+static void test_runtime_relay_target_overwrites_without_motion_done(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    uint32_t nextSeq = 1u;
+    uint8_t relayPayload[COPROC_PAYLOAD_LEN_SERVO_RELAY_TARGET] = {
+        0x03u, 0xB0u, 0x04u, 0x4Cu, 0x04u, 0x2Du, 0x00u, 0x2Cu, 0x01u, 0x05u
+    };
+
+    Test_InitRuntime(&runtime, &stub);
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_RELAY_TARGET,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                201u,
+                                COPROC_PAYLOAD_LEN_SERVO_RELAY_TARGET);
+    memcpy(frame.payload, relayPayload, sizeof(relayPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_SYS, COPROC_SYS_MSG_ACK), 1u);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_DONE), 0u);
+
+    relayPayload[1] = 0x14u;
+    relayPayload[2] = 0x05u;
+    stub.nowMs = 10u;
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_RELAY_TARGET,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                202u,
+                                COPROC_PAYLOAD_LEN_SERVO_RELAY_TARGET);
+    memcpy(frame.payload, relayPayload, sizeof(relayPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_SYS, COPROC_SYS_MSG_ACK), 2u);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_DONE), 0u);
+
+    stub.nowMs = 30u;
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+    ASSERT_TRUE(stub.servoSetCount > 0u);
+    ASSERT_TRUE(stub.commandAngle[2] > 90u);
+    ASSERT_TRUE(stub.commandAngle[2] < 130u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
+
+    stub.nowMs = 360u;
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_DONE), 0u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
+}
+
+static void test_runtime_relay_target_stop_holds_without_motion_done(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    uint32_t nextSeq = 1u;
+    uint8_t relayPayload[COPROC_PAYLOAD_LEN_SERVO_RELAY_TARGET] = {
+        0x01u, 0xB0u, 0x04u, 0x00u, 0x00u, 0x2Du, 0x00u, 0x2Cu, 0x01u, 0x05u
+    };
+    uint8_t stopPayload[COPROC_PAYLOAD_LEN_SERVO_STOP] = {0x01u, 0x05u};
+
+    Test_InitRuntime(&runtime, &stub);
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_RELAY_TARGET,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                211u,
+                                COPROC_PAYLOAD_LEN_SERVO_RELAY_TARGET);
+    memcpy(frame.payload, relayPayload, sizeof(relayPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_STOP,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                212u,
+                                COPROC_PAYLOAD_LEN_SERVO_STOP);
+    memcpy(frame.payload, stopPayload, sizeof(stopPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_SYS, COPROC_SYS_MSG_ACK), 2u);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_DONE), 0u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
+}
+
+static void test_runtime_direct_target_uses_deg_x10_callback(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    uint32_t nextSeq = 1u;
+    uint8_t payload[COPROC_PAYLOAD_LEN_SERVO_DIRECT_TARGET] = {0x01u, 0xEDu, 0x03u, 0x00u, 0x00u, 0x00u};
+
+    Test_InitRuntime(&runtime, &stub);
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_DIRECT_TARGET,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                93u,
+                                COPROC_PAYLOAD_LEN_SERVO_DIRECT_TARGET);
+    memcpy(frame.payload, payload, sizeof(payload));
+
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_SYS, COPROC_SYS_MSG_ACK), 1u);
+    ASSERT_EQ_U32(stub.servoSetCount, 1u);
+    ASSERT_EQ_U32(stub.lastServoIndex, 2u);
+    ASSERT_EQ_U32(stub.lastServoDegX10, 1005u);
+}
+
+static void test_runtime_servo_pwm_unlock_releases_axes(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    uint32_t nextSeq = 1u;
+    uint8_t payload[COPROC_PAYLOAD_LEN_SERVO_PWM] = {0x03u, 0x03u};
+
+    Test_InitRuntime(&runtime, &stub);
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_PWM_UNLOCK,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                301u,
+                                COPROC_PAYLOAD_LEN_SERVO_PWM);
+    memcpy(frame.payload, payload, sizeof(payload));
+
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_SYS, COPROC_SYS_MSG_ACK), 1u);
+    ASSERT_EQ_U32(stub.servoReleaseCount, 2u);
+}
+
+static void test_runtime_chunked_sequence_runs_segments(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    uint32_t nextSeq = 1u;
+    uint8_t beginPayload[COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_BEGIN] = {0x34u, 0x12u, 0x03u, 0x02u};
+    uint8_t chunkPayload[COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_CHUNK_HEADER +
+                         (2u * COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_SEGMENT)] = {
+        0x34u, 0x12u, 0x00u, 0x02u,
+        0x01u, 0xE8u, 0x03u, 0x00u, 0x00u, 0x32u, 0x00u, COPROC_MOTION_PROFILE_LINEAR,
+        0x02u, 0x00u, 0x00u, 0xB0u, 0x04u, 0x32u, 0x00u, COPROC_MOTION_PROFILE_LINEAR
+    };
+    uint8_t endPayload[COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_END] = {0x34u, 0x12u};
+
+    Test_InitRuntime(&runtime, &stub);
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_SEQUENCE_BEGIN,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                311u,
+                                COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_BEGIN);
+    memcpy(frame.payload, beginPayload, sizeof(beginPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_SEQUENCE_CHUNK,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                312u,
+                                sizeof(chunkPayload));
+    memcpy(frame.payload, chunkPayload, sizeof(chunkPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_SEQUENCE_END,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                313u,
+                                COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_END);
+    memcpy(frame.payload, endPayload, sizeof(endPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_SYS, COPROC_SYS_MSG_ACK), 3u);
+    ASSERT_EQ_U32(stub.servoSetCount, 1u);
+    ASSERT_EQ_U32(stub.lastServoIndex, 2u);
+    ASSERT_EQ_U32(stub.lastServoAngle, 90u);
+
+    stub.nowMs = 60u;
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(stub.servoSetCount, 3u);
+    ASSERT_EQ_U32(stub.lastServoIndex, 1u);
+    ASSERT_EQ_U32(stub.lastServoAngle, 96u);
+
+    stub.nowMs = 120u;
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(stub.servoSetCount, 4u);
+    ASSERT_EQ_U32(stub.lastServoIndex, 1u);
+    ASSERT_EQ_U32(stub.lastServoAngle, 120u);
+}
+
+static void test_runtime_chunked_sequence_catches_up_late_boundary(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    uint32_t nextSeq = 1u;
+    uint8_t beginPayload[COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_BEGIN] = {0x35u, 0x12u, 0x03u, 0x02u};
+    uint8_t chunkPayload[COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_CHUNK_HEADER +
+                         (2u * COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_SEGMENT)] = {
+        0x35u, 0x12u, 0x00u, 0x02u,
+        0x01u, 0x14u, 0x05u, 0x00u, 0x00u, 0xE8u, 0x03u, COPROC_MOTION_PROFILE_LINEAR,
+        0x01u, 0x2Cu, 0x01u, 0x00u, 0x00u, 0xE8u, 0x03u, COPROC_MOTION_PROFILE_LINEAR
+    };
+    uint8_t endPayload[COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_END] = {0x35u, 0x12u};
+
+    Test_InitRuntime(&runtime, &stub);
+    stub.feedbackAngle[2] = 30u;
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_SEQUENCE_BEGIN,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                321u,
+                                COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_BEGIN);
+    memcpy(frame.payload, beginPayload, sizeof(beginPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_SEQUENCE_CHUNK,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                322u,
+                                sizeof(chunkPayload));
+    memcpy(frame.payload, chunkPayload, sizeof(chunkPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_SEQUENCE_END,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                323u,
+                                COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_END);
+    memcpy(frame.payload, endPayload, sizeof(endPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
+    ASSERT_EQ_U32(stub.lastServoIndex, 2u);
+    ASSERT_EQ_U32(stub.lastServoAngle, 90u);
+
+    stub.feedbackAngle[2] = 30u;
+    stub.nowMs = 1031u;
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_DONE), 1u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
+    ASSERT_EQ_U32(stub.lastServoIndex, 2u);
+    ASSERT_EQ_U32(stub.lastServoAngle, 127u);
+}
+
+static void test_runtime_chunked_sequence_catches_up_multiple_boundaries(void)
+{
+    RuntimeStub stub = {0};
+    CoprocRuntime runtime;
+    TxCapture txCapture = {0};
+    ObsCapture obsCapture = {0};
+    CoprocFrame frame;
+    uint32_t nextSeq = 1u;
+    uint8_t beginPayload[COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_BEGIN] = {0x36u, 0x12u, 0x03u, 0x03u};
+    uint8_t chunkPayload[COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_CHUNK_HEADER +
+                         (3u * COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_SEGMENT)] = {
+        0x36u, 0x12u, 0x00u, 0x03u,
+        0x01u, 0x14u, 0x05u, 0x00u, 0x00u, 0x28u, 0x00u, COPROC_MOTION_PROFILE_LINEAR,
+        0x01u, 0x2Cu, 0x01u, 0x00u, 0x00u, 0x28u, 0x00u, COPROC_MOTION_PROFILE_LINEAR,
+        0x01u, 0x84u, 0x03u, 0x00u, 0x00u, 0x28u, 0x00u, COPROC_MOTION_PROFILE_LINEAR
+    };
+    uint8_t endPayload[COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_END] = {0x36u, 0x12u};
+
+    Test_InitRuntime(&runtime, &stub);
+    stub.feedbackAngle[2] = 30u;
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_SEQUENCE_BEGIN,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                331u,
+                                COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_BEGIN);
+    memcpy(frame.payload, beginPayload, sizeof(beginPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_SEQUENCE_CHUNK,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                332u,
+                                sizeof(chunkPayload));
+    memcpy(frame.payload, chunkPayload, sizeof(chunkPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    CoprocFrameCodec_InitHeader(&frame.header,
+                                COPROC_MSG_CLASS_MOTION,
+                                COPROC_MOTION_MSG_SERVO_SEQUENCE_END,
+                                COPROC_FRAME_FLAG_ACK_REQ,
+                                333u,
+                                COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_END);
+    memcpy(frame.payload, endPayload, sizeof(endPayload));
+    ASSERT_EQ_STATUS(CoprocRuntime_ProcessFrame(&frame,
+                                                Test_AllocSeq,
+                                                &nextSeq,
+                                                Test_TxCapture,
+                                                &txCapture,
+                                                Test_RuntimeDispatchObs,
+                                                &obsCapture,
+                                                &runtime),
+                     COPROC_STATUS_OK);
+
+    stub.nowMs = 95u;
+    ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
+                                        Test_RuntimeDispatchObs, &obsCapture),
+                     COPROC_STATUS_OK);
+    ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_DONE), 2u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
+    ASSERT_EQ_U32(stub.lastServoIndex, 2u);
+    ASSERT_EQ_U32(stub.lastServoAngle, 53u);
+}
+
 static void test_runtime_servo_move_rejects_invalid_motion_payload(void)
 {
     RuntimeStub stub = {0};
@@ -1271,6 +2076,8 @@ static void test_runtime_motion_queue_runs_after_active_done(void)
     uint8_t moveY[COPROC_PAYLOAD_LEN_SERVO_MOVE] = {0x02u, 0x00u, 0x00u, 0x4Cu, 0x04u, 0x64u, 0x00u, 0x00u, 0x01u};
 
     Test_InitRuntime(&runtime, &stub);
+    stub.feedbackAngle[1] = 150u;
+    stub.feedbackAngle[2] = 150u;
     CoprocFrameCodec_InitHeader(&frame.header,
                                 COPROC_MSG_CLASS_MOTION,
                                 COPROC_MOTION_MSG_SERVO_MOVE,
@@ -1307,6 +2114,7 @@ static void test_runtime_motion_queue_runs_after_active_done(void)
     ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_SYS, COPROC_SYS_MSG_ACK), 2u);
     ASSERT_EQ_U32(Test_CountDecodedFramesByType(&txCapture, COPROC_MSG_CLASS_MOTION, COPROC_MOTION_MSG_MOTION_DONE), 0u);
     ASSERT_EQ_U32(stub.servoSetCount, 1u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
 
     stub.nowMs = 100u;
     ASSERT_EQ_STATUS(CoprocRuntime_Poll(&runtime, Test_AllocSeq, &nextSeq, Test_TxCapture, &txCapture,
@@ -1325,6 +2133,7 @@ static void test_runtime_motion_queue_runs_after_active_done(void)
     ASSERT_EQ_U32(decoded.payload[0], 72u);
     ASSERT_EQ_U32(decoded.payload[4], COPROC_MOTION_RESULT_SUCCESS);
     ASSERT_EQ_U32((uint16_t)decoded.payload[7] | ((uint16_t)decoded.payload[8] << 8u), 1100u);
+    ASSERT_EQ_U32(stub.feedbackReadCount, 0u);
 }
 
 static void test_runtime_motion_queue_full_nacks_new_move(void)
@@ -2223,11 +3032,26 @@ int main(void)
     run_test(test_protocol_decode_fail_stats, "protocol_decode_fail_stats");
     run_test(test_protocol_dispatch_fail_on_tx_failure, "protocol_dispatch_fail_on_tx_failure");
     run_test(test_protocol_strict_sys_payload_lengths, "protocol_strict_sys_payload_lengths");
+    run_test(test_protocol_accepts_extended_hello_rsp_metadata, "protocol_accepts_extended_hello_rsp_metadata");
     run_test(test_runtime_servo_move_delayed_motion_done, "runtime_servo_move_delayed_motion_done");
     run_test(test_runtime_servo_move_ease_in_out_profile, "runtime_servo_move_ease_in_out_profile");
     run_test(test_runtime_touch_active_low_press_release, "runtime_touch_active_low_press_release");
+    run_test(test_runtime_servo_feedback_state_defaults_off, "runtime_servo_feedback_state_defaults_off");
+    run_test(test_runtime_periodic_servo_feedback_state, "runtime_periodic_servo_feedback_state");
+    run_test(test_runtime_servo_pwm_unlock_enables_feedback_state, "runtime_servo_pwm_unlock_enables_feedback_state");
+    run_test(test_runtime_servo_pwm_unlock_reports_only_unlocked_axis, "runtime_servo_pwm_unlock_reports_only_unlocked_axis");
+    run_test(test_runtime_servo_pwm_lock_disables_feedback_state, "runtime_servo_pwm_lock_disables_feedback_state");
     run_test(test_runtime_servo_jog_updates_until_stop, "runtime_servo_jog_updates_until_stop");
     run_test(test_runtime_servo_jog_refresh_does_not_interrupt_previous_jog, "runtime_servo_jog_refresh_does_not_interrupt_previous_jog");
+    run_test(test_runtime_relay_target_overwrites_without_motion_done, "runtime_relay_target_overwrites_without_motion_done");
+    run_test(test_runtime_relay_target_stop_holds_without_motion_done, "runtime_relay_target_stop_holds_without_motion_done");
+    run_test(test_runtime_direct_target_uses_deg_x10_callback, "runtime_direct_target_uses_deg_x10_callback");
+    run_test(test_runtime_servo_pwm_unlock_releases_axes, "runtime_servo_pwm_unlock_releases_axes");
+    run_test(test_runtime_chunked_sequence_runs_segments, "runtime_chunked_sequence_runs_segments");
+    run_test(test_runtime_chunked_sequence_catches_up_late_boundary,
+             "runtime_chunked_sequence_catches_up_late_boundary");
+    run_test(test_runtime_chunked_sequence_catches_up_multiple_boundaries,
+             "runtime_chunked_sequence_catches_up_multiple_boundaries");
     run_test(test_runtime_servo_move_rejects_invalid_motion_payload, "runtime_servo_move_rejects_invalid_motion_payload");
     run_test(test_runtime_motion_queue_runs_after_active_done, "runtime_motion_queue_runs_after_active_done");
     run_test(test_runtime_motion_queue_full_nacks_new_move, "runtime_motion_queue_full_nacks_new_move");

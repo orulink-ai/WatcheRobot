@@ -1,0 +1,122 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cmake: configure Debug",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--preset",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake: build Debug",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "--preset",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cmake: configure Debug",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "flash: Debug via STM32CubeProgrammer",
+      "type": "shell",
+      "command": "C:\\Users\\25772\\AppData\\Local\\stm32cube\\bundles\\programmer\\2.22.0+st.1\\bin\\STM32_Programmer_CLI.exe",
+      "args": [
+        "-c",
+        "port=SWD",
+        "mode=UR",
+        "-w",
+        "${workspaceFolder}/build/Debug/watcheRobot_STM32.bin",
+        "0x08000000",
+        "-v",
+        "-rst"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cmake: build Debug",
+      "problemMatcher": []
+    },
+    {
+      "label": "flash: Debug via OpenOCD fallback",
+      "type": "shell",
+      "command": "C:\\Users\\25772\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\openocd-esp32\\v0.12.0-esp32-20250226\\bin\\openocd.exe",
+      "args": [
+        "-f",
+        "interface/stlink.cfg",
+        "-f",
+        "target/stm32f1x.cfg",
+        "-c",
+        "program ${workspaceFolder}/build/Debug/watcheRobot_STM32.bin verify reset exit 0x08000000"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cmake: build Debug",
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake: configure HostDebug",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--preset",
+        "HostDebug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake: build HostDebug",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "--preset",
+        "HostDebug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cmake: configure HostDebug",
+      "problemMatcher": [
+        "$msCompile"
+      ]
+    },
+    {
+      "label": "ctest: HostDebug",
+      "type": "shell",
+      "command": "ctest",
+      "args": [
+        "--preset",
+        "HostDebug",
+        "--output-on-failure"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cmake: build HostDebug",
+      "problemMatcher": []
+    }
+  ]
+}

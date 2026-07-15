@@ -1,0 +1,42 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug STM32F103 (ST-LINK)",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build/Debug/watcheRobot_STM32",
+      "request": "launch",
+      "type": "cortex-debug",
+      "servertype": "stlink",
+      "serverpath": "C:\\Users\\25772\\AppData\\Local\\stm32cube\\bundles\\stlink-gdbserver\\7.13.0+st.3\\bin\\ST-LINK_gdbserver.exe",
+      "stm32cubeprogrammer": "C:\\Users\\25772\\AppData\\Local\\stm32cube\\bundles\\programmer\\2.22.0+st.1\\bin",
+      "serverArgs": [
+        "--initialize-reset",
+        "--frequency",
+        "1000"
+      ],
+      "gdbPath": "C:\\Users\\25772\\AppData\\Local\\stm32cube\\bundles\\gnu-tools-for-stm32\\14.3.1+st.2\\bin\\arm-none-eabi-gdb.exe",
+      "device": "STM32F103C8",
+      "interface": "swd",
+      "runToEntryPoint": "main",
+      "preLaunchTask": "cmake: build Debug"
+    },
+    {
+      "name": "Debug STM32F103 (OpenOCD fallback)",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build/Debug/watcheRobot_STM32",
+      "request": "launch",
+      "type": "cortex-debug",
+      "servertype": "openocd",
+      "serverpath": "C:\\Users\\25772\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\openocd-esp32\\v0.12.0-esp32-20250226\\bin\\openocd.exe",
+      "gdbPath": "C:\\Users\\25772\\AppData\\Local\\stm32cube\\bundles\\gnu-tools-for-stm32\\14.3.1+st.2\\bin\\arm-none-eabi-gdb.exe",
+      "configFiles": [
+        "interface/stlink.cfg",
+        "target/stm32f1x.cfg"
+      ],
+      "device": "STM32F103C8",
+      "runToEntryPoint": "main",
+      "preLaunchTask": "cmake: build Debug"
+    }
+  ]
+}

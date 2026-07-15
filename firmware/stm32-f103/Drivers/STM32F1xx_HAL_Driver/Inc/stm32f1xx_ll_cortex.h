@@ -635,3 +635,4 @@ __STATIC_INLINE void LL_MPU_DisableRegion(uint32_t Region)
 #endif
 
 #endif /* __STM32F1xx_LL_CORTEX_H */
+

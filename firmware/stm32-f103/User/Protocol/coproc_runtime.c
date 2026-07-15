@@ -3,6 +3,7 @@
 #include <string.h>
 
 #define COPROC_RUNTIME_DEFAULT_TOUCH_DEBOUNCE_MS 30u
+#define COPROC_RUNTIME_DEFAULT_SERVO_FEEDBACK_STATE_INTERVAL_MS 50u
 #define COPROC_RUNTIME_AXIS_X 0x01u
 #define COPROC_RUNTIME_AXIS_Y 0x02u
 #define COPROC_RUNTIME_DEFAULT_SERVO_DEG_X10 900
@@ -12,10 +13,26 @@
 #define COPROC_RUNTIME_LED_TARGET_ALL 0u
 #define COPROC_RUNTIME_LED_TARGET_SIDE 1u
 #define COPROC_RUNTIME_LED_TARGET_BOTTOM 2u
+#define COPROC_RUNTIME_RELAY_MIN_UPDATE_MS 10u
+#define COPROC_RUNTIME_RELAY_MIN_STEP_X10 8
+#define COPROC_RUNTIME_RELAY_MAX_STEP_X10 260
+#define COPROC_RUNTIME_RELAY_HOLD_DEADBAND_X10 2
 
 static uint8_t CoprocRuntime_ReadServoFeedbackDegX10(CoprocRuntime *runtime,
                                                      uint8_t servoIndex,
                                                      int16_t *degX10);
+static uint8_t CoprocRuntime_ReadServoFeedback(CoprocRuntime *runtime,
+                                               uint8_t servoIndex,
+                                               uint16_t *raw,
+                                               int16_t *degX10);
+static CoprocStatus CoprocRuntime_SendServoFeedbackState(CoprocRuntime *runtime,
+                                                         uint32_t nowMs,
+                                                         CoprocDispatchAllocSeqFn allocSeqFn,
+                                                         void *allocSeqCtx,
+                                                         CoprocDispatchTxWriteFn txWriteFn,
+                                                         void *txWriteCtx,
+                                                         CoprocDispatchEventFn eventFn,
+                                                         void *eventCtx);
 
 static uint16_t CoprocRuntime_ReadU16Le(const uint8_t *src)
 {
@@ -327,14 +344,9 @@ static CoprocStatus CoprocRuntime_SendMotionDone(CoprocRuntime *runtime,
         return COPROC_STATUS_INVALID_ARG;
     }
 
+    /* Feedback is diagnostic telemetry; completion reports the commanded trajectory. */
     finalXDegX10 = runtime->motionFinalXDegX10;
     finalYDegX10 = runtime->motionFinalYDegX10;
-    if ((runtime->motionAxisMask & COPROC_RUNTIME_AXIS_X) != 0u) {
-        (void)CoprocRuntime_ReadServoFeedbackDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_X, &finalXDegX10);
-    }
-    if ((runtime->motionAxisMask & COPROC_RUNTIME_AXIS_Y) != 0u) {
-        (void)CoprocRuntime_ReadServoFeedbackDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_Y, &finalYDegX10);
-    }
 
     status = CoprocTxBuilder_BuildMotionDone(allocSeqFn(allocSeqCtx),
                                              runtime->motionRefSeq,
@@ -470,6 +482,11 @@ static uint8_t CoprocRuntime_DegX10ToAngle(int16_t degX10, uint8_t *angle)
     return 1u;
 }
 
+static uint8_t CoprocRuntime_IsDegX10Valid(int16_t degX10)
+{
+    return (degX10 >= 0 && degX10 <= COPROC_RUNTIME_MAX_SERVO_DEG_X10) ? 1u : 0u;
+}
+
 static int16_t CoprocRuntime_AngleToDegX10(uint8_t angle)
 {
     return (int16_t)((uint16_t)angle * 10u);
@@ -479,14 +496,23 @@ static uint8_t CoprocRuntime_ReadServoFeedbackDegX10(CoprocRuntime *runtime,
                                                      uint8_t servoIndex,
                                                      int16_t *degX10)
 {
+    uint16_t feedbackRaw = 0u;
+
+    return CoprocRuntime_ReadServoFeedback(runtime, servoIndex, &feedbackRaw, degX10);
+}
+
+static uint8_t CoprocRuntime_ReadServoFeedback(CoprocRuntime *runtime,
+                                               uint8_t servoIndex,
+                                               uint16_t *raw,
+                                               int16_t *degX10)
+{
     uint8_t commandAngle = 0u;
     uint16_t feedbackRaw = 0u;
     uint16_t feedbackMv = 0u;
     uint8_t feedbackAngle = 0u;
 
-    (void)feedbackRaw;
     (void)feedbackMv;
-    if (runtime == NULL || degX10 == NULL || runtime->config.readServoFeedbackFn == NULL) {
+    if (runtime == NULL || raw == NULL || degX10 == NULL || runtime->config.readServoFeedbackFn == NULL) {
         return 0u;
     }
 
@@ -501,8 +527,113 @@ static uint8_t CoprocRuntime_ReadServoFeedbackDegX10(CoprocRuntime *runtime,
     }
 
     (void)commandAngle;
+    *raw = feedbackRaw;
     *degX10 = CoprocRuntime_AngleToDegX10(feedbackAngle);
     return 1u;
+}
+
+static CoprocStatus CoprocRuntime_SendServoFeedbackState(CoprocRuntime *runtime,
+                                                         uint32_t nowMs,
+                                                         CoprocDispatchAllocSeqFn allocSeqFn,
+                                                         void *allocSeqCtx,
+                                                         CoprocDispatchTxWriteFn txWriteFn,
+                                                         void *txWriteCtx,
+                                                         CoprocDispatchEventFn eventFn,
+                                                         void *eventCtx)
+{
+    CoprocTxMessage message;
+    CoprocStatus status;
+    uint8_t commandAngle = 0u;
+    uint16_t servo1Raw = 0u;
+    uint16_t servo2Raw = 0u;
+    uint16_t feedbackMv = 0u;
+    uint8_t servo1Angle = 0u;
+    uint8_t servo2Angle = 0u;
+    uint8_t validMask = 0u;
+    uint8_t reportAxisMask = 0u;
+    int16_t xDegX10 = 0;
+    int16_t yDegX10 = 0;
+
+    if (runtime == NULL || allocSeqFn == NULL || runtime->config.readServoFeedbackFn == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+
+    reportAxisMask = runtime->servoFeedbackUnlockedAxisMask;
+    if (reportAxisMask == 0u) {
+        reportAxisMask = COPROC_RUNTIME_AXIS_X | COPROC_RUNTIME_AXIS_Y;
+    }
+
+    if ((reportAxisMask & COPROC_RUNTIME_AXIS_X) != 0u) {
+        if (runtime->config.readServoFeedbackFn(runtime->config.readServoFeedbackCtx,
+                                                COPROC_RUNTIME_SERVO_FOR_AXIS_X,
+                                                &commandAngle,
+                                                &servo2Raw,
+                                                &feedbackMv,
+                                                &servo2Angle) != 0u) {
+            validMask |= COPROC_RUNTIME_AXIS_X;
+            xDegX10 = CoprocRuntime_AngleToDegX10(servo2Angle);
+        } else {
+            runtime->stats.feedbackFailCount++;
+        }
+    }
+
+    if ((reportAxisMask & COPROC_RUNTIME_AXIS_Y) != 0u) {
+        if (runtime->config.readServoFeedbackFn(runtime->config.readServoFeedbackCtx,
+                                                COPROC_RUNTIME_SERVO_FOR_AXIS_Y,
+                                                &commandAngle,
+                                                &servo1Raw,
+                                                &feedbackMv,
+                                                &servo1Angle) != 0u) {
+            validMask |= COPROC_RUNTIME_AXIS_Y;
+            yDegX10 = CoprocRuntime_AngleToDegX10(servo1Angle);
+        } else {
+            runtime->stats.feedbackFailCount++;
+        }
+    }
+
+    status = CoprocTxBuilder_BuildMotionState(allocSeqFn(allocSeqCtx),
+                                              nowMs,
+                                              validMask,
+                                              xDegX10,
+                                              yDegX10,
+                                              servo1Raw,
+                                              servo2Raw,
+                                              &message);
+    if (status != COPROC_STATUS_OK) {
+        return status;
+    }
+
+    status = CoprocRuntime_SendMessage(runtime, &message, txWriteFn, txWriteCtx);
+    if (status == COPROC_STATUS_OK) {
+        runtime->stats.servoFeedbackStateTxCount++;
+        runtime->lastServoFeedbackStateTxMs = nowMs;
+        CoprocRuntime_EmitEvent(eventFn,
+                                eventCtx,
+                                COPROC_DISPATCH_EVENT_MOTION_STATE,
+                                &message.frame.header,
+                                0u,
+                                0u,
+                                validMask,
+                                xDegX10,
+                                yDegX10,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                nowMs);
+    }
+
+    return status;
 }
 
 static uint8_t CoprocRuntime_ApplyServoDegX10(CoprocRuntime *runtime, uint8_t servoIndex, int16_t degX10)
@@ -518,12 +649,57 @@ static uint8_t CoprocRuntime_ApplyServoDegX10(CoprocRuntime *runtime, uint8_t se
     return runtime->config.setServoAngleFn(runtime->config.setServoAngleCtx, servoIndex, angle, &pulseUs);
 }
 
+static uint8_t CoprocRuntime_ApplyServoDirectDegX10(CoprocRuntime *runtime,
+                                                    uint8_t servoIndex,
+                                                    int16_t degX10)
+{
+    uint8_t angle;
+    uint16_t pulseUs = 0u;
+
+    if (runtime->config.setServoDegX10Fn != NULL) {
+        return runtime->config.setServoDegX10Fn(runtime->config.setServoDegX10Ctx, servoIndex, degX10, &pulseUs);
+    }
+
+    if (runtime->config.setServoAngleFn == NULL || CoprocRuntime_DegX10ToAngle(degX10, &angle) == 0u) {
+        return 0u;
+    }
+    return runtime->config.setServoAngleFn(runtime->config.setServoAngleCtx, servoIndex, angle, &pulseUs);
+}
+
 static uint8_t CoprocRuntime_IsMotionProfileSupported(uint8_t motionProfile)
 {
     return (motionProfile == COPROC_MOTION_PROFILE_LINEAR ||
             motionProfile == COPROC_MOTION_PROFILE_EASE_IN_OUT)
                ? 1u
                : 0u;
+}
+
+static uint8_t CoprocRuntime_ServoForAxis(uint8_t axisMask)
+{
+    if (axisMask == COPROC_RUNTIME_AXIS_X) {
+        return COPROC_RUNTIME_SERVO_FOR_AXIS_X;
+    }
+    if (axisMask == COPROC_RUNTIME_AXIS_Y) {
+        return COPROC_RUNTIME_SERVO_FOR_AXIS_Y;
+    }
+    return 0u;
+}
+
+static uint8_t CoprocRuntime_ValidateMotionCommandPayload(uint8_t axisMask,
+                                                          int16_t xDegX10,
+                                                          int16_t yDegX10,
+                                                          uint16_t durationMs,
+                                                          uint8_t motionProfile)
+{
+    if (axisMask == 0u || (axisMask & ~(COPROC_RUNTIME_AXIS_X | COPROC_RUNTIME_AXIS_Y)) != 0u ||
+        durationMs == 0u || CoprocRuntime_IsMotionProfileSupported(motionProfile) == 0u) {
+        return 0u;
+    }
+    if (((axisMask & COPROC_RUNTIME_AXIS_X) != 0u && CoprocRuntime_IsDegX10Valid(xDegX10) == 0u) ||
+        ((axisMask & COPROC_RUNTIME_AXIS_Y) != 0u && CoprocRuntime_IsDegX10Valid(yDegX10) == 0u)) {
+        return 0u;
+    }
+    return 1u;
 }
 
 static int64_t CoprocRuntime_DivideRoundedI64(int64_t numerator, int64_t denominator)
@@ -574,6 +750,31 @@ static int16_t CoprocRuntime_ClampDegX10(int32_t value, int16_t minValue, int16_
         return maxValue;
     }
     return (int16_t)value;
+}
+
+static int16_t CoprocRuntime_StepTowardDegX10(int16_t currentDegX10, int16_t targetDegX10, uint16_t smoothingMs)
+{
+    int16_t delta = (int16_t)(targetDegX10 - currentDegX10);
+    int16_t absDelta = (delta < 0) ? (int16_t)(-delta) : delta;
+    int32_t step;
+
+    if (absDelta <= COPROC_RUNTIME_RELAY_HOLD_DEADBAND_X10) {
+        return targetDegX10;
+    }
+
+    step = ((int32_t)absDelta * (int32_t)COPROC_RUNTIME_RELAY_MIN_UPDATE_MS + (int32_t)(smoothingMs - 1u)) /
+           (int32_t)smoothingMs;
+    if (step < COPROC_RUNTIME_RELAY_MIN_STEP_X10) {
+        step = COPROC_RUNTIME_RELAY_MIN_STEP_X10;
+    }
+    if (step > COPROC_RUNTIME_RELAY_MAX_STEP_X10) {
+        step = COPROC_RUNTIME_RELAY_MAX_STEP_X10;
+    }
+    if (step > absDelta) {
+        step = absDelta;
+    }
+
+    return (delta < 0) ? (int16_t)(currentDegX10 - (int16_t)step) : (int16_t)(currentDegX10 + (int16_t)step);
 }
 
 static uint8_t CoprocRuntime_ApplyMotionAt(CoprocRuntime *runtime, uint32_t nowMs)
@@ -648,9 +849,53 @@ static uint8_t CoprocRuntime_ApplyJogAt(CoprocRuntime *runtime, uint32_t nowMs)
     return 1u;
 }
 
-static uint8_t CoprocRuntime_StartMotionCommand(CoprocRuntime *runtime, const CoprocRuntimeMotionCommand *command)
+static uint8_t CoprocRuntime_ApplyRelayFollowAt(CoprocRuntime *runtime, uint32_t nowMs)
 {
-    uint32_t nowMs;
+    int16_t xDegX10;
+    int16_t yDegX10;
+
+    if (runtime == NULL || runtime->relayFollowActive == 0u) {
+        return 1u;
+    }
+    if ((nowMs - runtime->relayLastUpdateMs) < COPROC_RUNTIME_RELAY_MIN_UPDATE_MS && nowMs < runtime->relayTimeoutAtMs) {
+        return 1u;
+    }
+    if (nowMs >= runtime->relayTimeoutAtMs) {
+        runtime->relayFollowActive = 0u;
+        return 1u;
+    }
+
+    xDegX10 = CoprocRuntime_StepTowardDegX10(runtime->relayCurrentXDegX10,
+                                             runtime->relayTargetXDegX10,
+                                             runtime->relaySmoothingMs);
+    yDegX10 = CoprocRuntime_StepTowardDegX10(runtime->relayCurrentYDegX10,
+                                             runtime->relayTargetYDegX10,
+                                             runtime->relaySmoothingMs);
+
+    if (((runtime->relayAxisMask & COPROC_RUNTIME_AXIS_X) != 0u &&
+         CoprocRuntime_ApplyServoDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_X, xDegX10) == 0u) ||
+        ((runtime->relayAxisMask & COPROC_RUNTIME_AXIS_Y) != 0u &&
+         CoprocRuntime_ApplyServoDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_Y, yDegX10) == 0u)) {
+        runtime->relayFollowActive = 0u;
+        return 0u;
+    }
+
+    if ((runtime->relayAxisMask & COPROC_RUNTIME_AXIS_X) != 0u) {
+        runtime->motionFinalXDegX10 = xDegX10;
+        runtime->relayCurrentXDegX10 = xDegX10;
+    }
+    if ((runtime->relayAxisMask & COPROC_RUNTIME_AXIS_Y) != 0u) {
+        runtime->motionFinalYDegX10 = yDegX10;
+        runtime->relayCurrentYDegX10 = yDegX10;
+    }
+    runtime->relayLastUpdateMs = nowMs;
+    return 1u;
+}
+
+static uint8_t CoprocRuntime_StartMotionCommandAt(CoprocRuntime *runtime,
+                                                  const CoprocRuntimeMotionCommand *command,
+                                                  uint32_t startedAtMs)
+{
     int16_t startXDegX10;
     int16_t startYDegX10;
 
@@ -658,16 +903,10 @@ static uint8_t CoprocRuntime_StartMotionCommand(CoprocRuntime *runtime, const Co
         return 0u;
     }
 
+    /* Seed from the last command so noisy feedback cannot break trajectory continuity. */
     startXDegX10 = runtime->motionFinalXDegX10;
     startYDegX10 = runtime->motionFinalYDegX10;
-    if ((command->axisMask & COPROC_RUNTIME_AXIS_X) != 0u) {
-        (void)CoprocRuntime_ReadServoFeedbackDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_X, &startXDegX10);
-    }
-    if ((command->axisMask & COPROC_RUNTIME_AXIS_Y) != 0u) {
-        (void)CoprocRuntime_ReadServoFeedbackDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_Y, &startYDegX10);
-    }
 
-    nowMs = CoprocRuntime_NowMs(runtime);
     runtime->motionActive = 1u;
     runtime->motionAxisMask = command->axisMask;
     runtime->motionRefSeq = command->refSeq;
@@ -679,14 +918,19 @@ static uint8_t CoprocRuntime_StartMotionCommand(CoprocRuntime *runtime, const Co
                                                                                        : runtime->motionFinalYDegX10;
     runtime->motionDurationMs = command->durationMs;
     runtime->motionProfile = command->motionProfile;
-    runtime->motionStartedAtMs = nowMs;
-    runtime->motionCompleteAtMs = nowMs + command->durationMs;
-    if (CoprocRuntime_ApplyMotionAt(runtime, nowMs) == 0u) {
+    runtime->motionStartedAtMs = startedAtMs;
+    runtime->motionCompleteAtMs = startedAtMs + command->durationMs;
+    if (CoprocRuntime_ApplyMotionAt(runtime, CoprocRuntime_NowMs(runtime)) == 0u) {
         runtime->motionActive = 0u;
         return 0u;
     }
 
     return 1u;
+}
+
+static uint8_t CoprocRuntime_StartMotionCommand(CoprocRuntime *runtime, const CoprocRuntimeMotionCommand *command)
+{
+    return CoprocRuntime_StartMotionCommandAt(runtime, command, CoprocRuntime_NowMs(runtime));
 }
 
 static CoprocStatus CoprocRuntime_StartNextQueuedMotion(CoprocRuntime *runtime,
@@ -699,16 +943,33 @@ static CoprocStatus CoprocRuntime_StartNextQueuedMotion(CoprocRuntime *runtime,
 {
     CoprocRuntimeMotionCommand command;
     uint32_t nowMs;
+    uint32_t startedAtMs;
+    uint8_t sequenceMotion = 0u;
+    uint8_t continuesSequence = 0u;
 
     if (runtime == NULL) {
         return COPROC_STATUS_INVALID_ARG;
     }
 
-    if (CoprocRuntime_DequeueMotionCommand(runtime, &command) == 0u) {
+    if (runtime->sequencePlaybackActive != 0u) {
+        if (runtime->sequencePlaybackIndex >= runtime->sequencePlaybackCount) {
+            runtime->sequencePlaybackActive = 0u;
+            return COPROC_STATUS_OK;
+        }
+        sequenceMotion = 1u;
+        continuesSequence = (runtime->sequencePlaybackIndex != 0u) ? 1u : 0u;
+        command = runtime->sequenceCommands[runtime->sequencePlaybackIndex];
+        runtime->sequencePlaybackIndex++;
+    } else if (CoprocRuntime_DequeueMotionCommand(runtime, &command) == 0u) {
         return COPROC_STATUS_OK;
     }
 
-    if (CoprocRuntime_StartMotionCommand(runtime, &command) != 0u) {
+    startedAtMs = (sequenceMotion != 0u && continuesSequence != 0u) ? runtime->sequenceNextStartMs
+                                                                    : CoprocRuntime_NowMs(runtime);
+    if (CoprocRuntime_StartMotionCommandAt(runtime, &command, startedAtMs) != 0u) {
+        if (sequenceMotion != 0u) {
+            runtime->sequenceNextStartMs = runtime->motionCompleteAtMs;
+        }
         return COPROC_STATUS_OK;
     }
 
@@ -723,6 +984,7 @@ static CoprocStatus CoprocRuntime_StartNextQueuedMotion(CoprocRuntime *runtime,
     runtime->motionDurationMs = command.durationMs;
     runtime->motionProfile = command.motionProfile;
     runtime->motionStartedAtMs = nowMs;
+    runtime->sequencePlaybackActive = 0u;
     return CoprocRuntime_SendMotionDone(runtime,
                                         COPROC_MOTION_RESULT_FAULT,
                                         0u,
@@ -787,6 +1049,9 @@ static CoprocStatus CoprocRuntime_HandleServoMove(CoprocRuntime *runtime,
 
     (void)xAngle;
     (void)yAngle;
+    runtime->relayFollowActive = 0u;
+    runtime->sequenceActive = 0u;
+    runtime->sequencePlaybackActive = 0u;
     command.axisMask = axisMask;
     command.refSeq = frame->header.seq;
     command.targetXDegX10 = xDegX10;
@@ -930,6 +1195,9 @@ static CoprocStatus CoprocRuntime_HandleServoJog(CoprocRuntime *runtime,
     }
 
     CoprocRuntime_ClearMotionQueue(runtime);
+    runtime->relayFollowActive = 0u;
+    runtime->sequenceActive = 0u;
+    runtime->sequencePlaybackActive = 0u;
     runtime->motionActive = 0u;
     runtime->jogActive = 1u;
     runtime->motionAxisMask = axisMask;
@@ -947,16 +1215,6 @@ static CoprocStatus CoprocRuntime_HandleServoJog(CoprocRuntime *runtime,
     runtime->jogMaxYDegX10 = (int16_t)((uint16_t)yMaxDeg * 10u);
     runtime->motionStartXDegX10 = runtime->motionFinalXDegX10;
     runtime->motionStartYDegX10 = runtime->motionFinalYDegX10;
-    if ((axisMask & COPROC_RUNTIME_AXIS_X) != 0u) {
-        (void)CoprocRuntime_ReadServoFeedbackDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_X,
-                                                    &runtime->motionStartXDegX10);
-        runtime->motionFinalXDegX10 = runtime->motionStartXDegX10;
-    }
-    if ((axisMask & COPROC_RUNTIME_AXIS_Y) != 0u) {
-        (void)CoprocRuntime_ReadServoFeedbackDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_Y,
-                                                    &runtime->motionStartYDegX10);
-        runtime->motionFinalYDegX10 = runtime->motionStartYDegX10;
-    }
 
     status = CoprocRuntime_SendAck(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx, eventFn, eventCtx);
     if (status != COPROC_STATUS_OK) {
@@ -991,6 +1249,411 @@ static CoprocStatus CoprocRuntime_HandleServoJog(CoprocRuntime *runtime,
     return COPROC_STATUS_OK;
 }
 
+static CoprocStatus CoprocRuntime_HandleServoRelayTarget(CoprocRuntime *runtime,
+                                                         const CoprocFrame *frame,
+                                                         CoprocDispatchAllocSeqFn allocSeqFn,
+                                                         void *allocSeqCtx,
+                                                         CoprocDispatchTxWriteFn txWriteFn,
+                                                         void *txWriteCtx,
+                                                         CoprocDispatchEventFn eventFn,
+                                                         void *eventCtx)
+{
+    uint8_t axisMask;
+    int16_t xDegX10;
+    int16_t yDegX10;
+    uint16_t smoothingMs;
+    uint16_t timeoutMs;
+    uint32_t nowMs;
+    uint8_t xAngle = 0u;
+    uint8_t yAngle = 0u;
+    uint8_t continuingRelay = 0u;
+    CoprocStatus status;
+
+    if (runtime == NULL || frame == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+    if (frame->header.payloadLength != COPROC_PAYLOAD_LEN_SERVO_RELAY_TARGET) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+    if ((frame->header.flags & COPROC_FRAME_FLAG_ACK_REQ) == 0u || runtime->config.setServoAngleFn == NULL) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_STATE, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    axisMask = frame->payload[0];
+    xDegX10 = CoprocRuntime_ReadI16Le(&frame->payload[1]);
+    yDegX10 = CoprocRuntime_ReadI16Le(&frame->payload[3]);
+    smoothingMs = CoprocRuntime_ReadU16Le(&frame->payload[5]);
+    timeoutMs = CoprocRuntime_ReadU16Le(&frame->payload[7]);
+
+    if (axisMask == 0u || (axisMask & ~(COPROC_RUNTIME_AXIS_X | COPROC_RUNTIME_AXIS_Y)) != 0u ||
+        smoothingMs == 0u || timeoutMs == 0u ||
+        ((axisMask & COPROC_RUNTIME_AXIS_X) != 0u && CoprocRuntime_DegX10ToAngle(xDegX10, &xAngle) == 0u) ||
+        ((axisMask & COPROC_RUNTIME_AXIS_Y) != 0u && CoprocRuntime_DegX10ToAngle(yDegX10, &yAngle) == 0u)) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    nowMs = CoprocRuntime_NowMs(runtime);
+    if (runtime->relayFollowActive != 0u && CoprocRuntime_ApplyRelayFollowAt(runtime, nowMs) == 0u) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INTERNAL_ERROR, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+    continuingRelay = runtime->relayFollowActive;
+
+    CoprocRuntime_ClearMotionQueue(runtime);
+    runtime->motionActive = 0u;
+    runtime->jogActive = 0u;
+    runtime->sequenceActive = 0u;
+    runtime->sequencePlaybackActive = 0u;
+    runtime->relayFollowActive = 1u;
+    runtime->relayAxisMask = axisMask;
+    runtime->relaySourceTag = frame->payload[9];
+    if (continuingRelay == 0u) {
+        runtime->relayStartXDegX10 = runtime->motionFinalXDegX10;
+        runtime->relayStartYDegX10 = runtime->motionFinalYDegX10;
+        runtime->relayCurrentXDegX10 = runtime->motionFinalXDegX10;
+        runtime->relayCurrentYDegX10 = runtime->motionFinalYDegX10;
+        runtime->relayStartedAtMs = nowMs;
+        runtime->relayLastUpdateMs = nowMs;
+    }
+    runtime->relayTargetXDegX10 = ((axisMask & COPROC_RUNTIME_AXIS_X) != 0u) ? xDegX10
+                                                                              : runtime->motionFinalXDegX10;
+    runtime->relayTargetYDegX10 = ((axisMask & COPROC_RUNTIME_AXIS_Y) != 0u) ? yDegX10
+                                                                              : runtime->motionFinalYDegX10;
+    runtime->relaySmoothingMs = smoothingMs;
+    runtime->relayTimeoutAtMs = nowMs + timeoutMs;
+
+    status = CoprocRuntime_SendAck(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx, eventFn, eventCtx);
+    if (status != COPROC_STATUS_OK) {
+        runtime->relayFollowActive = 0u;
+    }
+    return status;
+}
+
+static CoprocStatus CoprocRuntime_HandleServoDirectTarget(CoprocRuntime *runtime,
+                                                          const CoprocFrame *frame,
+                                                          CoprocDispatchAllocSeqFn allocSeqFn,
+                                                          void *allocSeqCtx,
+                                                          CoprocDispatchTxWriteFn txWriteFn,
+                                                          void *txWriteCtx,
+                                                          CoprocDispatchEventFn eventFn,
+                                                          void *eventCtx)
+{
+    uint8_t axisMask;
+    int16_t xDegX10;
+    int16_t yDegX10;
+    CoprocStatus status;
+
+    if (runtime == NULL || frame == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+    if (frame->header.payloadLength != COPROC_PAYLOAD_LEN_SERVO_DIRECT_TARGET) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+    if (runtime->config.setServoAngleFn == NULL && runtime->config.setServoDegX10Fn == NULL) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_CAPABILITY_MISSING, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    axisMask = frame->payload[0];
+    xDegX10 = CoprocRuntime_ReadI16Le(&frame->payload[1]);
+    yDegX10 = CoprocRuntime_ReadI16Le(&frame->payload[3]);
+
+    if (axisMask == 0u || (axisMask & ~(COPROC_RUNTIME_AXIS_X | COPROC_RUNTIME_AXIS_Y)) != 0u ||
+        ((axisMask & COPROC_RUNTIME_AXIS_X) != 0u && CoprocRuntime_IsDegX10Valid(xDegX10) == 0u) ||
+        ((axisMask & COPROC_RUNTIME_AXIS_Y) != 0u && CoprocRuntime_IsDegX10Valid(yDegX10) == 0u)) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    CoprocRuntime_ClearMotionQueue(runtime);
+    runtime->motionActive = 0u;
+    runtime->jogActive = 0u;
+    runtime->relayFollowActive = 0u;
+    runtime->sequenceActive = 0u;
+    runtime->sequencePlaybackActive = 0u;
+
+    if ((axisMask & COPROC_RUNTIME_AXIS_X) != 0u) {
+        if (CoprocRuntime_ApplyServoDirectDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_X, xDegX10) == 0u) {
+            return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INTERNAL_ERROR, allocSeqFn, allocSeqCtx,
+                                          txWriteFn, txWriteCtx, eventFn, eventCtx);
+        }
+        runtime->motionFinalXDegX10 = xDegX10;
+    }
+    if ((axisMask & COPROC_RUNTIME_AXIS_Y) != 0u) {
+        if (CoprocRuntime_ApplyServoDirectDegX10(runtime, COPROC_RUNTIME_SERVO_FOR_AXIS_Y, yDegX10) == 0u) {
+            return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INTERNAL_ERROR, allocSeqFn, allocSeqCtx,
+                                          txWriteFn, txWriteCtx, eventFn, eventCtx);
+        }
+        runtime->motionFinalYDegX10 = yDegX10;
+    }
+
+    runtime->motionStartXDegX10 = runtime->motionFinalXDegX10;
+    runtime->motionStartYDegX10 = runtime->motionFinalYDegX10;
+    runtime->motionStartedAtMs = CoprocRuntime_NowMs(runtime);
+
+    if ((frame->header.flags & COPROC_FRAME_FLAG_ACK_REQ) != 0u) {
+        status = CoprocRuntime_SendAck(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx, eventFn, eventCtx);
+        if (status != COPROC_STATUS_OK) {
+            return status;
+        }
+    }
+
+    return COPROC_STATUS_OK;
+}
+
+static CoprocStatus CoprocRuntime_HandleServoPwmCommand(CoprocRuntime *runtime,
+                                                        const CoprocFrame *frame,
+                                                        uint8_t lockOutput,
+                                                        CoprocDispatchAllocSeqFn allocSeqFn,
+                                                        void *allocSeqCtx,
+                                                        CoprocDispatchTxWriteFn txWriteFn,
+                                                        void *txWriteCtx,
+                                                        CoprocDispatchEventFn eventFn,
+                                                        void *eventCtx)
+{
+    uint8_t axisMask;
+    uint8_t sourceTag;
+    uint8_t axis;
+    CoprocStatus status;
+
+    if (runtime == NULL || frame == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+    if (frame->header.payloadLength != COPROC_PAYLOAD_LEN_SERVO_PWM) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+    if ((frame->header.flags & COPROC_FRAME_FLAG_ACK_REQ) == 0u) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_STATE, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    axisMask = frame->payload[0];
+    sourceTag = frame->payload[1];
+    if (axisMask == 0u || (axisMask & ~(COPROC_RUNTIME_AXIS_X | COPROC_RUNTIME_AXIS_Y)) != 0u || sourceTag > 4u) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+    if (lockOutput == 0u && runtime->config.releaseServoFn == NULL) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_CAPABILITY_MISSING, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+    if (lockOutput != 0u && runtime->config.setServoAngleFn == NULL && runtime->config.setServoDegX10Fn == NULL) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_CAPABILITY_MISSING, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    CoprocRuntime_ClearMotionQueue(runtime);
+    runtime->motionActive = 0u;
+    runtime->jogActive = 0u;
+    runtime->relayFollowActive = 0u;
+    runtime->sequenceActive = 0u;
+    runtime->sequencePlaybackActive = 0u;
+
+    for (axis = COPROC_RUNTIME_AXIS_X; axis <= COPROC_RUNTIME_AXIS_Y; axis <<= 1u) {
+        uint8_t servoIndex;
+        int16_t targetDegX10;
+
+        if ((axisMask & axis) == 0u) {
+            continue;
+        }
+
+        servoIndex = CoprocRuntime_ServoForAxis(axis);
+        if (lockOutput == 0u) {
+            if (runtime->config.releaseServoFn(runtime->config.releaseServoCtx, servoIndex) == 0u) {
+                return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INTERNAL_ERROR, allocSeqFn, allocSeqCtx,
+                                              txWriteFn, txWriteCtx, eventFn, eventCtx);
+            }
+            continue;
+        }
+
+        targetDegX10 = (axis == COPROC_RUNTIME_AXIS_X) ? runtime->motionFinalXDegX10 : runtime->motionFinalYDegX10;
+        (void)CoprocRuntime_ReadServoFeedbackDegX10(runtime, servoIndex, &targetDegX10);
+        if (CoprocRuntime_ApplyServoDirectDegX10(runtime, servoIndex, targetDegX10) == 0u) {
+            return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INTERNAL_ERROR, allocSeqFn, allocSeqCtx,
+                                          txWriteFn, txWriteCtx, eventFn, eventCtx);
+        }
+        if (axis == COPROC_RUNTIME_AXIS_X) {
+            runtime->motionFinalXDegX10 = targetDegX10;
+        } else {
+            runtime->motionFinalYDegX10 = targetDegX10;
+        }
+    }
+
+    if (lockOutput == 0u) {
+        runtime->servoFeedbackUnlockedAxisMask |= axisMask;
+        runtime->config.servoFeedbackStateEnabled = 1u;
+        runtime->lastServoFeedbackStateTxMs = 0u;
+    } else {
+        runtime->servoFeedbackUnlockedAxisMask &= (uint8_t)~axisMask;
+        if (runtime->servoFeedbackUnlockedAxisMask == 0u) {
+            runtime->config.servoFeedbackStateEnabled = 0u;
+            runtime->lastServoFeedbackStateTxMs = 0u;
+        }
+    }
+
+    status = CoprocRuntime_SendAck(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx, eventFn, eventCtx);
+    return status;
+}
+
+static CoprocStatus CoprocRuntime_HandleServoSequenceBegin(CoprocRuntime *runtime,
+                                                           const CoprocFrame *frame,
+                                                           CoprocDispatchAllocSeqFn allocSeqFn,
+                                                           void *allocSeqCtx,
+                                                           CoprocDispatchTxWriteFn txWriteFn,
+                                                           void *txWriteCtx,
+                                                           CoprocDispatchEventFn eventFn,
+                                                           void *eventCtx)
+{
+    uint16_t sequenceId;
+    uint8_t segmentCount;
+
+    if (runtime == NULL || frame == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+    if (frame->header.payloadLength != COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_BEGIN ||
+        (frame->header.flags & COPROC_FRAME_FLAG_ACK_REQ) == 0u) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    sequenceId = CoprocRuntime_ReadU16Le(frame->payload);
+    segmentCount = frame->payload[3];
+    if (sequenceId == 0u || segmentCount == 0u || segmentCount > COPROC_RUNTIME_SEQUENCE_MAX_SEGMENTS ||
+        frame->payload[2] > 4u) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    CoprocRuntime_ClearMotionQueue(runtime);
+    runtime->motionActive = 0u;
+    runtime->jogActive = 0u;
+    runtime->relayFollowActive = 0u;
+    runtime->sequenceActive = 1u;
+    runtime->sequenceId = sequenceId;
+    runtime->sequenceExpectedSegments = segmentCount;
+    runtime->sequenceReceivedSegments = 0u;
+    runtime->sequenceSourceTag = frame->payload[2];
+    runtime->sequencePlaybackActive = 0u;
+    runtime->sequencePlaybackIndex = 0u;
+    runtime->sequencePlaybackCount = 0u;
+    runtime->sequenceNextStartMs = 0u;
+
+    return CoprocRuntime_SendAck(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx, eventFn, eventCtx);
+}
+
+static CoprocStatus CoprocRuntime_HandleServoSequenceChunk(CoprocRuntime *runtime,
+                                                           const CoprocFrame *frame,
+                                                           CoprocDispatchAllocSeqFn allocSeqFn,
+                                                           void *allocSeqCtx,
+                                                           CoprocDispatchTxWriteFn txWriteFn,
+                                                           void *txWriteCtx,
+                                                           CoprocDispatchEventFn eventFn,
+                                                           void *eventCtx)
+{
+    uint16_t sequenceId;
+    uint8_t startIndex;
+    uint8_t chunkCount;
+    uint16_t expectedPayloadLen;
+    uint8_t index;
+
+    if (runtime == NULL || frame == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+    if (frame->header.payloadLength < COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_CHUNK_HEADER ||
+        (frame->header.flags & COPROC_FRAME_FLAG_ACK_REQ) == 0u) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    sequenceId = CoprocRuntime_ReadU16Le(frame->payload);
+    startIndex = frame->payload[2];
+    chunkCount = frame->payload[3];
+    expectedPayloadLen = (uint16_t)(COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_CHUNK_HEADER +
+                                   ((uint16_t)chunkCount * COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_SEGMENT));
+    if (runtime->sequenceActive == 0u || sequenceId != runtime->sequenceId ||
+        startIndex != runtime->sequenceReceivedSegments || chunkCount == 0u ||
+        frame->header.payloadLength != expectedPayloadLen ||
+        (uint16_t)startIndex + (uint16_t)chunkCount > runtime->sequenceExpectedSegments) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    for (index = 0u; index < chunkCount; index++) {
+        uint16_t offset = (uint16_t)(COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_CHUNK_HEADER +
+                                     ((uint16_t)index * COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_SEGMENT));
+        CoprocRuntimeMotionCommand command;
+
+        command.axisMask = frame->payload[offset];
+        command.refSeq = frame->header.seq;
+        command.targetXDegX10 = CoprocRuntime_ReadI16Le(&frame->payload[offset + 1u]);
+        command.targetYDegX10 = CoprocRuntime_ReadI16Le(&frame->payload[offset + 3u]);
+        command.durationMs = CoprocRuntime_ReadU16Le(&frame->payload[offset + 5u]);
+        command.motionProfile = frame->payload[offset + 7u];
+        command.sourceTag = runtime->sequenceSourceTag;
+        if (CoprocRuntime_ValidateMotionCommandPayload(command.axisMask,
+                                                       command.targetXDegX10,
+                                                       command.targetYDegX10,
+                                                       command.durationMs,
+                                                       command.motionProfile) == 0u) {
+            runtime->sequenceActive = 0u;
+            return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                          txWriteFn, txWriteCtx, eventFn, eventCtx);
+        }
+        runtime->sequenceCommands[startIndex + index] = command;
+        runtime->sequenceReceivedSegments++;
+    }
+
+    return CoprocRuntime_SendAck(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx, eventFn, eventCtx);
+}
+
+static CoprocStatus CoprocRuntime_HandleServoSequenceEnd(CoprocRuntime *runtime,
+                                                         const CoprocFrame *frame,
+                                                         CoprocDispatchAllocSeqFn allocSeqFn,
+                                                         void *allocSeqCtx,
+                                                         CoprocDispatchTxWriteFn txWriteFn,
+                                                         void *txWriteCtx,
+                                                         CoprocDispatchEventFn eventFn,
+                                                         void *eventCtx)
+{
+    CoprocStatus status;
+    uint16_t sequenceId;
+
+    if (runtime == NULL || frame == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+    if (frame->header.payloadLength != COPROC_PAYLOAD_LEN_SERVO_SEQUENCE_END ||
+        (frame->header.flags & COPROC_FRAME_FLAG_ACK_REQ) == 0u) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    sequenceId = CoprocRuntime_ReadU16Le(frame->payload);
+    if (runtime->sequenceActive == 0u || sequenceId != runtime->sequenceId ||
+        runtime->sequenceReceivedSegments != runtime->sequenceExpectedSegments) {
+        runtime->sequenceActive = 0u;
+        CoprocRuntime_ClearMotionQueue(runtime);
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_STATE, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    runtime->sequenceActive = 0u;
+    runtime->sequencePlaybackActive = 1u;
+    runtime->sequencePlaybackIndex = 0u;
+    runtime->sequencePlaybackCount = runtime->sequenceReceivedSegments;
+    status = CoprocRuntime_SendAck(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx, eventFn, eventCtx);
+    if (status != COPROC_STATUS_OK) {
+        runtime->sequencePlaybackActive = 0u;
+        return status;
+    }
+
+    return CoprocRuntime_StartNextQueuedMotion(runtime, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx, eventFn, eventCtx);
+}
+
 static CoprocStatus CoprocRuntime_HandleServoStop(CoprocRuntime *runtime,
                                                   const CoprocFrame *frame,
                                                   CoprocDispatchAllocSeqFn allocSeqFn,
@@ -1018,21 +1681,25 @@ static CoprocStatus CoprocRuntime_HandleServoStop(CoprocRuntime *runtime,
                                       txWriteFn, txWriteCtx, eventFn, eventCtx);
     }
     stopScope = frame->payload[0];
-    if (stopScope > 1u || frame->payload[1] > 4u) {
+    if (stopScope > 1u || frame->payload[1] > 5u) {
         return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
                                       txWriteFn, txWriteCtx, eventFn, eventCtx);
     }
 
     nowMs = CoprocRuntime_NowMs(runtime);
-    if ((runtime->jogActive != 0u && CoprocRuntime_ApplyJogAt(runtime, nowMs) == 0u) ||
+    if ((runtime->relayFollowActive != 0u && CoprocRuntime_ApplyRelayFollowAt(runtime, nowMs) == 0u) ||
+        (runtime->jogActive != 0u && CoprocRuntime_ApplyJogAt(runtime, nowMs) == 0u) ||
         (runtime->motionActive != 0u && CoprocRuntime_ApplyMotionAt(runtime, nowMs) == 0u)) {
         return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INTERNAL_ERROR, allocSeqFn, allocSeqCtx,
                                       txWriteFn, txWriteCtx, eventFn, eventCtx);
     }
-    if ((runtime->motionActive != 0u || runtime->jogActive != 0u) && runtime->config.stopServoFn != NULL) {
-        if (((runtime->motionAxisMask & COPROC_RUNTIME_AXIS_X) != 0u &&
+    if ((runtime->motionActive != 0u || runtime->jogActive != 0u || runtime->relayFollowActive != 0u) &&
+        runtime->config.stopServoFn != NULL) {
+        uint8_t activeAxisMask = (runtime->relayFollowActive != 0u) ? runtime->relayAxisMask : runtime->motionAxisMask;
+
+        if (((activeAxisMask & COPROC_RUNTIME_AXIS_X) != 0u &&
              runtime->config.stopServoFn(runtime->config.stopServoCtx, COPROC_RUNTIME_SERVO_FOR_AXIS_X) == 0u) ||
-            ((runtime->motionAxisMask & COPROC_RUNTIME_AXIS_Y) != 0u &&
+            ((activeAxisMask & COPROC_RUNTIME_AXIS_Y) != 0u &&
              runtime->config.stopServoFn(runtime->config.stopServoCtx, COPROC_RUNTIME_SERVO_FOR_AXIS_Y) == 0u)) {
             return CoprocRuntime_SendNack(runtime,
                                           frame,
@@ -1053,6 +1720,8 @@ static CoprocStatus CoprocRuntime_HandleServoStop(CoprocRuntime *runtime,
 
     if (stopScope == 1u) {
         CoprocRuntime_ClearMotionQueue(runtime);
+        runtime->sequenceActive = 0u;
+        runtime->sequencePlaybackActive = 0u;
     }
 
     runtime->stats.servoStopRxCount++;
@@ -1081,6 +1750,10 @@ static CoprocStatus CoprocRuntime_HandleServoStop(CoprocRuntime *runtime,
                             0u,
                             0u);
 
+    if (runtime->relayFollowActive != 0u) {
+        runtime->relayFollowActive = 0u;
+    }
+
     if (runtime->motionActive != 0u || runtime->jogActive != 0u) {
         execTimeMs = (uint16_t)(nowMs - runtime->motionStartedAtMs);
         status = CoprocRuntime_SendMotionDone(runtime,
@@ -1104,6 +1777,66 @@ static CoprocStatus CoprocRuntime_HandleServoStop(CoprocRuntime *runtime,
     }
 
     return COPROC_STATUS_OK;
+}
+
+static CoprocStatus CoprocRuntime_HandleServoFeedbackReq(CoprocRuntime *runtime,
+                                                         const CoprocFrame *frame,
+                                                         CoprocDispatchAllocSeqFn allocSeqFn,
+                                                         void *allocSeqCtx,
+                                                         CoprocDispatchTxWriteFn txWriteFn,
+                                                         void *txWriteCtx,
+                                                         CoprocDispatchEventFn eventFn,
+                                                         void *eventCtx)
+{
+    CoprocTxMessage message;
+    CoprocStatus status;
+    uint8_t validMask = 0u;
+    uint16_t servo1Raw = 0u;
+    uint16_t servo2Raw = 0u;
+    int16_t servo1DegX10 = 0;
+    int16_t servo2DegX10 = 0;
+    uint32_t nowMs;
+
+    (void)eventFn;
+    (void)eventCtx;
+
+    if (runtime == NULL || frame == NULL || allocSeqFn == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+    if (frame->header.payloadLength != COPROC_PAYLOAD_LEN_SERVO_FEEDBACK_REQ) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INVALID_PAYLOAD, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+    if (runtime->config.readServoFeedbackFn == NULL) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_CAPABILITY_MISSING, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    if (CoprocRuntime_ReadServoFeedback(runtime, 1u, &servo1Raw, &servo1DegX10) != 0u) {
+        validMask |= COPROC_RUNTIME_AXIS_Y;
+    }
+    if (CoprocRuntime_ReadServoFeedback(runtime, 2u, &servo2Raw, &servo2DegX10) != 0u) {
+        validMask |= COPROC_RUNTIME_AXIS_X;
+    }
+    if (validMask == 0u) {
+        return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_INTERNAL_ERROR, allocSeqFn, allocSeqCtx,
+                                      txWriteFn, txWriteCtx, eventFn, eventCtx);
+    }
+
+    nowMs = CoprocRuntime_NowMs(runtime);
+    status = CoprocTxBuilder_BuildServoFeedbackRsp(allocSeqFn(allocSeqCtx),
+                                                   validMask,
+                                                   servo1Raw,
+                                                   servo1DegX10,
+                                                   servo2Raw,
+                                                   servo2DegX10,
+                                                   nowMs,
+                                                   &message);
+    if (status != COPROC_STATUS_OK) {
+        return status;
+    }
+
+    return CoprocRuntime_SendMessage(runtime, &message, txWriteFn, txWriteCtx);
 }
 
 static uint8_t CoprocRuntime_SetSideLedCount(CoprocRuntime *runtime, uint8_t activeCount)
@@ -1572,6 +2305,9 @@ void CoprocRuntime_Init(CoprocRuntime *runtime, const CoprocRuntimeConfig *confi
     if (runtime->config.touchDebounceMs == 0u) {
         runtime->config.touchDebounceMs = COPROC_RUNTIME_DEFAULT_TOUCH_DEBOUNCE_MS;
     }
+    if (runtime->config.servoFeedbackStateIntervalMs == 0u) {
+        runtime->config.servoFeedbackStateIntervalMs = COPROC_RUNTIME_DEFAULT_SERVO_FEEDBACK_STATE_INTERVAL_MS;
+    }
     runtime->motionStartXDegX10 = COPROC_RUNTIME_DEFAULT_SERVO_DEG_X10;
     runtime->motionStartYDegX10 = COPROC_RUNTIME_DEFAULT_SERVO_DEG_X10;
     runtime->motionFinalXDegX10 = COPROC_RUNTIME_DEFAULT_SERVO_DEG_X10;
@@ -1590,6 +2326,12 @@ void CoprocRuntime_Reset(CoprocRuntime *runtime)
     config = runtime->config;
     memset(runtime, 0, sizeof(*runtime));
     runtime->config = config;
+    if (runtime->config.touchDebounceMs == 0u) {
+        runtime->config.touchDebounceMs = COPROC_RUNTIME_DEFAULT_TOUCH_DEBOUNCE_MS;
+    }
+    if (runtime->config.servoFeedbackStateIntervalMs == 0u) {
+        runtime->config.servoFeedbackStateIntervalMs = COPROC_RUNTIME_DEFAULT_SERVO_FEEDBACK_STATE_INTERVAL_MS;
+    }
     runtime->motionStartXDegX10 = COPROC_RUNTIME_DEFAULT_SERVO_DEG_X10;
     runtime->motionStartYDegX10 = COPROC_RUNTIME_DEFAULT_SERVO_DEG_X10;
     runtime->motionFinalXDegX10 = COPROC_RUNTIME_DEFAULT_SERVO_DEG_X10;
@@ -1620,9 +2362,33 @@ CoprocStatus CoprocRuntime_ProcessFrame(const CoprocFrame *frame,
             case COPROC_MOTION_MSG_SERVO_JOG:
                 return CoprocRuntime_HandleServoJog(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx,
                                                     eventFn, eventCtx);
+            case COPROC_MOTION_MSG_SERVO_SEQUENCE_BEGIN:
+                return CoprocRuntime_HandleServoSequenceBegin(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn,
+                                                              txWriteCtx, eventFn, eventCtx);
+            case COPROC_MOTION_MSG_SERVO_SEQUENCE_CHUNK:
+                return CoprocRuntime_HandleServoSequenceChunk(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn,
+                                                              txWriteCtx, eventFn, eventCtx);
+            case COPROC_MOTION_MSG_SERVO_SEQUENCE_END:
+                return CoprocRuntime_HandleServoSequenceEnd(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn,
+                                                            txWriteCtx, eventFn, eventCtx);
+            case COPROC_MOTION_MSG_SERVO_PWM_UNLOCK:
+                return CoprocRuntime_HandleServoPwmCommand(runtime, frame, 0u, allocSeqFn, allocSeqCtx, txWriteFn,
+                                                           txWriteCtx, eventFn, eventCtx);
+            case COPROC_MOTION_MSG_SERVO_PWM_LOCK:
+                return CoprocRuntime_HandleServoPwmCommand(runtime, frame, 1u, allocSeqFn, allocSeqCtx, txWriteFn,
+                                                           txWriteCtx, eventFn, eventCtx);
+            case COPROC_MOTION_MSG_SERVO_RELAY_TARGET:
+                return CoprocRuntime_HandleServoRelayTarget(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn,
+                                                            txWriteCtx, eventFn, eventCtx);
+            case COPROC_MOTION_MSG_SERVO_DIRECT_TARGET:
+                return CoprocRuntime_HandleServoDirectTarget(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn,
+                                                             txWriteCtx, eventFn, eventCtx);
             case COPROC_MOTION_MSG_SERVO_STOP:
                 return CoprocRuntime_HandleServoStop(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx,
                                                      eventFn, eventCtx);
+            case COPROC_MOTION_MSG_SERVO_FEEDBACK_REQ:
+                return CoprocRuntime_HandleServoFeedbackReq(runtime, frame, allocSeqFn, allocSeqCtx, txWriteFn,
+                                                            txWriteCtx, eventFn, eventCtx);
             default:
                 return CoprocRuntime_SendNack(runtime, frame, COPROC_NACK_REASON_UNSUPPORTED_MSG, allocSeqFn, allocSeqCtx,
                                               txWriteFn, txWriteCtx, eventFn, eventCtx);
@@ -1659,6 +2425,10 @@ CoprocStatus CoprocRuntime_Poll(CoprocRuntime *runtime,
     }
 
     nowMs = CoprocRuntime_NowMs(runtime);
+    if (runtime->relayFollowActive != 0u && CoprocRuntime_ApplyRelayFollowAt(runtime, nowMs) == 0u) {
+        runtime->relayFollowActive = 0u;
+        return COPROC_STATUS_INVALID_STATE;
+    }
     if (runtime->jogActive != 0u && CoprocRuntime_ApplyJogAt(runtime, nowMs) == 0u) {
         status = CoprocRuntime_SendMotionDone(runtime,
                                               COPROC_MOTION_RESULT_FAULT,
@@ -1700,7 +2470,8 @@ CoprocStatus CoprocRuntime_Poll(CoprocRuntime *runtime,
         runtime->motionActive = 0u;
         return status;
     }
-    if (runtime->motionActive != 0u && nowMs >= runtime->motionCompleteAtMs) {
+    /* Sequence playback uses absolute segment boundaries; drain all elapsed segments in one poll. */
+    while (runtime->motionActive != 0u && nowMs >= runtime->motionCompleteAtMs) {
         status = CoprocRuntime_SendMotionDone(runtime,
                                               COPROC_MOTION_RESULT_SUCCESS,
                                               runtime->motionDurationMs,
@@ -1715,6 +2486,22 @@ CoprocStatus CoprocRuntime_Poll(CoprocRuntime *runtime,
         }
         runtime->motionActive = 0u;
         status = CoprocRuntime_StartNextQueuedMotion(runtime, allocSeqFn, allocSeqCtx, txWriteFn, txWriteCtx, eventFn, eventCtx);
+        if (status != COPROC_STATUS_OK) {
+            return status;
+        }
+    }
+
+    if ((runtime->config.servoFeedbackStateEnabled != 0u) && (runtime->config.readServoFeedbackFn != NULL) &&
+        ((runtime->lastServoFeedbackStateTxMs == 0u) ||
+         ((nowMs - runtime->lastServoFeedbackStateTxMs) >= runtime->config.servoFeedbackStateIntervalMs))) {
+        status = CoprocRuntime_SendServoFeedbackState(runtime,
+                                                      nowMs,
+                                                      allocSeqFn,
+                                                      allocSeqCtx,
+                                                      txWriteFn,
+                                                      txWriteCtx,
+                                                      eventFn,
+                                                      eventCtx);
         if (status != COPROC_STATUS_OK) {
             return status;
         }

@@ -8,6 +8,44 @@ menu "Watcher Voice Service"
             Enable local offline wake word detection through ESP-SR WakeNet.
             Audio is captured at 16 kHz mono while the recorder is idle.
 
+    config VOICE_WAKE_WORD_RUNTIME_ENABLED
+        bool "Enable Voice App standby WakeNet runtime"
+        default y
+        depends on ENABLE_WAKE_WORD
+        help
+            Enable the Voice App standby WakeNet runtime. The runtime is
+            created only while Voice is idle/standby and destroyed before
+            recording, cloud processing, or TTS playback to recover internal
+            RAM and reduce contiguous heap pressure.
+
+    config VOICE_WAKE_RESUME_MIN_INTERNAL_FREE_KB
+        int "Minimum internal free heap before WakeNet standby resume"
+        default 36
+        range 0 256
+        depends on VOICE_WAKE_WORD_RUNTIME_ENABLED
+        help
+            Skip rebuilding WakeNet in sleep standby if internal free heap is
+            below this threshold. This prevents a low-memory sleep transition
+            from making the system look idle while starving recording/TTS/UI.
+
+    config VOICE_WAKE_RESUME_MIN_INTERNAL_LARGEST_KB
+        int "Minimum internal largest block before WakeNet standby resume"
+        default 12
+        range 0 128
+        depends on VOICE_WAKE_WORD_RUNTIME_ENABLED
+        help
+            Skip WakeNet resume when contiguous internal heap is already too
+            fragmented for safe audio, UI, and protocol work.
+
+    config VOICE_WAKE_RESUME_MIN_DMA_LARGEST_KB
+        int "Minimum DMA largest block before WakeNet standby resume"
+        default 12
+        range 0 128
+        depends on VOICE_WAKE_WORD_RUNTIME_ENABLED
+        help
+            Skip WakeNet resume when DMA-capable contiguous heap is already too
+            fragmented for I2S/LCD-style allocations.
+
     config VAD_SILENCE_TIMEOUT_MS
         int "Wake-word recording silence timeout"
         default 1200
@@ -31,11 +69,10 @@ menu "Watcher Voice Service"
 
     config VOICE_TASK_STACK_SIZE
         int "Voice recorder task stack size"
-        default 8192 if ENABLE_WAKE_WORD
-        default 4096
+        default 12288
         help
-            Stack size for the voice recorder task. Wake word mode uses a
-            larger stack and allocates it from PSRAM when available.
+            Internal-RAM stack size for the lightweight recorder and VAD task.
+            Opus encoding runs in the PSRAM-backed WebSocket audio worker.
 
     config WAKE_WORD_TASK_STACK_SIZE
         int "Wake word detection task stack size"

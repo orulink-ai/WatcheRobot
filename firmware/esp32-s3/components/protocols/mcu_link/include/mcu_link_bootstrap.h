@@ -14,6 +14,7 @@ extern "C" {
 
 esp_err_t mcu_link_bootstrap_init(void);
 esp_err_t mcu_link_bootstrap_start(void);
+void mcu_link_bootstrap_stop(void);
 esp_err_t mcu_link_bootstrap_poll(mcu_link_event_t *out_event);
 mcu_link_t *mcu_link_bootstrap_get_link(void);
 mcu_link_state_t mcu_link_bootstrap_get_state(void);

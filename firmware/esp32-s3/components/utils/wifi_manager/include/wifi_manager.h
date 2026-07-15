@@ -1,6 +1,8 @@
 #ifndef WIFI_CLIENT_H
 #define WIFI_CLIENT_H
 
+#include "esp_err.h"
+
 #include <stddef.h>
 
 typedef enum {
@@ -90,6 +92,11 @@ int wifi_get_ip_addr(char *buf, size_t len);
 void wifi_register_status_callback(wifi_status_callback_t cb);
 
 /**
+ * Unregister a previously registered WiFi status callback.
+ */
+void wifi_unregister_status_callback(wifi_status_callback_t cb);
+
+/**
  * Check if WiFi is connected
  */
 int wifi_is_connected(void);
@@ -108,6 +115,18 @@ int wifi_is_connect_requested(void);
  * Disconnect WiFi
  */
 void wifi_disconnect(void);
+
+/**
+ * Stop STA driver activity without clearing stored credentials.
+ * Intended for foreground app teardown after temporary non-cloud WiFi users.
+ */
+void wifi_stop_station(void);
+
+/**
+ * Release STA driver resources without clearing stored credentials.
+ * The next wifi_resume_background() call will initialize WiFi again.
+ */
+esp_err_t wifi_release_station(void);
 
 /**
  * Suspend WiFi reconnect activity while BLE owns the transport.

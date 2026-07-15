@@ -1,0 +1,16 @@
+{
+  "manifestVersion": 1,
+  "id": "pixel-game",
+  "name": "Pixel Game",
+  "version": "game-v1",
+  "description": "A tiny downloaded app-pack demo",
+  "state": "standby",
+  "anim": "standby",
+  "permissions": ["display"],
+  "signature": {
+    "algorithm": "unsigned-dev",
+    "issuer": "local-sample",
+    "digest": "unsigned-local-sample"
+  }
+}
+

@@ -11,6 +11,14 @@
 int hal_audio_init(void);
 
 /**
+ * Fully release the audio codec and I2S resources owned by the audio HAL.
+ *
+ * Use this when the foreground audio application exits. Playback/recording
+ * helpers will lazily reinitialize the codec on the next start/write/read.
+ */
+int hal_audio_deinit(void);
+
+/**
  * Start audio capture/playback
  */
 int hal_audio_start(void);
@@ -32,15 +40,56 @@ int hal_audio_read(uint8_t *out_buf, int max_len);
 int hal_audio_write(const uint8_t *data, int len);
 
 /**
+ * Wait for PCM already accepted by the I2S driver to leave the TX DMA ring.
+ * The caller must keep playback active until this function returns.
+ */
+int hal_audio_drain_playback(uint32_t timeout_ms);
+
+/**
  * Stop audio capture/playback
  */
 int hal_audio_stop(void);
+
+/**
+ * Declare whether a live wake-word runtime currently needs the shared
+ * microphone path to stay at 16 kHz after playback users stop.
+ */
+void hal_audio_set_wake_word_stream_desired(bool enable);
+
+/**
+ * Put the shared audio path into app-idle state.
+ *
+ * Use this for foreground application teardown. Unlike hal_audio_stop(), this
+ * does not keep the wake-word microphone stream alive.
+ */
+int hal_audio_enter_app_idle(void);
+
+/**
+ * Release the audio path after one-shot local playback when no foreground
+ * owner needs it anymore.
+ *
+ * This fully deinitializes the codec in normal builds so boot/local SFX do
+ * not leave DMA/internal heap pinned. Wake-word builds keep the live mic path
+ * when it has explicitly requested ownership.
+ */
+int hal_audio_release_idle(void);
 
 /**
  * Set sample rate for playback (call before TTS playback)
  * @param sample_rate Sample rate in Hz (e.g., 16000, 24000)
  */
 void hal_audio_set_sample_rate(uint32_t sample_rate);
+
+/**
+ * Set speaker volume for subsequent playback.
+ * @param volume_percent 0-100
+ */
+void hal_audio_set_volume(uint8_t volume_percent);
+
+/**
+ * Get current speaker volume setting.
+ */
+uint8_t hal_audio_get_volume(void);
 
 /**
  * Mark audio as being used for playback (not just recording)

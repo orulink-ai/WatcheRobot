@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "target": "esp32s3",
+  "baseline_note": "codex/esp32-v3.1-release-prep 66b98c8 clean no-wake CI build with ESP-IDF v5.2.1",
+  "metrics": {
+    "diram_data_bss": {
+      "description": "Static internal data and BSS that permanently reduce heap headroom",
+      "baseline": 59108,
+      "max_growth": 4096,
+      "hard_max": 65536
+    },
+    "internal_static_total": {
+      "description": "Cross-platform total static internal RAM: used DIRAM plus used IRAM",
+      "baseline": 183202,
+      "max_growth": 4096,
+      "hard_max": 189630
+    },
+    "instruction_ram_total": {
+      "description": "Cross-platform instruction RAM: used IRAM plus DIRAM text",
+      "baseline": 124094,
+      "max_growth": 0,
+      "hard_max": 124094
+    },
+    "used_flash_non_ram": {
+      "description": "Flash code and read-only data",
+      "baseline": 3401243,
+      "max_growth": 131072,
+      "hard_max": 3600000
+    },
+    "total_size": {
+      "description": "ESP-IDF aggregate linked image size",
+      "baseline": 3550045,
+      "max_growth": 131072,
+      "hard_max": 3670016
+    }
+  }
+}

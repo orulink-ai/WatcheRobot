@@ -16,7 +16,8 @@
 #define TAG "CTRL_INGRESS"
 
 #define CONTROL_STATE_QUEUE_DEPTH 16
-#define CONTROL_STATE_TASK_STACK 6144
+#define CONTROL_STATE_TASK_STACK 12288
+#define CONTROL_STATE_STACK_WARN_BYTES 2048U
 #define CONTROL_STATE_TASK_PRIORITY 5
 #define CONTROL_MANUAL_TOUCH_SUPPRESS_MS 10000U
 
@@ -37,7 +38,16 @@ typedef struct {
 
 static QueueHandle_t s_state_queue = NULL;
 static TaskHandle_t s_state_task = NULL;
+/* Single-consumer task-owned storage. Keeping the largest queue item in BSS avoids
+ * permanently spending more than 500 bytes of the control task's stack. */
+static control_state_msg_t s_state_task_msg;
+static size_t s_state_stack_min_free = CONTROL_STATE_TASK_STACK;
 static int64_t s_manual_touch_suppressed_until_us = 0;
+static int64_t s_manual_jog_stream_until_us = 0;
+static control_motion_source_t s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
+static portMUX_TYPE s_deferred_ai_status_lock = portMUX_INITIALIZER_UNLOCKED;
+static control_ai_status_request_t s_deferred_ai_status;
+static bool s_deferred_ai_status_pending = false;
 
 static hal_servo_motion_source_t control_source_to_hal(control_motion_source_t source) {
     switch (source) {
@@ -46,9 +56,12 @@ static hal_servo_motion_source_t control_source_to_hal(control_motion_source_t s
     case CONTROL_MOTION_SOURCE_BLE:
         return HAL_SERVO_MOTION_SOURCE_BLE;
     case CONTROL_MOTION_SOURCE_WS:
+    case CONTROL_MOTION_SOURCE_SDK:
         return HAL_SERVO_MOTION_SOURCE_WS;
     case CONTROL_MOTION_SOURCE_RECOVERY:
         return HAL_SERVO_MOTION_SOURCE_RECOVERY;
+    case CONTROL_MOTION_SOURCE_RELAY_W1:
+        return HAL_SERVO_MOTION_SOURCE_RELAY_W1;
     case CONTROL_MOTION_SOURCE_STRESS:
     case CONTROL_MOTION_SOURCE_UNKNOWN:
     default:
@@ -71,6 +84,17 @@ static esp_err_t control_default_move_axis(bool is_x_axis, int angle_deg, int du
                                                      control_source_to_hal(source), out_seq);
 }
 
+static esp_err_t control_default_move_sync_direct(int x_deg, int y_deg, control_motion_source_t source,
+                                                 uint32_t *out_seq) {
+    return hal_servo_set_direct_sync_with_source_and_seq(x_deg, y_deg, control_source_to_hal(source), out_seq);
+}
+
+static esp_err_t control_default_move_axis_direct(bool is_x_axis, int angle_deg, control_motion_source_t source,
+                                                 uint32_t *out_seq) {
+    return hal_servo_set_direct_with_source_and_seq(is_x_axis ? SERVO_AXIS_X : SERVO_AXIS_Y, angle_deg,
+                                                   control_source_to_hal(source), out_seq);
+}
+
 static esp_err_t control_default_jog_axis(bool is_x_axis, int velocity_deg_per_sec, int timeout_ms,
                                           control_motion_source_t source, uint32_t *out_seq) {
     return hal_servo_jog_with_source_and_seq(is_x_axis ? SERVO_AXIS_X : SERVO_AXIS_Y, velocity_deg_per_sec, timeout_ms,
@@ -88,7 +112,8 @@ static esp_err_t control_default_stop(control_motion_source_t source) {
 }
 
 static bool control_source_is_manual(control_motion_source_t source) {
-    return source == CONTROL_MOTION_SOURCE_WS || source == CONTROL_MOTION_SOURCE_BLE;
+    return source == CONTROL_MOTION_SOURCE_WS || source == CONTROL_MOTION_SOURCE_BLE ||
+           source == CONTROL_MOTION_SOURCE_SDK;
 }
 
 static void control_suppress_touch_for_manual_source(control_motion_source_t source) {
@@ -97,10 +122,35 @@ static void control_suppress_touch_for_manual_source(control_motion_source_t sou
     }
 }
 
+static bool control_begin_jog_stream(control_motion_source_t source, int timeout_ms) {
+    const int64_t now_us = esp_timer_get_time();
+    const bool stream_active = control_source_is_manual(source) && s_manual_jog_stream_source == source &&
+                               now_us < s_manual_jog_stream_until_us;
+
+    if (control_source_is_manual(source)) {
+        s_manual_jog_stream_source = source;
+        s_manual_jog_stream_until_us = now_us + ((int64_t)timeout_ms * 1000LL);
+    }
+
+    return !stream_active;
+}
+
+static void control_end_jog_stream(control_motion_source_t source) {
+    if (!control_source_is_manual(source)) {
+        return;
+    }
+    if (s_manual_jog_stream_source == source) {
+        s_manual_jog_stream_until_us = 0;
+        s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
+    }
+}
+
 static const control_ingress_ops_t s_default_ops = {
     .interrupt_action = control_default_interrupt_action,
     .move_sync = control_default_move_sync,
     .move_axis = control_default_move_axis,
+    .move_sync_direct = control_default_move_sync_direct,
+    .move_axis_direct = control_default_move_axis_direct,
     .jog_axis = control_default_jog_axis,
     .jog_vector = control_default_jog_vector,
     .stop = control_default_stop,
@@ -112,11 +162,45 @@ static const control_ingress_ops_t *s_ops = &s_default_ops;
 void control_ingress_set_ops_for_test(const control_ingress_ops_t *ops) {
     s_ops = ops != NULL ? ops : &s_default_ops;
     s_manual_touch_suppressed_until_us = 0;
+    s_manual_jog_stream_until_us = 0;
+    s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
 }
 
 void control_ingress_reset_ops_for_test(void) {
     s_ops = &s_default_ops;
     s_manual_touch_suppressed_until_us = 0;
+    s_manual_jog_stream_until_us = 0;
+    s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
+}
+
+void control_ingress_reset_deferred_ai_status_for_test(void) {
+    portENTER_CRITICAL(&s_deferred_ai_status_lock);
+    memset(&s_deferred_ai_status, 0, sizeof(s_deferred_ai_status));
+    s_deferred_ai_status_pending = false;
+    portEXIT_CRITICAL(&s_deferred_ai_status_lock);
+}
+
+void control_ingress_reset_state_queue_for_test(void) {
+    control_state_msg_t discarded;
+
+    if (s_state_queue == NULL) {
+        return;
+    }
+    while (xQueueReceive(s_state_queue, &discarded, 0) == pdTRUE) {
+    }
+}
+
+bool control_ingress_has_deferred_ai_status_for_test(void) {
+    bool pending;
+
+    portENTER_CRITICAL(&s_deferred_ai_status_lock);
+    pending = s_deferred_ai_status_pending;
+    portEXIT_CRITICAL(&s_deferred_ai_status_lock);
+    return pending;
+}
+
+const char *control_ingress_deferred_ai_status_for_test(void) {
+    return s_deferred_ai_status.status;
 }
 #endif
 
@@ -167,10 +251,36 @@ static void control_normalize_resource_name(const char *raw, char *out, size_t o
     }
 
     for (i = 0; i < len; ++i) {
-        out[i] = (char)tolower((unsigned char)base[i]);
+        char ch = (char)tolower((unsigned char)base[i]);
+        out[i] = ch == '-' ? '_' : ch;
     }
     out[len] = '\0';
+
+    if (strncmp(out, "watcher_", 8) == 0) {
+        memmove(out, out + 8, strlen(out + 8) + 1);
+    }
+
+    len = strlen(out);
+    if (len > 6 && strcmp(out + len - 6, "_10fps") == 0) {
+        out[len - 6] = '\0';
+    }
+
+    if (strcmp(out, "look1") == 0) {
+        snprintf(out, out_size, "standby1");
+    } else if (strcmp(out, "look2") == 0) {
+        snprintf(out, out_size, "standby2");
+    } else if (strcmp(out, "look3") == 0) {
+        snprintf(out, out_size, "standby3");
+    } else if (strcmp(out, "look4") == 0) {
+        snprintf(out, out_size, "standby4");
+    }
 }
+
+#if defined(CONTROL_INGRESS_ENABLE_TEST_API)
+void control_ingress_normalize_resource_name_for_test(const char *raw, char *out, size_t out_size) {
+    control_normalize_resource_name(raw, out, out_size);
+}
+#endif
 
 static bool control_append_state_candidate(const char **candidates, size_t *count, size_t max_count,
                                            const char *candidate) {
@@ -195,6 +305,18 @@ static bool control_append_state_candidate(const char **candidates, size_t *coun
     return true;
 }
 
+static bool control_is_terminal_success_status(const char *status) {
+    return control_contains_nocase(status, "happy") || control_contains_nocase(status, "done") ||
+           control_contains_nocase(status, "completed") || control_contains_nocase(status, "success") ||
+           control_contains_nocase(status, "succeeded");
+}
+
+static bool control_is_terminal_error_status(const char *status) {
+    return control_contains_nocase(status, "error") || control_contains_nocase(status, "fail") ||
+           control_contains_nocase(status, "cancelled") || control_contains_nocase(status, "canceled") ||
+           control_contains_nocase(status, "cancelling");
+}
+
 static const char *control_ai_status_to_fallback(const char *status, const char *message) {
     if (control_contains_nocase(status, "bluetooth") || control_contains_nocase(message, "bluetooth") ||
         control_contains_nocase(status, "blue tooth") || control_contains_nocase(message, "blue tooth") ||
@@ -213,7 +335,7 @@ static const char *control_ai_status_to_fallback(const char *status, const char 
     }
     if (control_contains_nocase(status, "processing") || control_contains_nocase(status, "analyzing") ||
         control_contains_nocase(message, "processing") || control_contains_nocase(message, "analyzing")) {
-        return "processing";
+        return "thinking";
     }
     if (control_contains_nocase(status, "speaking") || control_contains_nocase(message, "speaking")) {
         return "speaking";
@@ -221,17 +343,32 @@ static const char *control_ai_status_to_fallback(const char *status, const char 
     if (control_contains_nocase(status, "idle") || control_contains_nocase(message, "idle")) {
         return "standby";
     }
-    if (control_contains_nocase(status, "done") || control_contains_nocase(status, "completed") ||
-        control_contains_nocase(message, "done") || control_contains_nocase(message, "completed")) {
+    if (control_is_terminal_success_status(status) || control_contains_nocase(message, "done") ||
+        control_contains_nocase(message, "completed") || control_contains_nocase(message, "success") ||
+        control_contains_nocase(message, "succeeded")) {
         return "happy";
     }
-    if (control_contains_nocase(status, "error") || control_contains_nocase(status, "fail") ||
+    if (control_is_terminal_error_status(status) ||
         control_contains_nocase(message, "error") || control_contains_nocase(message, "fail")) {
         return "error";
     }
 
     return NULL;
 }
+
+static const char *control_ai_status_display_text(const control_ai_status_request_t *req) {
+    static const char clear_text[] = "";
+
+    /* Remote AI state updates drive expressions only; never render their text on screen. */
+    (void)req;
+    return clear_text;
+}
+
+#if defined(CONTROL_INGRESS_ENABLE_TEST_API)
+const char *control_ingress_ai_status_text_for_test(const control_ai_status_request_t *req) {
+    return control_ai_status_display_text(req);
+}
+#endif
 
 static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req) {
     char action_state_id[sizeof(req->action_file)];
@@ -243,6 +380,7 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
     const char *state_candidates[3] = {0};
     const char *action_candidates[3] = {0};
     const char *selected_action_id = NULL;
+    const char *selected_state_id = NULL;
     const char *text;
     esp_err_t ret = ESP_ERR_NOT_FOUND;
     size_t state_candidate_count = 0;
@@ -256,7 +394,7 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
     control_normalize_resource_name(control_ai_status_to_fallback(req->status, req->message), fallback_state_id,
                                     sizeof(fallback_state_id));
 
-    text = req->message[0] != '\0' ? req->message : NULL;
+    text = control_ai_status_display_text(req);
     /* Preserve explicit panel/protocol SFX while still suppressing implicit state-default
      * sounds for cloud AI statuses that do not provide a sound_file. */
     if (sound_id[0] != '\0') {
@@ -282,11 +420,13 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
                                                            image_name[0] != '\0' ? image_name : NULL, status_sound_id,
                                                            selected_action_id);
         if (ret != ESP_ERR_NOT_FOUND) {
+            selected_state_id = state_candidates[i];
             break;
         }
     }
 
     if (ret == ESP_ERR_NOT_FOUND) {
+        selected_state_id = "standby";
         ret = behavior_state_set_with_resources_and_action(
             "standby", text, 0, image_name[0] != '\0' ? image_name : NULL, status_sound_id, selected_action_id);
         if (ret == ESP_ERR_NOT_FOUND) {
@@ -305,62 +445,99 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
         ESP_LOGW(TAG, "AI status apply failed: %s", esp_err_to_name(ret));
     }
 
+    ESP_LOGI(TAG, "AI status resolved: requested=%s selected=%s action=%s result=%s", req->status,
+             selected_state_id != NULL ? selected_state_id : "<none>",
+             selected_action_id != NULL ? selected_action_id : "<none>", esp_err_to_name(ret));
+
     return ret;
 }
 
+static const char *control_state_msg_type_name(control_state_msg_type_t type) {
+    switch (type) {
+    case CONTROL_STATE_MSG_AI_STATUS:
+        return "ai_status";
+    case CONTROL_STATE_MSG_STATE_SET:
+        return "state_set";
+    case CONTROL_STATE_MSG_STATE_TEXT:
+        return "state_text";
+    default:
+        return "unknown";
+    }
+}
+
+static void control_observe_state_stack(control_state_msg_type_t type) {
+    const size_t min_free = (size_t)uxTaskGetStackHighWaterMark(NULL);
+
+    if (min_free >= s_state_stack_min_free) {
+        return;
+    }
+
+    s_state_stack_min_free = min_free;
+    if (min_free < CONTROL_STATE_STACK_WARN_BYTES) {
+        ESP_LOGW(TAG, "state task stack low: free=%u size=%u msg=%s", (unsigned)min_free,
+                 (unsigned)CONTROL_STATE_TASK_STACK, control_state_msg_type_name(type));
+    } else {
+        ESP_LOGI(TAG, "state task stack watermark: free=%u size=%u msg=%s", (unsigned)min_free,
+                 (unsigned)CONTROL_STATE_TASK_STACK, control_state_msg_type_name(type));
+    }
+}
+
 static void control_state_task(void *arg) {
-    control_state_msg_t msg;
+    control_state_msg_t *msg = &s_state_task_msg;
 
     (void)arg;
 
     while (true) {
-        if (xQueueReceive(s_state_queue, &msg, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_state_queue, msg, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
-        switch (msg.type) {
+        switch (msg->type) {
         case CONTROL_STATE_MSG_AI_STATUS: {
-            esp_err_t ret = control_apply_ai_status(&msg.data.ai_status);
+            esp_err_t ret = control_apply_ai_status(&msg->data.ai_status);
             if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND) {
-                ESP_LOGW(TAG, "AI status task apply failed: status=%s err=%s", msg.data.ai_status.status,
+                ESP_LOGW(TAG, "AI status task apply failed: status=%s err=%s", msg->data.ai_status.status,
                          esp_err_to_name(ret));
             }
             break;
         }
 
         case CONTROL_STATE_MSG_STATE_SET: {
-            esp_err_t ret = behavior_state_set(msg.data.state_set.state_id);
+            esp_err_t ret = behavior_state_set(msg->data.state_set.state_id);
             if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "State set failed: state=%s err=%s", msg.data.state_set.state_id, esp_err_to_name(ret));
+                ESP_LOGW(TAG, "State set failed: state=%s err=%s", msg->data.state_set.state_id,
+                         esp_err_to_name(ret));
             }
             break;
         }
 
         case CONTROL_STATE_MSG_STATE_TEXT: {
-            const char *text = msg.data.state_text.text[0] != '\0' ? msg.data.state_text.text : NULL;
+            const char *text = msg->data.state_text.text[0] != '\0' ? msg->data.state_text.text : NULL;
             esp_err_t ret;
 
-            if (msg.data.state_text.state_id[0] != '\0') {
-                ret = behavior_state_set_with_resources(msg.data.state_text.state_id, text,
-                                                        msg.data.state_text.font_size, NULL, "");
+            if (msg->data.state_text.state_id[0] != '\0') {
+                ret = behavior_state_set_with_resources(msg->data.state_text.state_id, text,
+                                                        msg->data.state_text.font_size, NULL, "");
             } else if (text != NULL) {
-                ret = behavior_state_set_text(text, msg.data.state_text.font_size);
+                ret = behavior_state_set_text(text, msg->data.state_text.font_size);
             } else {
                 ret = ESP_ERR_INVALID_ARG;
             }
 
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "State text apply failed: state=%s err=%s",
-                         msg.data.state_text.state_id[0] != '\0' ? msg.data.state_text.state_id : "<none>",
+                         msg->data.state_text.state_id[0] != '\0' ? msg->data.state_text.state_id : "<none>",
                          esp_err_to_name(ret));
             }
             break;
         }
 
         default:
-            ESP_LOGW(TAG, "Unknown control state msg: %d", (int)msg.type);
+            ESP_LOGW(TAG, "Unknown control state msg: %d", (int)msg->type);
             break;
         }
+
+        control_observe_state_stack(msg->type);
     }
 }
 
@@ -397,6 +574,8 @@ esp_err_t control_ingress_init(void) {
         return ESP_ERR_NO_MEM;
     }
 
+    ESP_LOGI(TAG, "state task created: stack=%u queue_depth=%u msg_size=%u", (unsigned)CONTROL_STATE_TASK_STACK,
+             (unsigned)CONTROL_STATE_QUEUE_DEPTH, (unsigned)sizeof(control_state_msg_t));
     return ESP_OK;
 }
 
@@ -429,6 +608,7 @@ esp_err_t control_ingress_submit_servo_with_seq(const control_servo_request_t *r
         return ESP_ERR_INVALID_ARG;
     }
 
+    control_end_jog_stream(req->source);
     control_suppress_touch_for_manual_source(req->source);
 
 #if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
@@ -443,10 +623,23 @@ esp_err_t control_ingress_submit_servo_with_seq(const control_servo_request_t *r
 #endif
 
     if (req->has_x && req->has_y) {
+        if (req->source == CONTROL_MOTION_SOURCE_WS) {
+            if (s_ops->move_sync_direct == NULL) {
+                return ESP_ERR_INVALID_STATE;
+            }
+            return s_ops->move_sync_direct(req->x_deg, req->y_deg, req->source, out_seq);
+        }
         if (s_ops->move_sync == NULL) {
             return ESP_ERR_INVALID_STATE;
         }
         return s_ops->move_sync(req->x_deg, req->y_deg, req->duration_ms, req->source, out_seq);
+    }
+
+    if (req->source == CONTROL_MOTION_SOURCE_WS) {
+        if (s_ops->move_axis_direct == NULL) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        return s_ops->move_axis_direct(req->has_x, req->has_x ? req->x_deg : req->y_deg, req->source, out_seq);
     }
 
     if (s_ops->move_axis == NULL) {
@@ -456,6 +649,8 @@ esp_err_t control_ingress_submit_servo_with_seq(const control_servo_request_t *r
 }
 
 esp_err_t control_ingress_submit_jog_with_seq(const control_jog_request_t *req, uint32_t *out_seq) {
+    bool should_interrupt;
+
     if (req == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -465,9 +660,10 @@ esp_err_t control_ingress_submit_jog_with_seq(const control_jog_request_t *req, 
     }
 
     control_suppress_touch_for_manual_source(req->source);
+    should_interrupt = control_begin_jog_stream(req->source, req->timeout_ms);
 
 #if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
-    if (s_ops->interrupt_action != NULL) {
+    if (should_interrupt && s_ops->interrupt_action != NULL) {
         esp_err_t interrupt_ret = s_ops->interrupt_action("control_ingress_jog");
         if (interrupt_ret != ESP_OK && interrupt_ret != ESP_ERR_NOT_FOUND) {
             ESP_LOGW(TAG, "Failed to interrupt action loop before jog control: %s", esp_err_to_name(interrupt_ret));
@@ -482,6 +678,8 @@ esp_err_t control_ingress_submit_jog_with_seq(const control_jog_request_t *req, 
 }
 
 esp_err_t control_ingress_submit_jog_vector_with_seq(const control_jog_vector_request_t *req, uint32_t *out_seq) {
+    bool should_interrupt;
+
     if (req == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -499,9 +697,10 @@ esp_err_t control_ingress_submit_jog_vector_with_seq(const control_jog_vector_re
     }
 
     control_suppress_touch_for_manual_source(req->source);
+    should_interrupt = control_begin_jog_stream(req->source, req->timeout_ms);
 
 #if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
-    if (s_ops->interrupt_action != NULL) {
+    if (should_interrupt && s_ops->interrupt_action != NULL) {
         esp_err_t interrupt_ret = s_ops->interrupt_action("control_ingress_jog");
         if (interrupt_ret != ESP_OK && interrupt_ret != ESP_ERR_NOT_FOUND) {
             ESP_LOGW(TAG, "Failed to interrupt action loop before jog control: %s", esp_err_to_name(interrupt_ret));
@@ -517,6 +716,7 @@ esp_err_t control_ingress_submit_jog_vector_with_seq(const control_jog_vector_re
 }
 
 esp_err_t control_ingress_stop_manual(control_motion_source_t source) {
+    control_end_jog_stream(source);
     control_suppress_touch_for_manual_source(source);
 
     if (s_ops->interrupt_action != NULL) {
@@ -561,9 +761,45 @@ esp_err_t control_ingress_submit_ai_status(const control_ai_status_request_t *re
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (req->defer_ui_until_tts_complete) {
+        portENTER_CRITICAL(&s_deferred_ai_status_lock);
+        s_deferred_ai_status = *req;
+        s_deferred_ai_status.defer_ui_until_tts_complete = false;
+        s_deferred_ai_status_pending = true;
+        portEXIT_CRITICAL(&s_deferred_ai_status_lock);
+        ESP_LOGI(TAG, "Deferred AI status cached until TTS playout completes: status=%s", req->status);
+        return ESP_OK;
+    }
+
+    portENTER_CRITICAL(&s_deferred_ai_status_lock);
+    s_deferred_ai_status_pending = false;
+    portEXIT_CRITICAL(&s_deferred_ai_status_lock);
+
     msg.type = CONTROL_STATE_MSG_AI_STATUS;
     msg.data.ai_status = *req;
     return control_submit_state_msg(&msg);
+}
+
+esp_err_t control_ingress_flush_deferred_ai_status_after_tts(void) {
+    control_ai_status_request_t req = {0};
+    bool pending = false;
+
+    portENTER_CRITICAL(&s_deferred_ai_status_lock);
+    if (s_deferred_ai_status_pending) {
+        req = s_deferred_ai_status;
+        memset(&s_deferred_ai_status, 0, sizeof(s_deferred_ai_status));
+        s_deferred_ai_status_pending = false;
+        pending = true;
+    }
+    portEXIT_CRITICAL(&s_deferred_ai_status_lock);
+
+    if (!pending) {
+        return ESP_OK;
+    }
+
+    req.defer_ui_until_tts_complete = false;
+    ESP_LOGI(TAG, "Applying deferred AI status after TTS playout: status=%s", req.status);
+    return control_ingress_submit_ai_status(&req);
 }
 
 esp_err_t control_ingress_submit_state_set(const control_state_set_request_t *req) {
@@ -588,4 +824,12 @@ esp_err_t control_ingress_submit_state_text(const control_state_text_request_t *
     msg.type = CONTROL_STATE_MSG_STATE_TEXT;
     msg.data.state_text = *req;
     return control_submit_state_msg(&msg);
+}
+
+size_t control_ingress_state_stack_high_watermark(void) {
+    return s_state_task != NULL ? (size_t)uxTaskGetStackHighWaterMark(s_state_task) : 0U;
+}
+
+size_t control_ingress_state_stack_size(void) {
+    return CONTROL_STATE_TASK_STACK;
 }

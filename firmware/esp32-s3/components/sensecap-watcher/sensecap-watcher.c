@@ -15,8 +15,6 @@
 
 static const char *TAG = "BSP";
 
-#define WATCHER_LCD_SAFE_TRANS_QUEUE_DEPTH 1
-#define WATCHER_LVGL_SAFE_DRAW_ROWS 4U
 #define WATCHER_SD_SPI_MAX_FREQ_KHZ 20000
 #define WATCHER_SD_SPI_MAX_TRANSFER_BYTES (32 * 1024)
 
@@ -27,6 +25,7 @@ static sscma_client_io_handle_t sscma_client_io_handle = NULL;
 static sscma_client_io_handle_t sscma_flasher_io_handle = NULL;
 static sscma_client_handle_t sscma_client_handle = NULL;
 static sscma_client_flasher_handle_t sscma_flasher_handle = NULL;
+static bool sscma_client_initialized = false;
 
 static lv_disp_t *lvgl_disp = NULL;
 static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
@@ -40,11 +39,53 @@ static BYTE sdcard_pdrv = FF_DRV_NOT_USED;
 static char *sdcard_base_path = NULL;
 static esp_codec_dev_handle_t play_dev_handle;
 static esp_codec_dev_handle_t record_dev_handle;
+static bool play_dev_open = false;
+static bool record_dev_open = false;
 static SemaphoreHandle_t codec_mutex = NULL;
+static const audio_codec_if_t *play_codec_if = NULL;
+static const audio_codec_ctrl_if_t *play_ctrl_if = NULL;
+static const audio_codec_gpio_if_t *play_gpio_if = NULL;
+static const audio_codec_if_t *record_codec_if = NULL;
+static const audio_codec_ctrl_if_t *record_ctrl_if = NULL;
 
 static i2s_chan_handle_t i2s_tx_chan = NULL;
 static i2s_chan_handle_t i2s_rx_chan = NULL;
 static const audio_codec_data_if_t *i2s_data_if = NULL;
+static volatile uint32_t i2s_tx_done_count = 0U;
+
+static bool IRAM_ATTR bsp_i2s_tx_sent_callback(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx) {
+    (void)handle;
+    (void)event;
+    (void)user_ctx;
+    __atomic_fetch_add(&i2s_tx_done_count, 1U, __ATOMIC_RELAXED);
+    return false;
+}
+
+static esp_err_t bsp_codec_close_play_locked(void) {
+    if (!play_dev_open || play_dev_handle == NULL) {
+        play_dev_open = false;
+        return ESP_OK;
+    }
+
+    esp_err_t ret = esp_codec_dev_close(play_dev_handle);
+    if (ret == ESP_OK) {
+        play_dev_open = false;
+    }
+    return ret;
+}
+
+static esp_err_t bsp_codec_close_record_locked(void) {
+    if (!record_dev_open || record_dev_handle == NULL) {
+        record_dev_open = false;
+        return ESP_OK;
+    }
+
+    esp_err_t ret = esp_codec_dev_close(record_dev_handle);
+    if (ret == ESP_OK) {
+        record_dev_open = false;
+    }
+    return ret;
+}
 
 #define WATCHER_SDMMC_INIT_STEP(target_card, condition, function)                                                      \
     do {                                                                                                               \
@@ -245,27 +286,6 @@ static size_t bsp_lcd_max_transfer_bytes(void) {
     return max_transfer > 0 ? max_transfer : (DRV_LCD_H_RES * DRV_LCD_BITS_PER_PIXEL / 8);
 }
 
-static size_t bsp_lcd_effective_draw_rows(size_t requested_rows) {
-    const size_t bytes_per_row = DRV_LCD_H_RES * DRV_LCD_BITS_PER_PIXEL / 8;
-    size_t max_rows = bsp_lcd_max_transfer_bytes() / bytes_per_row;
-    if (max_rows == 0) {
-        max_rows = 1;
-    }
-    if (max_rows > WATCHER_LVGL_SAFE_DRAW_ROWS) {
-        max_rows = WATCHER_LVGL_SAFE_DRAW_ROWS;
-    }
-    return requested_rows > max_rows ? max_rows : requested_rows;
-}
-
-static int bsp_lcd_effective_trans_queue_depth(void) {
-    if (CONFIG_BSP_LCD_PANEL_SPI_TRANS_Q_DEPTH > WATCHER_LCD_SAFE_TRANS_QUEUE_DEPTH) {
-        ESP_LOGW(TAG, "Clamping LCD trans queue depth from %d to %d to reduce internal DMA pressure",
-                 CONFIG_BSP_LCD_PANEL_SPI_TRANS_Q_DEPTH, WATCHER_LCD_SAFE_TRANS_QUEUE_DEPTH);
-        return WATCHER_LCD_SAFE_TRANS_QUEUE_DEPTH;
-    }
-    return CONFIG_BSP_LCD_PANEL_SPI_TRANS_Q_DEPTH;
-}
-
 void bsp_lvgl_rounder_cb(struct _lv_disp_drv_t *disp_drv, lv_area_t *area) {
     uint16_t x1 = area->x1;
     uint16_t x2 = area->x2;
@@ -285,10 +305,10 @@ static void bsp_btn_cb(void *arg, void *arg2) {
 }
 
 void bsp_set_btn_long_press_cb(void (*cb)(void)) {
-    bsp_set_btn_long_press_ms_cb(0, cb);
+    (void)bsp_set_btn_long_press_ms_cb(0, cb);
 }
 
-void bsp_set_btn_long_press_ms_cb(uint16_t press_time_ms, void (*cb)(void)) {
+esp_err_t bsp_set_btn_long_press_ms_cb(uint16_t press_time_ms, void (*cb)(void)) {
     lv_indev_t *tp = NULL;
     while (1) {
         tp = lv_indev_get_next(tp);
@@ -299,12 +319,11 @@ void bsp_set_btn_long_press_ms_cb(uint16_t press_time_ms, void (*cb)(void)) {
 
     if (tp == NULL) {
         ESP_LOGE(TAG, "No encoder found");
-        return;
+        return ESP_ERR_NOT_FOUND;
     }
 
     if (press_time_ms == 0) {
-        lvgl_port_encoder_btn_register_event_cb(tp, BUTTON_LONG_PRESS_START, bsp_btn_cb, cb);
-        return;
+        return lvgl_port_encoder_btn_register_event_cb(tp, BUTTON_LONG_PRESS_START, bsp_btn_cb, cb);
     }
 
     button_event_config_t event_cfg = {
@@ -318,6 +337,7 @@ void bsp_set_btn_long_press_ms_cb(uint16_t press_time_ms, void (*cb)(void)) {
     } else {
         ESP_LOGI(TAG, "Registered %u ms long-press callback", (unsigned)press_time_ms);
     }
+    return ret;
 }
 
 void bsp_set_btn_long_release_cb(void (*cb)(void)) {
@@ -683,7 +703,7 @@ uint16_t bsp_battery_get_voltage(void) {
         adc_oneshot_read(adc_handle, BSP_BAT_ADC_CHAN, &raw_value);
         adc_cali_raw_to_voltage(cali_handle, raw_value, &voltage);
         voltage = voltage * 82 / 20;
-        ESP_LOGI(TAG, "voltage: %dmV", voltage);
+        ESP_LOGD(TAG, "voltage: %dmV", voltage);
         return (uint16_t)voltage;
     }
     return 0;
@@ -697,7 +717,7 @@ uint8_t bsp_battery_get_percent(void) {
     voltage /= 10;
     int percent = (-1 * voltage * voltage + 9016 * voltage - 19189000) / 10000;
     percent = (percent > 100) ? 100 : (percent < 0) ? 0 : percent;
-    ESP_LOGI(TAG, "percentage: %d%%", percent);
+    ESP_LOGD(TAG, "percentage: %d%%", percent);
     return (uint8_t)percent;
 }
 
@@ -871,7 +891,7 @@ static esp_err_t bsp_lcd_pannel_init(esp_lcd_panel_handle_t *ret_panel, esp_lcd_
         .dc_gpio_num = -1,
         .spi_mode = 3,
         .pclk_hz = DRV_LCD_PIXEL_CLK_HZ,
-        .trans_queue_depth = bsp_lcd_effective_trans_queue_depth(),
+        .trans_queue_depth = CONFIG_BSP_LCD_PANEL_SPI_TRANS_Q_DEPTH,
         .lcd_cmd_bits = DRV_LCD_CMD_BITS,
         .lcd_param_bits = DRV_LCD_PARAM_BITS,
         .flags =
@@ -961,7 +981,7 @@ static lv_indev_t *bsp_knob_indev_init(lv_disp_t *disp) {
     };
     const static button_config_t btn_config = {
         .type = BUTTON_TYPE_CUSTOM,
-        .long_press_time = 6000,
+        .long_press_time = 2000,
         .short_press_time = 200,
         .custom_button_config =
             {
@@ -1040,25 +1060,13 @@ lv_disp_t *bsp_lvgl_init(void) {
 #ifdef CONFIG_HEAP_ABORT_WHEN_ALLOCATION_FAILS
     BSP_ERROR_CHECK_RETURN_NULL(heap_caps_register_failed_alloc_callback(heap_caps_alloc_failed_hook));
 #endif
-    const size_t requested_rows = LVGL_DRAW_BUFF_HEIGHT;
-    const size_t effective_rows = bsp_lcd_effective_draw_rows(requested_rows);
     bsp_display_cfg_t cfg = {.lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
-                             .buffer_size = DRV_LCD_H_RES * effective_rows,
+                             .buffer_size = DRV_LCD_H_RES * LVGL_DRAW_BUFF_HEIGHT,
                              .double_buffer = LVGL_DRAW_BUFF_DOUBLE,
                              .flags = {
                                  .buff_dma = false,
                                  .buff_spiram = true,
                              }};
-    if (effective_rows != requested_rows) {
-        ESP_LOGW(TAG,
-                 "Clamping LVGL draw buffer from %u rows to %u rows so each flush fits SPI max_transfer_sz=%u bytes",
-                 (unsigned)requested_rows, (unsigned)effective_rows, (unsigned)bsp_lcd_max_transfer_bytes());
-    }
-    ESP_LOGI(TAG,
-             "LVGL draw buffer: requested=%u rows, effective=%u rows, %lu pixels, double=%d, psram=%d, dma_div=%d, "
-             "trans_q=%d",
-             (unsigned)requested_rows, (unsigned)effective_rows, (unsigned long)cfg.buffer_size, cfg.double_buffer,
-             cfg.flags.buff_spiram, CONFIG_BSP_LCD_SPI_DMA_SIZE_DIV, bsp_lcd_effective_trans_queue_depth());
     cfg.lvgl_port_cfg.task_priority = CONFIG_LVGL_PORT_TASK_PRIORITY;
     cfg.lvgl_port_cfg.task_affinity = CONFIG_LVGL_PORT_TASK_AFFINITY;
     cfg.lvgl_port_cfg.task_stack = CONFIG_LVGL_PORT_TASK_STACK_SIZE;
@@ -1165,6 +1173,7 @@ esp_err_t bsp_sdcard_deinit_default(void) {
 
 esp_err_t bsp_spiffs_init(char *mount_point, size_t max_files) {
     static bool inited = false;
+    esp_err_t register_ret;
     if (inited) {
         return ESP_OK;
     }
@@ -1174,16 +1183,24 @@ esp_err_t bsp_spiffs_init(char *mount_point, size_t max_files) {
         .max_files = max_files,
         .format_if_mount_failed = false,
     };
-    esp_vfs_spiffs_register(&conf);
+    register_ret = esp_vfs_spiffs_register(&conf);
+    if (register_ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPIFFS mount failed: label=%s base_path=%s err=%s", conf.partition_label, conf.base_path,
+                 esp_err_to_name(register_ret));
+        return register_ret;
+    }
 
     size_t total = 0, used = 0;
     esp_err_t ret_val = esp_spiffs_info(conf.partition_label, &total, &used);
     if (ret_val != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s)", esp_err_to_name(ret_val));
+        esp_vfs_spiffs_unregister(conf.partition_label);
+        return ret_val;
     } else {
         ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
     }
-    return ret_val;
+    inited = true;
+    return ESP_OK;
 }
 
 esp_err_t bsp_spiffs_init_default(void) {
@@ -1208,6 +1225,13 @@ esp_err_t bsp_audio_init(const i2s_std_config_t *i2s_config) {
     chan_cfg.dma_desc_num = CONFIG_BSP_AUDIO_DMA_BUFFER_NUM;
     chan_cfg.dma_frame_num = CONFIG_BSP_AUDIO_DMA_BUFFER_SIZE;
     BSP_ERROR_CHECK_RETURN_ERR(i2s_new_channel(&chan_cfg, &i2s_tx_chan, &i2s_rx_chan));
+    {
+        const i2s_event_callbacks_t callbacks = {
+            .on_sent = bsp_i2s_tx_sent_callback,
+        };
+        __atomic_store_n(&i2s_tx_done_count, 0U, __ATOMIC_RELAXED);
+        BSP_ERROR_CHECK_RETURN_ERR(i2s_channel_register_event_callback(i2s_tx_chan, &callbacks, NULL));
+    }
 
     /* Setup I2S channels */
     i2s_std_config_t std_cfg_default = BSP_I2S_DUPLEX_MONO_CFG(DRV_AUDIO_SAMPLE_RATE);
@@ -1239,10 +1263,13 @@ esp_err_t bsp_audio_init(const i2s_std_config_t *i2s_config) {
 err:
     if (i2s_tx_chan) {
         i2s_del_channel(i2s_tx_chan);
+        i2s_tx_chan = NULL;
     }
     if (i2s_rx_chan) {
         i2s_del_channel(i2s_rx_chan);
+        i2s_rx_chan = NULL;
     }
+    i2s_data_if = NULL;
 
     return ret;
 }
@@ -1253,6 +1280,12 @@ const audio_codec_data_if_t *bsp_audio_get_codec_itf(void) {
 
 esp_codec_dev_handle_t bsp_audio_codec_speaker_init(void) {
     const audio_codec_data_if_t *i2s_data_if = bsp_audio_get_codec_itf();
+    esp_codec_dev_handle_t dev_handle = NULL;
+
+    if (play_dev_handle != NULL) {
+        return play_dev_handle;
+    }
+
     if (i2s_data_if == NULL) {
         esp_err_t ret;
         /* Initilize I2C */
@@ -1272,13 +1305,17 @@ esp_codec_dev_handle_t bsp_audio_codec_speaker_init(void) {
     assert(i2s_data_if);
 
     const audio_codec_gpio_if_t *gpio_if = audio_codec_new_gpio();
+    BSP_NULL_CHECK(gpio_if, NULL);
 
     audio_codec_i2c_cfg_t i2c_cfg = {
         .port = BSP_GENERAL_I2C_NUM,
         .addr = DRV_ES8311_I2C_ADDR,
     };
     const audio_codec_ctrl_if_t *i2c_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
-    BSP_NULL_CHECK(i2c_ctrl_if, NULL);
+    if (i2c_ctrl_if == NULL) {
+        audio_codec_delete_gpio_if(gpio_if);
+        return NULL;
+    }
 
     esp_codec_dev_hw_gain_t gain = {
         .pa_voltage = 5.0,
@@ -1299,19 +1336,42 @@ esp_codec_dev_handle_t bsp_audio_codec_speaker_init(void) {
         .hw_gain = gain,
     };
     const audio_codec_if_t *es8311_dev = es8311_codec_new(&es8311_cfg);
-    BSP_NULL_CHECK(es8311_dev, NULL);
+    if (es8311_dev == NULL) {
+        audio_codec_delete_ctrl_if(i2c_ctrl_if);
+        audio_codec_delete_gpio_if(gpio_if);
+        return NULL;
+    }
 
     esp_codec_dev_cfg_t codec_dev_cfg = {
         .dev_type = ESP_CODEC_DEV_TYPE_OUT,
         .codec_if = es8311_dev,
         .data_if = i2s_data_if,
     };
-    return esp_codec_dev_new(&codec_dev_cfg);
+    dev_handle = esp_codec_dev_new(&codec_dev_cfg);
+    if (dev_handle == NULL) {
+        audio_codec_delete_codec_if(es8311_dev);
+        audio_codec_delete_ctrl_if(i2c_ctrl_if);
+        audio_codec_delete_gpio_if(gpio_if);
+        return NULL;
+    }
+
+    play_dev_handle = dev_handle;
+    play_codec_if = es8311_dev;
+    play_ctrl_if = i2c_ctrl_if;
+    play_gpio_if = gpio_if;
+    return dev_handle;
 }
 
 esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void) {
     const audio_codec_data_if_t *i2s_data_if = bsp_audio_get_codec_itf();
     const audio_codec_if_t *es7243_dev = NULL;
+    const audio_codec_ctrl_if_t *i2c_ctrl_if = NULL;
+    esp_codec_dev_handle_t dev_handle = NULL;
+
+    if (record_dev_handle != NULL) {
+        return record_dev_handle;
+    }
+
     if (i2s_data_if == NULL) {
         esp_err_t ret;
         /* Initilize I2C */
@@ -1336,7 +1396,7 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void) {
             .addr = DRV_ES7243_I2C_ADDR << 1,
         };
 
-        const audio_codec_ctrl_if_t *i2c_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
+        i2c_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
         BSP_NULL_CHECK(i2c_ctrl_if, NULL);
 
         es7243_codec_cfg_t es7243_cfg = {
@@ -1348,7 +1408,7 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void) {
             .port = BSP_GENERAL_I2C_NUM,
             .addr = DRV_ES7243E_I2C_ADDR << 1,
         };
-        const audio_codec_ctrl_if_t *i2c_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
+        i2c_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
         BSP_NULL_CHECK(i2c_ctrl_if, NULL);
         es7243e_codec_cfg_t es7243e_cfg = {
             .ctrl_if = i2c_ctrl_if,
@@ -1356,7 +1416,10 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void) {
         es7243_dev = es7243e_codec_new(&es7243e_cfg);
     }
 
-    BSP_NULL_CHECK(es7243_dev, NULL);
+    if (es7243_dev == NULL) {
+        audio_codec_delete_ctrl_if(i2c_ctrl_if);
+        return NULL;
+    }
 
     esp_codec_dev_cfg_t codec_es7243_dev_cfg = {
         .dev_type = ESP_CODEC_DEV_TYPE_IN,
@@ -1364,7 +1427,17 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void) {
         .data_if = i2s_data_if,
     };
 
-    return esp_codec_dev_new(&codec_es7243_dev_cfg);
+    dev_handle = esp_codec_dev_new(&codec_es7243_dev_cfg);
+    if (dev_handle == NULL) {
+        audio_codec_delete_codec_if(es7243_dev);
+        audio_codec_delete_ctrl_if(i2c_ctrl_if);
+        return NULL;
+    }
+
+    record_dev_handle = dev_handle;
+    record_codec_if = es7243_dev;
+    record_ctrl_if = i2c_ctrl_if;
+    return dev_handle;
 }
 
 esp_err_t bsp_i2s_read(void *audio_buffer, size_t len, size_t *bytes_read, uint32_t timeout_ms) {
@@ -1391,6 +1464,24 @@ esp_err_t bsp_i2s_write(void *audio_buffer, size_t len, size_t *bytes_written, u
     return ret;
 }
 
+esp_err_t bsp_i2s_wait_tx_drain(uint32_t timeout_ms) {
+    const uint32_t required_completions = (uint32_t)CONFIG_BSP_AUDIO_DMA_BUFFER_NUM;
+    const uint32_t started_count = __atomic_load_n(&i2s_tx_done_count, __ATOMIC_RELAXED);
+    const int64_t deadline_us = esp_timer_get_time() + ((int64_t)timeout_ms * 1000LL);
+
+    if (i2s_tx_chan == NULL || required_completions == 0U) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    while ((uint32_t)(__atomic_load_n(&i2s_tx_done_count, __ATOMIC_RELAXED) - started_count) < required_completions) {
+        if (esp_timer_get_time() >= deadline_us) {
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    return ESP_OK;
+}
+
 esp_err_t bsp_codec_set_fs(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t ch) {
     esp_err_t ret = ESP_OK;
 
@@ -1402,20 +1493,32 @@ esp_err_t bsp_codec_set_fs(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t ch)
 
     xSemaphoreTake(codec_mutex, portMAX_DELAY);
     if (play_dev_handle) {
-        ret = esp_codec_dev_close(play_dev_handle);
+        ret = bsp_codec_close_play_locked();
     }
     if (record_dev_handle) {
-        ret |= esp_codec_dev_close(record_dev_handle);
-        ret |= esp_codec_dev_set_in_gain(record_dev_handle, DRV_AUDIO_MIC_GAIN);
+        esp_err_t close_ret = bsp_codec_close_record_locked();
+        if (ret == ESP_OK) {
+            ret = close_ret;
+        }
+        esp_err_t gain_ret = esp_codec_dev_set_in_gain(record_dev_handle, DRV_AUDIO_MIC_GAIN);
+        if (ret == ESP_OK) {
+            ret = gain_ret;
+        }
     }
 
-    if (play_dev_handle) {
-        ret |= esp_codec_dev_open(play_dev_handle, &fs);
+    if (ret == ESP_OK && play_dev_handle) {
+        ret = esp_codec_dev_open(play_dev_handle, &fs);
+        if (ret == ESP_OK) {
+            play_dev_open = true;
+        }
     }
-    if (record_dev_handle) {
+    if (ret == ESP_OK && record_dev_handle) {
         fs.channel = 2;
         fs.channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
-        ret |= esp_codec_dev_open(record_dev_handle, &fs);
+        ret = esp_codec_dev_open(record_dev_handle, &fs);
+        if (ret == ESP_OK) {
+            record_dev_open = true;
+        }
     }
     xSemaphoreGive(codec_mutex);
     return ret;
@@ -1451,11 +1554,14 @@ esp_err_t bsp_codec_dev_stop(void) {
     xSemaphoreTake(codec_mutex, portMAX_DELAY);
 
     if (play_dev_handle) {
-        ret = esp_codec_dev_close(play_dev_handle);
+        ret = bsp_codec_close_play_locked();
     }
 
     if (record_dev_handle) {
-        ret = esp_codec_dev_close(record_dev_handle);
+        esp_err_t close_ret = bsp_codec_close_record_locked();
+        if (ret == ESP_OK) {
+            ret = close_ret;
+        }
     }
     xSemaphoreGive(codec_mutex);
     return ret;
@@ -1466,16 +1572,122 @@ esp_err_t bsp_codec_dev_resume(void) {
 }
 
 esp_err_t bsp_codec_init(void) {
-    codec_mutex = xSemaphoreCreateMutex();
+    if (play_dev_handle != NULL && record_dev_handle != NULL) {
+        return ESP_OK;
+    }
+
+    if (codec_mutex == NULL) {
+        codec_mutex = xSemaphoreCreateMutex();
+        if (codec_mutex == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
     play_dev_handle = bsp_audio_codec_speaker_init();
-    assert((play_dev_handle) && "play_dev_handle not initialized");
+    if (play_dev_handle == NULL) {
+        (void)bsp_codec_deinit();
+        return ESP_FAIL;
+    }
 
     record_dev_handle = bsp_audio_codec_microphone_init();
-    assert((record_dev_handle) && "record_dev_handle not initialized");
+    if (record_dev_handle == NULL) {
+        (void)bsp_codec_deinit();
+        return ESP_FAIL;
+    }
 
-    bsp_codec_set_fs(DRV_AUDIO_SAMPLE_RATE, DRV_AUDIO_SAMPLE_BITS, DRV_AUDIO_CHANNELS);
+    esp_err_t ret = bsp_codec_set_fs(DRV_AUDIO_SAMPLE_RATE, DRV_AUDIO_SAMPLE_BITS, DRV_AUDIO_CHANNELS);
+    if (ret != ESP_OK) {
+        (void)bsp_codec_deinit();
+        return ret;
+    }
     return ESP_OK;
+}
+
+esp_err_t bsp_codec_deinit(void) {
+    esp_err_t status = ESP_OK;
+
+    if (codec_mutex != NULL) {
+        xSemaphoreTake(codec_mutex, portMAX_DELAY);
+    }
+
+    if (play_dev_handle != NULL) {
+        if (bsp_codec_close_play_locked() != ESP_OK) {
+            status = ESP_FAIL;
+        }
+        esp_codec_dev_delete(play_dev_handle);
+        play_dev_handle = NULL;
+    }
+    if (record_dev_handle != NULL) {
+        if (bsp_codec_close_record_locked() != ESP_OK) {
+            status = ESP_FAIL;
+        }
+        esp_codec_dev_delete(record_dev_handle);
+        record_dev_handle = NULL;
+    }
+
+    if (play_codec_if != NULL && audio_codec_delete_codec_if(play_codec_if) != ESP_CODEC_DEV_OK) {
+        status = ESP_FAIL;
+    }
+    play_codec_if = NULL;
+    if (record_codec_if != NULL && audio_codec_delete_codec_if(record_codec_if) != ESP_CODEC_DEV_OK) {
+        status = ESP_FAIL;
+    }
+    record_codec_if = NULL;
+    if (play_ctrl_if != NULL && audio_codec_delete_ctrl_if(play_ctrl_if) != ESP_CODEC_DEV_OK) {
+        status = ESP_FAIL;
+    }
+    play_ctrl_if = NULL;
+    if (record_ctrl_if != NULL && audio_codec_delete_ctrl_if(record_ctrl_if) != ESP_CODEC_DEV_OK) {
+        status = ESP_FAIL;
+    }
+    record_ctrl_if = NULL;
+    if (play_gpio_if != NULL && audio_codec_delete_gpio_if(play_gpio_if) != ESP_CODEC_DEV_OK) {
+        status = ESP_FAIL;
+    }
+    play_gpio_if = NULL;
+    if (i2s_data_if != NULL && audio_codec_delete_data_if(i2s_data_if) != ESP_CODEC_DEV_OK) {
+        status = ESP_FAIL;
+    }
+    i2s_data_if = NULL;
+
+    if (play_dev_open && i2s_tx_chan != NULL) {
+        esp_err_t ret = i2s_channel_disable(i2s_tx_chan);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            status = ESP_FAIL;
+        }
+        play_dev_open = false;
+    }
+    if (i2s_tx_chan != NULL) {
+        esp_err_t ret;
+        ret = i2s_del_channel(i2s_tx_chan);
+        if (ret != ESP_OK) {
+            status = ESP_FAIL;
+        }
+        i2s_tx_chan = NULL;
+    }
+    if (record_dev_open && i2s_rx_chan != NULL) {
+        esp_err_t ret = i2s_channel_disable(i2s_rx_chan);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            status = ESP_FAIL;
+        }
+        record_dev_open = false;
+    }
+    if (i2s_rx_chan != NULL) {
+        esp_err_t ret;
+        ret = i2s_del_channel(i2s_rx_chan);
+        if (ret != ESP_OK) {
+            status = ESP_FAIL;
+        }
+        i2s_rx_chan = NULL;
+    }
+
+    if (codec_mutex != NULL) {
+        xSemaphoreGive(codec_mutex);
+        vSemaphoreDelete(codec_mutex);
+        codec_mutex = NULL;
+    }
+
+    return status;
 }
 
 esp_codec_dev_handle_t bsp_codec_speaker_get(void) {
@@ -1510,47 +1722,50 @@ int bsp_get_feed_channel(void) {
 }
 
 sscma_client_handle_t bsp_sscma_client_init() {
-    static bool initialized = false;
-    if (initialized)
+    if (sscma_client_initialized && sscma_client_handle != NULL)
         return sscma_client_handle;
 
-    if (bsp_io_expander_init() == NULL)
-        return NULL;
+    if (sscma_client_io_handle == NULL) {
+        if (bsp_io_expander_init() == NULL)
+            return NULL;
 
-    if (bsp_exp_io_set_level(BSP_PWR_AI_CHIP, 1) != ESP_OK)
-        return NULL;
-    vTaskDelay(pdMS_TO_TICKS(20));
+        if (bsp_exp_io_set_level(BSP_PWR_AI_CHIP, 1) != ESP_OK)
+            return NULL;
+        vTaskDelay(pdMS_TO_TICKS(20));
 
-    if (bsp_spi_bus_init() != ESP_OK)
-        return NULL;
+        if (bsp_spi_bus_init() != ESP_OK)
+            return NULL;
 
-    // !!!NOTE: SD Card use same SPI bus as sscma client, so we need to disable SD card CS pin first
-    const gpio_config_t io_config = {
-        .pin_bit_mask = (1ULL << BSP_SD_SPI_CS),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    esp_err_t ret = gpio_config(&io_config);
-    if (ret != ESP_OK)
-        return NULL;
+        // !!!NOTE: SD Card use same SPI bus as sscma client, so we need to disable SD card CS pin first
+        const gpio_config_t io_config = {
+            .pin_bit_mask = (1ULL << BSP_SD_SPI_CS),
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        esp_err_t ret = gpio_config(&io_config);
+        if (ret != ESP_OK)
+            return NULL;
 
-    gpio_set_level(BSP_SD_SPI_CS, 1);
+        gpio_set_level(BSP_SD_SPI_CS, 1);
 
-    const sscma_client_io_spi_config_t spi_io_config = {
-        .sync_gpio_num = BSP_SSCMA_CLIENT_SPI_SYNC,
-        .cs_gpio_num = BSP_SSCMA_CLIENT_SPI_CS,
-        .pclk_hz = BSP_SSCMA_CLIENT_SPI_CLK,
-        .spi_mode = 0,
-        .wait_delay = 2,
-        .user_ctx = NULL,
-        .io_expander = io_exp_handle,
-        .flags.sync_use_expander = BSP_SSCMA_CLIENT_RST_USE_EXPANDER,
-    };
+        const sscma_client_io_spi_config_t spi_io_config = {
+            .sync_gpio_num = BSP_SSCMA_CLIENT_SPI_SYNC,
+            .cs_gpio_num = BSP_SSCMA_CLIENT_SPI_CS,
+            .pclk_hz = BSP_SSCMA_CLIENT_SPI_CLK,
+            .spi_mode = 0,
+            .wait_delay = 2,
+            .user_ctx = NULL,
+            .io_expander = io_exp_handle,
+            .flags.sync_use_expander = BSP_SSCMA_CLIENT_RST_USE_EXPANDER,
+        };
 
-    sscma_client_new_io_spi_bus((sscma_client_spi_bus_handle_t)BSP_SSCMA_CLIENT_SPI_NUM, &spi_io_config,
-                                &sscma_client_io_handle);
+        ret = sscma_client_new_io_spi_bus((sscma_client_spi_bus_handle_t)BSP_SSCMA_CLIENT_SPI_NUM, &spi_io_config,
+                                          &sscma_client_io_handle);
+        if (ret != ESP_OK)
+            return NULL;
+    }
 
     sscma_client_config_t sscma_client_config = SSCMA_CLIENT_CONFIG_DEFAULT();
 
@@ -1567,11 +1782,29 @@ sscma_client_handle_t bsp_sscma_client_init() {
     sscma_client_config.io_expander = io_exp_handle;
     sscma_client_config.flags.reset_use_expander = BSP_SSCMA_CLIENT_RST_USE_EXPANDER;
 
-    sscma_client_new(sscma_client_io_handle, &sscma_client_config, &sscma_client_handle);
+    if (sscma_client_new(sscma_client_io_handle, &sscma_client_config, &sscma_client_handle) != ESP_OK)
+        return NULL;
 
-    initialized = true;
+    sscma_client_initialized = true;
 
     return sscma_client_handle;
+}
+
+esp_err_t bsp_sscma_client_deinit(void) {
+    esp_err_t ret;
+
+    if (sscma_client_handle == NULL) {
+        sscma_client_initialized = false;
+        return ESP_OK;
+    }
+
+    ret = sscma_client_del(sscma_client_handle);
+    if (ret == ESP_OK) {
+        sscma_client_handle = NULL;
+        sscma_client_initialized = false;
+    }
+
+    return ret;
 }
 
 sscma_client_flasher_handle_t bsp_sscma_flasher_init() {

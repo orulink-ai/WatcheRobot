@@ -29,6 +29,70 @@ menu "Watcher Logging"
             Include human-readable WiFi disconnect reason names in warning logs.
             Disable this to keep only numeric reason codes and save flash/rodata.
 
+    config WATCHER_DEBUG_CLI_ENABLE
+        bool "Enable serial debug CLI"
+        default n
+        help
+            Start the developer-only UART debug CLI and its app/settings command
+            queue. Disable this for product builds so launcher and Settings do
+            not carry the debug task, command queue, or serial command parser.
+
+endmenu
+
+menu "Watcher App.Center"
+
+    config WATCHER_APP_CENTER_ENABLE
+        bool "Build App.Center package and OTA application support"
+        default n
+        help
+            Compile App.Center catalog, HTTP download, OTA application, and
+            package-transfer support. Keep this disabled in product builds
+            that do not expose App.Center so its catalog and runtime state do
+            not consume internal RAM or flash.
+
+    if WATCHER_APP_CENTER_ENABLE
+
+    config APP_CENTER_REMOTE_LIST_URL
+        string "Remote App.Center list URL"
+        default "https://mr-kid-github.github.io/watche-app-center-catalog-test/apps.json"
+        help
+            HTTP/HTTPS endpoint returning the remote App.Center package list.
+            Catalog v2 entries may declare type=firmware-app with firmware
+            URL, SHA-256, size, image version, and compatibility metadata.
+            Legacy entries without type continue to be treated as 64KB
+            manifest packages using packageUrl/downloadUrl/appUrl/url.
+
+    config APP_CENTER_ALLOW_UNSIGNED_DEV_PACKAGES
+        bool "Allow unsigned developer app packages"
+        default y
+        help
+            Allow App.Center to install packages without a production signature,
+            or packages declaring signature.algorithm as unsigned-dev.
+            Keep this enabled for local developer workflows and sample packages.
+            Disable it for product builds that should only accept signed or
+            trusted-source package metadata.
+
+    config APP_CENTER_TRUSTED_SIGNATURE_ISSUERS
+        string "Trusted App.Center signature issuers"
+        default ""
+        help
+            Optional comma-separated issuer allowlist for package signature
+            metadata. When this list is not empty, packages declaring a
+            production signature algorithm must include signature.issuer and the
+            issuer must be present in this list.
+
+    config APP_CENTER_TRUSTED_SIGNATURE_PUBLIC_KEY_SHA256
+        string "Trusted App.Center signing public key SHA-256 hashes"
+        default ""
+        help
+            Optional comma-separated SHA-256 hashes of trusted ECDSA P-256 public
+            key PEM strings. Production App.Center packages using
+            signature.algorithm = "ecdsa-p256-sha256" must include publicKeyPem
+            and signature fields, and the SHA-256 hash of publicKeyPem must be
+            present in this list.
+
+    endif
+
 endmenu
 
 menu "Watcher Stress"
@@ -55,6 +119,24 @@ menu "Watcher Stress"
 endmenu
 
 menu "Watcher Memory Monitor"
+
+    config WATCHER_LAUNCHER_CACHE_MIN_INTERNAL_FREE_KB
+        int "Minimum internal free RAM for Launcher screen cache (KB)"
+        range 64 512
+        default 112
+        help
+            Retain the Launcher LVGL tree during foreground handoff only when
+            internal free RAM is at or above this threshold.
+
+    config WATCHER_LAUNCHER_CACHE_MIN_INTERNAL_LARGEST_KB
+        int "Minimum internal largest block for Launcher screen cache (KB)"
+        range 16 256
+        default 40
+
+    config WATCHER_LAUNCHER_CACHE_MIN_DMA_LARGEST_KB
+        int "Minimum DMA largest block for Launcher screen cache (KB)"
+        range 16 256
+        default 40
 
     config WATCHER_MEM_MONITOR_ENABLE
         bool "Enable runtime memory monitor"

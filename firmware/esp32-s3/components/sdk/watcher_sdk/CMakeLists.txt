@@ -1,0 +1,23 @@
+idf_component_register(
+    SRCS
+        "src/watcher_sdk.c"
+        "src/watcher_sdk_core.c"
+        "src/watcher_sdk_discovery.c"
+        "src/watcher_sdk_motion_tracker.c"
+        "src/watcher_sdk_protocol.c"
+    INCLUDE_DIRS "include"
+    REQUIRES
+        "anim_service"
+        "behavior_state_service"
+        "camera_service"
+        "control_ingress"
+        "esp_timer"
+        "esp_wifi"
+        "freertos"
+        "json"
+        "lwip"
+        "mcu_led_service"
+        "mcu_motion_service"
+        "sfx_service"
+        "voice_service"
+)

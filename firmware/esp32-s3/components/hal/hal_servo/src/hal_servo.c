@@ -22,6 +22,9 @@
 static bool s_initialized = false;
 static SemaphoreHandle_t s_angle_mutex = NULL;
 static int s_angle[2] = {SERVO_X_DEFAULT_DEG, SERVO_Y_DEFAULT_DEG};
+static uint16_t s_trajectory_sequence_id;
+static hal_servo_feedback_cb_t s_feedback_cb;
+static void *s_feedback_ctx;
 
 static hal_servo_motion_profile_t servo_select_motion_profile(hal_servo_motion_source_t source, int duration_ms) {
     if (source == HAL_SERVO_MOTION_SOURCE_BEHAVIOR && duration_ms > SERVO_IMMEDIATE_DURATION_MS) {
@@ -42,6 +45,8 @@ static mcu_motion_source_t servo_source_to_mcu(hal_servo_motion_source_t source)
         return MCU_MOTION_SOURCE_WS;
     case HAL_SERVO_MOTION_SOURCE_RECOVERY:
         return MCU_MOTION_SOURCE_RECOVERY;
+    case HAL_SERVO_MOTION_SOURCE_RELAY_W1:
+        return MCU_MOTION_SOURCE_RELAY_W1;
     case HAL_SERVO_MOTION_SOURCE_UNKNOWN:
     default:
         return MCU_MOTION_SOURCE_UNKNOWN;
@@ -56,6 +61,30 @@ static uint8_t servo_profile_to_mcu(hal_servo_motion_profile_t profile) {
     default:
         return MCU_MOTION_PROFILE_LINEAR;
     }
+}
+
+static uint16_t servo_next_trajectory_sequence_id(void) {
+    s_trajectory_sequence_id++;
+    if (s_trajectory_sequence_id == 0u) {
+        s_trajectory_sequence_id = 1u;
+    }
+    return s_trajectory_sequence_id;
+}
+
+static void servo_feedback_bridge(const mcu_motion_servo_feedback_t *feedback, void *ctx) {
+    (void)ctx;
+    if (feedback == NULL || s_feedback_cb == NULL) {
+        return;
+    }
+
+    hal_servo_feedback_t hal_feedback = {
+        .axis_mask = feedback->axis_mask,
+        .x_raw = feedback->x_raw,
+        .x_angle_x10 = feedback->x_angle_x10,
+        .y_raw = feedback->y_raw,
+        .y_angle_x10 = feedback->y_angle_x10,
+    };
+    s_feedback_cb(&hal_feedback, s_feedback_ctx);
 }
 #endif
 
@@ -101,6 +130,28 @@ static esp_err_t servo_build_motion_request(uint8_t axis_mask, int x_deg, int y_
     out_request->duration_ms = (uint16_t)((duration_ms <= 0) ? SERVO_IMMEDIATE_DURATION_MS
                                                              : (duration_ms > UINT16_MAX ? UINT16_MAX : duration_ms));
     out_request->motion_profile = servo_profile_to_mcu(profile);
+    out_request->source = servo_source_to_mcu(source);
+    return ESP_OK;
+}
+
+static esp_err_t servo_build_direct_target(uint8_t axis_mask, int x_deg, int y_deg,
+                                           hal_servo_motion_source_t source,
+                                           mcu_motion_direct_target_t *out_request) {
+    if (out_request == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (axis_mask == 0U || (axis_mask & ~(MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y)) != 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (x_deg < 0 || x_deg > 180 || y_deg < 0 || y_deg > 180) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    out_request->axis_mask = axis_mask;
+    out_request->x_deg_x10 = (axis_mask & MCU_MOTION_AXIS_X) != 0U ? (int16_t)(x_deg * 10) : 0;
+    out_request->y_deg_x10 = (axis_mask & MCU_MOTION_AXIS_Y) != 0U ? (int16_t)(y_deg * 10) : 0;
     out_request->source = servo_source_to_mcu(source);
     return ESP_OK;
 }
@@ -154,6 +205,9 @@ esp_err_t hal_servo_init(void) {
     }
 #endif
 
+    s_trajectory_sequence_id = 0u;
+    s_feedback_cb = NULL;
+    s_feedback_ctx = NULL;
     s_initialized = true;
 #if CONFIG_WATCHER_SERVO_MOTION_ENABLE
     ESP_LOGI(TAG, "Servo HAL initialized in coprocessor facade mode; GPIO19/GPIO20 are reserved for mcu_link UART");
@@ -164,8 +218,109 @@ esp_err_t hal_servo_init(void) {
 }
 
 esp_err_t hal_servo_set_angle(servo_axis_t axis, int angle_deg) {
-    return hal_servo_move_smooth_with_source(axis, angle_deg, SERVO_IMMEDIATE_DURATION_MS,
-                                             HAL_SERVO_MOTION_SOURCE_UNKNOWN);
+    return hal_servo_set_direct_with_source_and_seq(axis, angle_deg, HAL_SERVO_MOTION_SOURCE_UNKNOWN, NULL);
+}
+
+esp_err_t hal_servo_set_direct_with_source_and_seq(servo_axis_t axis, int angle_deg,
+                                                   hal_servo_motion_source_t source, uint32_t *out_seq) {
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    mcu_motion_direct_target_t request;
+    esp_err_t ret;
+#endif
+    int clamped_angle;
+
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (axis != SERVO_AXIS_X && axis != SERVO_AXIS_Y) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (angle_deg < 0 || angle_deg > 180) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    clamped_angle = servo_clamp_angle(axis, angle_deg);
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    ret = servo_build_direct_target(axis == SERVO_AXIS_X ? MCU_MOTION_AXIS_X : MCU_MOTION_AXIS_Y,
+                                    axis == SERVO_AXIS_X ? clamped_angle : 0,
+                                    axis == SERVO_AXIS_Y ? clamped_angle : 0, source, &request);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = mcu_motion_submit_direct_target_with_seq(&request, out_seq);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to submit direct servo target: axis=%s angle=%d err=%s",
+                 axis == SERVO_AXIS_X ? "X" : "Y", clamped_angle, esp_err_to_name(ret));
+        return ret;
+    }
+
+    servo_cache_angle(axis, clamped_angle);
+#if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
+    ESP_LOGI(TAG, "Queued direct servo target via coprocessor: axis=%s angle=%d source=%d",
+             axis == SERVO_AXIS_X ? "X" : "Y", clamped_angle, (int)source);
+#endif
+#else
+    if (out_seq != NULL) {
+        *out_seq = 0;
+    }
+    (void)source;
+    servo_cache_angle(axis, clamped_angle);
+    ESP_LOGD(TAG, "Servo motion disabled; cached direct axis=%s angle=%d",
+             axis == SERVO_AXIS_X ? "X" : "Y", clamped_angle);
+#endif
+    return ESP_OK;
+}
+
+esp_err_t hal_servo_set_direct_sync_with_source_and_seq(int x_deg, int y_deg,
+                                                        hal_servo_motion_source_t source, uint32_t *out_seq) {
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    mcu_motion_direct_target_t request;
+    esp_err_t ret;
+#endif
+    int clamped_x;
+    int clamped_y;
+
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (x_deg < 0 || x_deg > 180 || y_deg < 0 || y_deg > 180) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    clamped_x = servo_clamp_angle(SERVO_AXIS_X, x_deg);
+    clamped_y = servo_clamp_angle(SERVO_AXIS_Y, y_deg);
+
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    ret = servo_build_direct_target(MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y, clamped_x, clamped_y, source, &request);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = mcu_motion_submit_direct_target_with_seq(&request, out_seq);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to submit direct sync servo target: x=%d y=%d err=%s", clamped_x, clamped_y,
+                 esp_err_to_name(ret));
+        return ret;
+    }
+
+    servo_cache_sync_angles(clamped_x, clamped_y);
+#if !defined(WATCHER_STRESS_BUILD) && !defined(CONFIG_WATCHER_STRESS_BUILD)
+    ESP_LOGI(TAG, "Queued direct sync servo target via coprocessor: x=%d y=%d source=%d", clamped_x, clamped_y,
+             (int)source);
+#endif
+#else
+    if (out_seq != NULL) {
+        *out_seq = 0;
+    }
+    (void)source;
+    servo_cache_sync_angles(clamped_x, clamped_y);
+    ESP_LOGD(TAG, "Servo motion disabled; cached direct x=%d y=%d", clamped_x, clamped_y);
+#endif
+    return ESP_OK;
 }
 
 esp_err_t hal_servo_move_smooth(servo_axis_t axis, int angle_deg, int duration_ms) {
@@ -407,6 +562,122 @@ esp_err_t hal_servo_cancel_all_with_source(hal_servo_motion_source_t source) {
     return mcu_motion_stop(servo_source_to_mcu(source));
 #else
     (void)source;
+    return ESP_OK;
+#endif
+}
+
+esp_err_t hal_servo_pwm_unlock(uint8_t axis_mask) {
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    mcu_motion_pwm_unlock_request_t request = {
+        .axis_mask = axis_mask,
+        .source = MCU_MOTION_SOURCE_WS,
+    };
+#endif
+
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (axis_mask == 0u || (axis_mask & (uint8_t)~(MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y)) != 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    return mcu_motion_pwm_unlock(&request);
+#else
+    return ESP_OK;
+#endif
+}
+
+esp_err_t hal_servo_pwm_lock(uint8_t axis_mask) {
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    mcu_motion_pwm_lock_request_t request = {
+        .axis_mask = axis_mask,
+        .source = MCU_MOTION_SOURCE_WS,
+    };
+#endif
+
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (axis_mask == 0u || (axis_mask & (uint8_t)~(MCU_MOTION_AXIS_X | MCU_MOTION_AXIS_Y)) != 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    return mcu_motion_pwm_lock(&request);
+#else
+    return ESP_OK;
+#endif
+}
+
+esp_err_t hal_servo_play_trajectory(const hal_servo_trajectory_frame_t *frames,
+                                    size_t frame_count,
+                                    hal_servo_motion_source_t source) {
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    mcu_motion_chunked_sequence_t sequence = {0};
+    esp_err_t ret;
+#endif
+
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (frames == NULL || frame_count == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    if (frame_count > MCU_MOTION_CHUNKED_SEQUENCE_MAX_SEGMENTS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    sequence.sequence_id = servo_next_trajectory_sequence_id();
+    sequence.source = servo_source_to_mcu(source);
+    for (size_t index = 0u; index < frame_count; index++) {
+        const hal_servo_trajectory_frame_t *frame = &frames[index];
+        mcu_motion_segment_t *segment;
+
+        if (frame->axis_mask == 0u ||
+            (frame->axis_mask & (uint8_t)~(HAL_SERVO_AXIS_MASK_X | HAL_SERVO_AXIS_MASK_Y)) != 0u ||
+            frame->duration_ms == 0u) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        if (((frame->axis_mask & HAL_SERVO_AXIS_MASK_X) != 0u &&
+             (frame->x_deg_x10 < 0 || frame->x_deg_x10 > 1800)) ||
+            ((frame->axis_mask & HAL_SERVO_AXIS_MASK_Y) != 0u &&
+             (frame->y_deg_x10 < 0 || frame->y_deg_x10 > 1800))) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        segment = &sequence.segments[sequence.segment_count];
+        segment->axis_mask = frame->axis_mask;
+        segment->x_deg_x10 = frame->x_deg_x10;
+        segment->y_deg_x10 = frame->y_deg_x10;
+        segment->duration_ms = frame->duration_ms;
+        segment->motion_profile = servo_profile_to_mcu(frame->motion_profile);
+        sequence.segment_count++;
+    }
+
+    ret = mcu_motion_submit_chunked_sequence(&sequence);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    return ESP_OK;
+#else
+    return ESP_OK;
+#endif
+}
+
+esp_err_t hal_servo_set_feedback_callback(hal_servo_feedback_cb_t cb, void *ctx) {
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_feedback_cb = cb;
+    s_feedback_ctx = ctx;
+#if CONFIG_WATCHER_SERVO_MOTION_ENABLE
+    return mcu_motion_set_servo_feedback_callback(cb != NULL ? servo_feedback_bridge : NULL, NULL);
+#else
     return ESP_OK;
 #endif
 }

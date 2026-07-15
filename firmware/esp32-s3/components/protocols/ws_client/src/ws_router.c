@@ -33,6 +33,16 @@ static int get_int(cJSON *obj, const char *key, int default_val) {
     return default_val;
 }
 
+static int get_int_any(cJSON *obj, const char *key_a, const char *key_b, int default_val) {
+    int value;
+
+    value = get_int(obj, key_a, default_val);
+    if (value != default_val || key_b == NULL) {
+        return value;
+    }
+    return get_int(obj, key_b, default_val);
+}
+
 static bool get_float(cJSON *obj, const char *key, float *out_value) {
     cJSON *item = cJSON_GetObjectItem(obj, key);
     if (item && cJSON_IsNumber(item) && out_value) {
@@ -70,6 +80,18 @@ static void fill_sys_ack(cJSON *root, ws_sys_ack_t *ack) {
             copy_string(ack->command_id, sizeof(ack->command_id), get_string(data, "ref_id"));
         }
         copy_string(ack->message, sizeof(ack->message), get_string(data, "message"));
+        cJSON *negotiated = get_object(data, "negotiated");
+        cJSON *audio_uplink = negotiated != NULL ? get_object(negotiated, "audio_uplink") : NULL;
+        if (audio_uplink != NULL) {
+            copy_string(ack->audio_uplink_codec, sizeof(ack->audio_uplink_codec),
+                        get_string(audio_uplink, "codec"));
+            copy_string(ack->audio_uplink_packetization, sizeof(ack->audio_uplink_packetization),
+                        get_string(audio_uplink, "packetization"));
+            ack->audio_uplink_sample_rate = get_int(audio_uplink, "sample_rate", 0);
+            ack->audio_uplink_channels = get_int(audio_uplink, "channels", 0);
+            ack->audio_uplink_frame_duration_ms = get_int(audio_uplink, "frame_duration_ms", 0);
+            ack->audio_uplink_version = get_int(audio_uplink, "version", 0);
+        }
     }
 }
 
@@ -106,6 +128,106 @@ static void fill_servo_cmd(cJSON *root, ws_servo_cmd_t *cmd) {
     cmd->has_x = get_float(data, "x_deg", &cmd->x_deg);
     cmd->has_y = get_float(data, "y_deg", &cmd->y_deg);
     cmd->duration_ms = get_int(data, "duration_ms", 100);
+}
+
+static void fill_servo_pwm_unlock_cmd(cJSON *root, ws_servo_pwm_unlock_cmd_t *cmd) {
+    cJSON *data = get_object(root, "data");
+    cJSON *axes;
+    cJSON *axis;
+
+    memset(cmd, 0, sizeof(*cmd));
+    if (!data) {
+        return;
+    }
+
+    copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
+    axes = cJSON_GetObjectItem(data, "axes");
+    if (cJSON_IsArray(axes)) {
+        cJSON_ArrayForEach(axis, axes) {
+            const char *value = cJSON_IsString(axis) ? axis->valuestring : NULL;
+            if (value == NULL || value[0] == '\0') {
+                continue;
+            }
+            if (value[0] == 'x' || value[0] == 'X') {
+                cmd->axis_mask |= 0x01u;
+            } else if (value[0] == 'y' || value[0] == 'Y') {
+                cmd->axis_mask |= 0x02u;
+            }
+        }
+        return;
+    }
+
+    axis = cJSON_GetObjectItem(data, "axis");
+    if (cJSON_IsString(axis) && axis->valuestring != NULL) {
+        if (axis->valuestring[0] == 'x' || axis->valuestring[0] == 'X') {
+            cmd->axis_mask |= 0x01u;
+        } else if (axis->valuestring[0] == 'y' || axis->valuestring[0] == 'Y') {
+            cmd->axis_mask |= 0x02u;
+        }
+    }
+}
+
+static void fill_servo_trajectory_cmd(cJSON *root, ws_servo_trajectory_cmd_t *cmd) {
+    cJSON *data = get_object(root, "data");
+    cJSON *frames;
+    cJSON *frame;
+    int count = 0;
+
+    memset(cmd, 0, sizeof(*cmd));
+    if (!data) {
+        return;
+    }
+
+    copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
+    frames = cJSON_GetObjectItem(data, "frames");
+    if (!cJSON_IsArray(frames)) {
+        return;
+    }
+
+    cJSON_ArrayForEach(frame, frames) {
+        ws_servo_trajectory_frame_t *out;
+
+        if (!cJSON_IsObject(frame) || count >= WS_SERVO_TRAJECTORY_MAX_FRAMES) {
+            continue;
+        }
+
+        out = &cmd->frames[count];
+        if (!get_float(frame, "x_deg", &out->x_deg) || !get_float(frame, "y_deg", &out->y_deg)) {
+            continue;
+        }
+        out->duration_ms = get_int(frame, "duration_ms", 80);
+        out->axis_mask = 0x03u;
+        out->motion_profile = 0u;
+        cJSON *axes = cJSON_GetObjectItem(frame, "axes");
+        if (cJSON_IsArray(axes)) {
+            cJSON *axis;
+            uint8_t axis_mask = 0u;
+            cJSON_ArrayForEach(axis, axes) {
+                const char *value = cJSON_IsString(axis) ? axis->valuestring : NULL;
+                if (value == NULL || value[0] == '\0') {
+                    continue;
+                }
+                if (value[0] == 'x' || value[0] == 'X') {
+                    axis_mask |= 0x01u;
+                } else if (value[0] == 'y' || value[0] == 'Y') {
+                    axis_mask |= 0x02u;
+                }
+            }
+            if (axis_mask != 0u) {
+                out->axis_mask = axis_mask;
+            }
+        }
+        {
+            const char *profile = get_string(frame, "profile");
+            if (profile != NULL &&
+                ((profile[0] == 'e' || profile[0] == 'E') || strcmp(profile, "1") == 0)) {
+                out->motion_profile = 1u;
+            }
+        }
+        count++;
+    }
+
+    cmd->frame_count = count;
 }
 
 static void fill_motion_jog_cmd(cJSON *root, ws_motion_jog_cmd_t *cmd) {
@@ -151,6 +273,43 @@ static void fill_state_cmd(cJSON *root, ws_state_cmd_t *cmd) {
     if (data != NULL) {
         copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
         copy_string(cmd->state_id, sizeof(cmd->state_id), get_string(data, "state_id"));
+    }
+}
+
+static void fill_sound_cmd(cJSON *root, ws_sound_cmd_t *cmd) {
+    cJSON *data = get_object(root, "data");
+
+    memset(cmd, 0, sizeof(*cmd));
+    if (data != NULL) {
+        copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
+        copy_string(cmd->sound_id, sizeof(cmd->sound_id), get_string(data, "sound_id"));
+        if (cmd->sound_id[0] == '\0') {
+            copy_string(cmd->sound_id, sizeof(cmd->sound_id), get_string(data, "sound_file"));
+        }
+        cmd->delay_ms = get_int(data, "delay_ms", 0);
+    }
+}
+
+static void fill_light_cmd(cJSON *root, ws_light_cmd_t *cmd) {
+    cJSON *data = get_object(root, "data");
+
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->brightness = 255;
+    cmd->green = 255;
+    if (data != NULL) {
+        copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
+        copy_string(cmd->mode, sizeof(cmd->mode), get_string(data, "mode"));
+        copy_string(cmd->effect, sizeof(cmd->effect), get_string(data, "effect"));
+        copy_string(cmd->zone, sizeof(cmd->zone), get_string(data, "zone"));
+        cmd->red = get_int(data, "red", 0);
+        cmd->green = get_int(data, "green", 255);
+        cmd->blue = get_int(data, "blue", 0);
+        cmd->secondary_red = get_int(data, "secondary_red", 0);
+        cmd->secondary_green = get_int(data, "secondary_green", 0);
+        cmd->secondary_blue = get_int(data, "secondary_blue", 0);
+        cmd->brightness = get_int(data, "brightness", 255);
+        cmd->period_ms = get_int(data, "period_ms", get_int(data, "hold_ms", 0));
+        cmd->repeat_count = get_int(data, "repeat_count", 0);
     }
 }
 
@@ -207,7 +366,36 @@ static void fill_transfer_cmd(cJSON *root, const char *message_type, ws_transfer
     copy_string(cmd->message_type, sizeof(cmd->message_type), message_type);
     if (data) {
         copy_string(cmd->transfer_id, sizeof(cmd->transfer_id), get_string(data, "transfer_id"));
+        copy_string(cmd->command_id, sizeof(cmd->command_id), get_string(data, "command_id"));
+        if (cmd->transfer_id[0] == '\0') {
+            copy_string(cmd->transfer_id, sizeof(cmd->transfer_id), cmd->command_id);
+        }
+        copy_string(cmd->app_id, sizeof(cmd->app_id), get_string(data, "app_id"));
+        if (cmd->app_id[0] == '\0') {
+            copy_string(cmd->app_id, sizeof(cmd->app_id), get_string(data, "appId"));
+        }
+        copy_string(cmd->name, sizeof(cmd->name), get_string(data, "name"));
+        copy_string(cmd->version, sizeof(cmd->version), get_string(data, "version"));
+        copy_string(cmd->description, sizeof(cmd->description), get_string(data, "description"));
+        copy_string(cmd->package_type, sizeof(cmd->package_type), get_string(data, "type"));
+        if (cmd->package_type[0] == '\0') {
+            copy_string(cmd->package_type, sizeof(cmd->package_type), get_string(data, "package_type"));
+        }
+        copy_string(cmd->source_url, sizeof(cmd->source_url), get_string(data, "source_url"));
+        if (cmd->source_url[0] == '\0') {
+            copy_string(cmd->source_url, sizeof(cmd->source_url), get_string(data, "url"));
+        }
+        if (cmd->source_url[0] == '\0') {
+            copy_string(cmd->source_url, sizeof(cmd->source_url), get_string(data, "firmware_url"));
+        }
+        copy_string(cmd->image_version, sizeof(cmd->image_version), get_string(data, "image_version"));
+        if (cmd->image_version[0] == '\0') {
+            copy_string(cmd->image_version, sizeof(cmd->image_version), get_string(data, "imageVersion"));
+        }
+        copy_string(cmd->file_name, sizeof(cmd->file_name), get_string(data, "file_name"));
         copy_string(cmd->sha256, sizeof(cmd->sha256), get_string(data, "sha256"));
+        cmd->size_bytes = (size_t)get_int_any(data, "size_bytes", "sizeBytes", 0);
+        copy_string(cmd->reason, sizeof(cmd->reason), get_string(data, "reason"));
     }
 }
 
@@ -275,6 +463,34 @@ ws_msg_type_t ws_route_message(const char *json_str) {
             fill_servo_cmd(root, &cmd);
             g_router.on_servo(&cmd);
         }
+    } else if (strcmp(type, "ctrl.servo.pwm.unlock") == 0) {
+        msg_type = WS_MSG_CTRL_SERVO_PWM_UNLOCK;
+        if (g_router.on_servo_pwm_unlock) {
+            ws_servo_pwm_unlock_cmd_t cmd;
+            fill_servo_pwm_unlock_cmd(root, &cmd);
+            g_router.on_servo_pwm_unlock(&cmd);
+        }
+    } else if (strcmp(type, "ctrl.servo.pwm.lock") == 0) {
+        msg_type = WS_MSG_CTRL_SERVO_PWM_LOCK;
+        if (g_router.on_servo_pwm_lock) {
+            ws_servo_pwm_unlock_cmd_t cmd;
+            fill_servo_pwm_unlock_cmd(root, &cmd);
+            g_router.on_servo_pwm_lock(&cmd);
+        }
+    } else if (strcmp(type, "ctrl.servo.trajectory.play") == 0) {
+        msg_type = WS_MSG_CTRL_SERVO_TRAJECTORY_PLAY;
+        if (g_router.on_servo_trajectory_play) {
+            ws_servo_trajectory_cmd_t cmd;
+            fill_servo_trajectory_cmd(root, &cmd);
+            g_router.on_servo_trajectory_play(&cmd);
+        }
+    } else if (strcmp(type, "ctrl.light.set") == 0) {
+        msg_type = WS_MSG_CTRL_LIGHT_SET;
+        if (g_router.on_light_set) {
+            ws_light_cmd_t cmd;
+            fill_light_cmd(root, &cmd);
+            g_router.on_light_set(&cmd);
+        }
     } else if (strcmp(type, "ctrl.motion.jog") == 0) {
         msg_type = WS_MSG_CTRL_MOTION_JOG;
         if (g_router.on_motion_jog) {
@@ -307,6 +523,13 @@ ws_msg_type_t ws_route_message(const char *json_str) {
             ws_state_cmd_t cmd;
             fill_state_cmd(root, &cmd);
             g_router.on_state_set(&cmd);
+        }
+    } else if (strcmp(type, "ctrl.sound.play") == 0) {
+        msg_type = WS_MSG_CTRL_SOUND_PLAY;
+        if (g_router.on_sound_play) {
+            ws_sound_cmd_t cmd;
+            fill_sound_cmd(root, &cmd);
+            g_router.on_sound_play(&cmd);
         }
     } else if (strcmp(type, "ctrl.camera.video_config") == 0) {
         msg_type = WS_MSG_CTRL_CAMERA_VIDEO_CONFIG;
@@ -373,6 +596,55 @@ ws_msg_type_t ws_route_message(const char *json_str) {
         }
     } else if (strcmp(type, "xfer.ota.checksum") == 0) {
         msg_type = WS_MSG_XFER_OTA_CHECKSUM;
+        if (g_router.on_transfer) {
+            ws_transfer_cmd_t cmd;
+            fill_transfer_cmd(root, type, &cmd);
+            g_router.on_transfer(&cmd);
+        }
+    } else if (strcmp(type, "app.package.transfer.begin") == 0) {
+        msg_type = WS_MSG_APP_PACKAGE_TRANSFER_BEGIN;
+        if (g_router.on_transfer) {
+            ws_transfer_cmd_t cmd;
+            fill_transfer_cmd(root, type, &cmd);
+            g_router.on_transfer(&cmd);
+        }
+    } else if (strcmp(type, "app.package.transfer.commit") == 0) {
+        msg_type = WS_MSG_APP_PACKAGE_TRANSFER_COMMIT;
+        if (g_router.on_transfer) {
+            ws_transfer_cmd_t cmd;
+            fill_transfer_cmd(root, type, &cmd);
+            g_router.on_transfer(&cmd);
+        }
+    } else if (strcmp(type, "app.package.transfer.abort") == 0) {
+        msg_type = WS_MSG_APP_PACKAGE_TRANSFER_ABORT;
+        if (g_router.on_transfer) {
+            ws_transfer_cmd_t cmd;
+            fill_transfer_cmd(root, type, &cmd);
+            g_router.on_transfer(&cmd);
+        }
+    } else if (strcmp(type, "app.package.list") == 0) {
+        msg_type = WS_MSG_APP_PACKAGE_LIST;
+        if (g_router.on_transfer) {
+            ws_transfer_cmd_t cmd;
+            fill_transfer_cmd(root, type, &cmd);
+            g_router.on_transfer(&cmd);
+        }
+    } else if (strcmp(type, "app.package.install") == 0) {
+        msg_type = WS_MSG_APP_PACKAGE_INSTALL;
+        if (g_router.on_transfer) {
+            ws_transfer_cmd_t cmd;
+            fill_transfer_cmd(root, type, &cmd);
+            g_router.on_transfer(&cmd);
+        }
+    } else if (strcmp(type, "app.package.open") == 0) {
+        msg_type = WS_MSG_APP_PACKAGE_OPEN;
+        if (g_router.on_transfer) {
+            ws_transfer_cmd_t cmd;
+            fill_transfer_cmd(root, type, &cmd);
+            g_router.on_transfer(&cmd);
+        }
+    } else if (strcmp(type, "app.package.uninstall") == 0) {
+        msg_type = WS_MSG_APP_PACKAGE_UNINSTALL;
         if (g_router.on_transfer) {
             ws_transfer_cmd_t cmd;
             fill_transfer_cmd(root, type, &cmd);

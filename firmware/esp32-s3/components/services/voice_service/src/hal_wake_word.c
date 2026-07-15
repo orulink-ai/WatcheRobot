@@ -35,7 +35,9 @@
 
 #define DETECTION_RUNNING_BIT (1 << 0)
 #define DETECTION_FETCH_ACTIVE_BIT (1 << 1)
+#define DETECTION_EXIT_REQUESTED_BIT (1 << 2)
 #define DETECTION_STOP_WAIT_MS 100
+#define DETECTION_TASK_EXIT_WAIT_MS 500
 #define MAX_WAKE_WORDS 16
 #define MAX_WAKE_WORD_LEN 32
 #define DETECTION_TASK_STACK CONFIG_WAKE_WORD_TASK_STACK_SIZE
@@ -95,9 +97,14 @@ static void detection_task(void *arg) {
     while (1) {
         /* Wait for detection to be enabled */
         EventBits_t bits =
-            xEventGroupWaitBits(ctx->event_group, DETECTION_RUNNING_BIT, pdFALSE, /* don't clear on exit */
-                                pdTRUE,                                           /* wait for all bits */
+            xEventGroupWaitBits(ctx->event_group, DETECTION_RUNNING_BIT | DETECTION_EXIT_REQUESTED_BIT,
+                                pdFALSE, /* don't clear on exit */
+                                pdFALSE, /* wake when either run or exit is requested */
                                 portMAX_DELAY);
+
+        if (bits & DETECTION_EXIT_REQUESTED_BIT) {
+            break;
+        }
 
         if (!(bits & DETECTION_RUNNING_BIT)) {
             continue;
@@ -107,6 +114,10 @@ static void detection_task(void *arg) {
          * This ensures we only fetch() after data has been fed, preventing ringbuffer empty warnings.
          * Using Task Notification (45% faster than semaphore, less RAM). */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        if (xEventGroupGetBits(ctx->event_group) & DETECTION_EXIT_REQUESTED_BIT) {
+            break;
+        }
 
         if (!(xEventGroupGetBits(ctx->event_group) & DETECTION_RUNNING_BIT)) {
             continue;
@@ -150,8 +161,20 @@ static void detection_task(void *arg) {
         taskYIELD();
     }
 
-    ESP_LOGW(TAG, "Detection task exiting (unexpected)");
+    ESP_LOGI(TAG, "Detection task exiting");
+    ctx->detection_task = NULL;
     vTaskDelete(NULL);
+}
+
+static bool wait_for_detection_task_exit(wake_word_ctx_t *ctx, uint32_t timeout_ms) {
+    uint32_t waited_ms = 0;
+
+    while (ctx->detection_task != NULL && waited_ms < timeout_ms) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        waited_ms += 10;
+    }
+
+    return ctx->detection_task == NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -195,6 +218,24 @@ static int parse_wake_words(wake_word_ctx_t *ctx, const char *wake_words_str) {
     }
 
     return ctx->wake_word_count;
+}
+
+static void wake_word_release_models(wake_word_ctx_t *ctx) {
+    if (ctx == NULL || ctx->models == NULL) {
+        return;
+    }
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3) && !defined(CONFIG_MODEL_IN_SDCARD)
+    /* ESP-SR mmap models intentionally stay cached. The upstream mmap deinit path
+     * frees file/data pointers that refer to mapped flash, which can assert in
+     * heap_caps_free() during voice app close. Reuse the process-wide static
+     * model list across voice runtime restarts instead. */
+    ESP_LOGI(TAG, "ESP-SR mmap model cache retained; AFE/task/input buffer are released");
+    ctx->models = NULL;
+#else
+    esp_srmodel_deinit(ctx->models);
+    ctx->models = NULL;
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -276,7 +317,7 @@ wake_word_ctx_t *hal_wake_word_init(const wake_word_config_t *config) {
 
     if (wakenet_model == NULL) {
         ESP_LOGE(TAG, "No wakenet model found");
-        esp_srmodel_deinit(ctx->models);
+        wake_word_release_models(ctx);
         vSemaphoreDelete(ctx->state_lock);
         vEventGroupDelete(ctx->event_group);
         free(ctx);
@@ -286,7 +327,7 @@ wake_word_ctx_t *hal_wake_word_init(const wake_word_config_t *config) {
     afe_config_t *afe_config = (afe_config_t *)calloc(1, sizeof(afe_config_t));
     if (afe_config == NULL) {
         ESP_LOGE(TAG, "Failed to init AFE config");
-        esp_srmodel_deinit(ctx->models);
+        wake_word_release_models(ctx);
         vSemaphoreDelete(ctx->state_lock);
         vEventGroupDelete(ctx->event_group);
         free(ctx);
@@ -319,7 +360,7 @@ wake_word_ctx_t *hal_wake_word_init(const wake_word_config_t *config) {
     if (ctx->afe_iface == NULL) {
         ESP_LOGE(TAG, "Failed to get AFE interface");
         free(afe_config);
-        esp_srmodel_deinit(ctx->models);
+        wake_word_release_models(ctx);
         vSemaphoreDelete(ctx->state_lock);
         vEventGroupDelete(ctx->event_group);
         free(ctx);
@@ -331,7 +372,7 @@ wake_word_ctx_t *hal_wake_word_init(const wake_word_config_t *config) {
     if (ctx->afe_data == NULL) {
         ESP_LOGE(TAG, "Failed to create AFE data");
         free(afe_config);
-        esp_srmodel_deinit(ctx->models);
+        wake_word_release_models(ctx);
         vSemaphoreDelete(ctx->state_lock);
         vEventGroupDelete(ctx->event_group);
         free(ctx);
@@ -350,7 +391,7 @@ wake_word_ctx_t *hal_wake_word_init(const wake_word_config_t *config) {
         ESP_LOGE(TAG, "Failed to allocate input buffer");
         ctx->afe_iface->destroy(ctx->afe_data);
         free(afe_config);
-        esp_srmodel_deinit(ctx->models);
+        wake_word_release_models(ctx);
         vSemaphoreDelete(ctx->state_lock);
         vEventGroupDelete(ctx->event_group);
         free(ctx);
@@ -369,7 +410,7 @@ wake_word_ctx_t *hal_wake_word_init(const wake_word_config_t *config) {
         ESP_LOGE(TAG, "Failed to create detection task");
         heap_caps_free(ctx->input_buffer);
         ctx->afe_iface->destroy(ctx->afe_data);
-        esp_srmodel_deinit(ctx->models);
+        wake_word_release_models(ctx);
         vSemaphoreDelete(ctx->state_lock);
         vEventGroupDelete(ctx->event_group);
         free(ctx);
@@ -532,10 +573,18 @@ void hal_wake_word_deinit(wake_word_ctx_t *ctx) {
     /* Stop detection first */
     hal_wake_word_stop(ctx);
 
-    /* Delete detection task */
+    /* Request cooperative task exit before destroying AFE/model resources.
+     * The detection task may be blocked waiting for audio notification; wake it
+     * so it can observe the exit bit and release its own stack cleanly. */
     if (ctx->detection_task != NULL) {
-        vTaskDelete(ctx->detection_task);
-        ctx->detection_task = NULL;
+        xEventGroupSetBits(ctx->event_group, DETECTION_EXIT_REQUESTED_BIT);
+        xTaskNotifyGive(ctx->detection_task);
+        if (!wait_for_detection_task_exit(ctx, DETECTION_TASK_EXIT_WAIT_MS)) {
+            ESP_LOGW(TAG, "Detection task did not exit within %u ms; deleting task",
+                     (unsigned)DETECTION_TASK_EXIT_WAIT_MS);
+            vTaskDelete(ctx->detection_task);
+            ctx->detection_task = NULL;
+        }
     }
 
     /* Free input buffer */
@@ -552,8 +601,7 @@ void hal_wake_word_deinit(wake_word_ctx_t *ctx) {
 
     /* Deinit models */
     if (ctx->models != NULL) {
-        esp_srmodel_deinit(ctx->models);
-        ctx->models = NULL;
+        wake_word_release_models(ctx);
     }
 
     /* Delete event group */

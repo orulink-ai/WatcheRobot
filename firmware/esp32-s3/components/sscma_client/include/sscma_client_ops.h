@@ -125,7 +125,7 @@ esp_err_t sscma_client_available(sscma_client_handle_t client, size_t *ret_avail
  * @brief Register callback
  *
  * @param[in] client SCCMA client handle
- * @param[in] callback SCCMA client callback
+ * @param[in] callback SCCMA client callback, or NULL to unregister callbacks
  * @param[in] user_ctx User context
  * @return
  *          - ESP_OK on success

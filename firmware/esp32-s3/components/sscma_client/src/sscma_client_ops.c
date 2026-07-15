@@ -39,6 +39,7 @@ const int error_map[] = {
 
 #define SSCMA_CLIENT_CMD_ERROR_CODE(err)                                                                               \
     (error_map[(err & 0x0F) > (CMD_EUNKNOWN - 1) ? (CMD_EUNKNOWN - 1) : (err & 0x0F)])
+#define SSCMA_CLIENT_TASK_EXIT_WAIT_MS 300
 
 static inline void *__malloc(size_t sz) {
 #ifdef CONFIG_SSCMA_ALLOC_SMALL_SHORTTERM_MEM_EXTERNALLY
@@ -143,11 +144,65 @@ void sscma_client_reply_clear(sscma_client_reply_t *reply) {
     reply->len = 0;
 }
 
+static void sscma_client_delete_task(TaskHandle_t *handle) {
+    if (handle == NULL || *handle == NULL) {
+        return;
+    }
+
+    vTaskDelete(*handle);
+    *handle = NULL;
+}
+
+static void sscma_client_delete_runtime_tasks(sscma_client_handle_t client) {
+    int64_t deadline_us;
+
+    if (client == NULL) {
+        return;
+    }
+
+    client->on_connect = NULL;
+    client->on_disconnect = NULL;
+    client->on_response = NULL;
+    client->on_event = NULL;
+    client->on_log = NULL;
+    client->user_ctx = NULL;
+    client->closing = true;
+    client->inited = false;
+    deadline_us = esp_timer_get_time() + (SSCMA_CLIENT_TASK_EXIT_WAIT_MS * 1000LL);
+    while ((client->process_task.handle != NULL || client->monitor_task.handle != NULL) &&
+           esp_timer_get_time() < deadline_us) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    if (client->process_task.handle != NULL || client->monitor_task.handle != NULL) {
+        ESP_LOGW(TAG, "sscma runtime tasks did not exit in %d ms; forcing delete",
+                 SSCMA_CLIENT_TASK_EXIT_WAIT_MS);
+        sscma_client_delete_task(&client->process_task.handle);
+        sscma_client_delete_task(&client->monitor_task.handle);
+    }
+}
+
 static void sscma_client_monitor(void *arg) {
     sscma_client_handle_t client = (sscma_client_handle_t)arg;
     sscma_client_reply_t reply;
     while (true) {
-        xQueueReceive(client->reply_queue, &reply, portMAX_DELAY);
+        if (client->closing) {
+            break;
+        }
+
+        memset(&reply, 0, sizeof(reply));
+        if (xQueueReceive(client->reply_queue, &reply, pdMS_TO_TICKS(100)) != pdTRUE) {
+            continue;
+        }
+        if (client->closing) {
+            sscma_client_reply_clear(&reply);
+            break;
+        }
+
+        if (reply.payload == NULL) {
+            sscma_client_reply_clear(&reply);
+            continue;
+        }
 
         cJSON *type = cJSON_GetObjectItem(reply.payload, "type");
         if (type == NULL) {
@@ -180,6 +235,9 @@ static void sscma_client_monitor(void *arg) {
 
         sscma_client_reply_clear(&reply);
     }
+
+    client->monitor_task.handle = NULL;
+    vTaskDelete(NULL);
 }
 
 static void sscma_client_process(void *arg) {
@@ -190,6 +248,9 @@ static void sscma_client_process(void *arg) {
     sscma_client_reply_t reply;
     while (true) {
         vTaskDelay(10 / portTICK_PERIOD_MS);
+        if (client->closing) {
+            break;
+        }
         if (client->inited == false) {
             continue;
         }
@@ -364,6 +425,9 @@ static void sscma_client_process(void *arg) {
             }
         }
     }
+
+    client->process_task.handle = NULL;
+    vTaskDelete(NULL);
 }
 
 esp_err_t sscma_client_new(const sscma_client_io_handle_t io, const sscma_client_config_t *config,
@@ -381,6 +445,7 @@ esp_err_t sscma_client_new(const sscma_client_io_handle_t io, const sscma_client
     ESP_GOTO_ON_FALSE(client, ESP_ERR_NO_MEM, err, TAG, "no mem for sscma client");
     client->io = io;
     client->inited = false;
+    client->closing = false;
     client->flasher = NULL;
 
     if (config->reset_gpio_num >= 0) {
@@ -494,6 +559,7 @@ esp_err_t sscma_client_new(const sscma_client_io_handle_t io, const sscma_client
 
 err:
     if (client) {
+        sscma_client_delete_runtime_tasks(client);
         if (client->rx_buffer.data) {
             free(client->rx_buffer.data);
         }
@@ -511,28 +577,22 @@ err:
         if (client->request_list) {
             free(client->request_list);
         }
-        if (client->process_task.handle) {
-            vTaskDelete(client->process_task.handle);
 #ifdef CONFIG_SSCMA_PROCESS_TASK_STACK_ALLOC_EXTERNAL
-            if (client->process_task.stack) {
-                free(client->process_task.stack);
-            }
-            if (client->process_task.task) {
-                free(client->process_task.task);
-            }
-#endif
+        if (client->process_task.stack) {
+            free(client->process_task.stack);
         }
-        if (client->monitor_task.handle) {
-            vTaskDelete(client->monitor_task.handle);
+        if (client->process_task.task) {
+            free(client->process_task.task);
+        }
+#endif
 #ifdef CONFIG_SSCMA_MONITOR_TASK_STACK_ALLOC_EXTERNAL
-            if (client->monitor_task.stack) {
-                free(client->monitor_task.stack);
-            }
-            if (client->monitor_task.task) {
-                free(client->monitor_task.task);
-            }
-#endif
+        if (client->monitor_task.stack) {
+            free(client->monitor_task.stack);
         }
+        if (client->monitor_task.task) {
+            free(client->monitor_task.task);
+        }
+#endif
         free(client);
     }
     return ret;
@@ -540,6 +600,8 @@ err:
 
 esp_err_t sscma_client_del(sscma_client_handle_t client) {
     if (client) {
+        sscma_client_delete_runtime_tasks(client);
+
         if (client->reset_gpio_num >= 0) {
             if (client->io_expander) {
                 esp_io_expander_set_dir(client->io_expander, client->reset_gpio_num, IO_EXPANDER_OUTPUT);
@@ -555,10 +617,12 @@ esp_err_t sscma_client_del(sscma_client_handle_t client) {
                 gpio_reset_pin(client->reset_gpio_num);
             }
         }
-        vQueueDelete(client->reply_queue);
+        if (client->reply_queue) {
+            vQueueDelete(client->reply_queue);
+        }
 
         sscma_client_request_t *first_req, *next_req = NULL;
-        if (listCURRENT_LIST_LENGTH(client->request_list) > (UBaseType_t)0) {
+        if (client->request_list != NULL && listCURRENT_LIST_LENGTH(client->request_list) > (UBaseType_t)0) {
             listGET_OWNER_OF_NEXT_ENTRY(first_req, client->request_list);
             do {
                 listGET_OWNER_OF_NEXT_ENTRY(next_req, client->request_list);
@@ -568,11 +632,15 @@ esp_err_t sscma_client_del(sscma_client_handle_t client) {
             } while (next_req != first_req);
         }
 
-        free(client->request_list);
-        free(client->rx_buffer.data);
-        free(client->tx_buffer.data);
-        vTaskDelete(client->process_task.handle);
-        vTaskDelete(client->monitor_task.handle);
+        if (client->request_list) {
+            free(client->request_list);
+        }
+        if (client->rx_buffer.data) {
+            free(client->rx_buffer.data);
+        }
+        if (client->tx_buffer.data) {
+            free(client->tx_buffer.data);
+        }
 
 #ifdef CONFIG_SSCMA_PROCESS_TASK_STACK_ALLOC_EXTERNAL
         free(client->process_task.stack);
@@ -631,6 +699,7 @@ esp_err_t sscma_client_del(sscma_client_handle_t client) {
 }
 
 esp_err_t sscma_client_init(sscma_client_handle_t client) {
+    client->closing = false;
     if (!client->inited) {
         sscma_client_reset(client);
         client->inited = true;
@@ -691,7 +760,20 @@ esp_err_t sscma_client_available(sscma_client_handle_t client, size_t *ret_avail
 
 esp_err_t sscma_client_register_callback(sscma_client_handle_t client, const sscma_client_callback_t *callback,
                                          void *user_ctx) {
+    ESP_RETURN_ON_FALSE(client != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid client");
+
     vTaskSuspend(client->process_task.handle);
+
+    if (callback == NULL) {
+        client->on_connect = NULL;
+        client->on_disconnect = NULL;
+        client->on_response = NULL;
+        client->on_event = NULL;
+        client->on_log = NULL;
+        client->user_ctx = NULL;
+        vTaskResume(client->process_task.handle);
+        return ESP_OK;
+    }
 
     if (client->on_event != NULL) {
         ESP_LOGW(TAG, "callback on_event already registered, overriding it");

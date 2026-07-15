@@ -4,18 +4,18 @@
 
 ## 1) 核心测试代码位置（已确认）
 
-- 本机端协议/运行时逻辑测试：`firmware/stm32-f103/User/TestHost/test_main.c`
-- 主机协议库（协议/帧/CRC/调度/运行时核心）：`firmware/stm32-f103/User/Protocol/`
-- 板端串口 CLI：`firmware/stm32-f103/User/App/cli.c`
-- 板端与 WatchRobot 通讯（USART2 + COPROC）：`firmware/stm32-f103/User/Platform/stm32/platform_coproc_uart.c`
-- 启动与主循环：`firmware/stm32-f103/Core/Src/main.c`
+- 本机端协议/运行时逻辑测试：`WatcheRobot_stm32/User/TestHost/test_main.c`
+- 主机协议库（协议/帧/CRC/调度/运行时核心）：`WatcheRobot_stm32/User/Protocol/`
+- 板端串口 CLI：`WatcheRobot_stm32/User/App/cli.c`
+- 板端与 WatchRobot 通讯（USART2 + COPROC）：`WatcheRobot_stm32/User/Platform/stm32/platform_coproc_uart.c`
+- 启动与主循环：`WatcheRobot_stm32/Core/Src/main.c`
 
 ## 2) 本地可执行测试（HostDebug）
 
 命令（当前仓库可直接跑通）：
 
 ```bash
-cd <repo-root>/firmware/stm32-f103
+cd D:\\Project\\WatcheRobot-Workspace\\WatcheRobot_stm32
 cmake --preset HostDebug
 cmake --build --preset HostDebug
 ctest --preset HostDebug --output-on-failure
@@ -44,7 +44,7 @@ ctest --preset HostDebug --output-on-failure
 ## 5) 固件构建与烧录（板端）
 
 ```bash
-cd <repo-root>/firmware/stm32-f103
+cd D:\\Project\\WatcheRobot-Workspace\\WatcheRobot_stm32
 cmake --preset Debug
 cmake --build --preset Debug
 ```
@@ -59,4 +59,4 @@ cmake --build --preset Debug
 - `flash: Debug via STM32CubeProgrammer`
 - `flash: Debug via OpenOCD fallback`
 
-烧录命令需按本机 STM32CubeProgrammer 或 OpenOCD 安装路径配置。
+对应配置见：`WatcheRobot_stm32/.vscode/tasks.json`

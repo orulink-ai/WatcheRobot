@@ -1,5 +1,6 @@
 #include "debug_cli.h"
 
+#include "animation_service.h"
 #include "behavior_action_parser.h"
 #include "behavior_state_service.h"
 #include "behavior_types.h"
@@ -12,6 +13,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mcu_motion_service.h"
+#include "mem_monitor.h"
+#include "sdk_control_app.h"
 #include "sdkconfig.h"
 
 #include <ctype.h>
@@ -22,7 +25,7 @@
 
 #define TAG "DEBUG_CLI"
 
-#define DEBUG_CLI_TASK_STACK 4096
+#define DEBUG_CLI_TASK_STACK 8192
 #define DEBUG_CLI_TASK_PRIORITY 3
 #define DEBUG_CLI_LINE_MAX 192
 #define DEBUG_CLI_ARG_MAX 8
@@ -33,9 +36,39 @@
 #define DEBUG_CLI_ACTION_PATH_MAX 128
 #define DEBUG_CLI_TOUCH_SUPPRESS_MS 10000U
 #define DEBUG_CLI_PRE_ACTION_STOP_SETTLE_MS 150U
+#define DEBUG_ANIM_STRESS_COMMIT_TIMEOUT_MS 3000U
+#define DEBUG_ANIM_STRESS_POLL_MS 10U
 
 static TaskHandle_t s_debug_cli_task = NULL;
 static uint16_t s_debug_sequence_id = 1;
+static uint32_t s_debug_animation_owner_epoch = 1U;
+static debug_cli_app_open_cb_t s_app_open_cb = NULL;
+static debug_cli_app_close_cb_t s_app_close_cb = NULL;
+static debug_cli_app_status_cb_t s_app_status_cb = NULL;
+static debug_cli_app_connect_cb_t s_app_connect_cb = NULL;
+static debug_cli_settings_open_cb_t s_settings_open_cb = NULL;
+static debug_cli_settings_focus_cb_t s_settings_focus_cb = NULL;
+static debug_cli_settings_rotate_cb_t s_settings_rotate_cb = NULL;
+static debug_cli_settings_click_cb_t s_settings_click_cb = NULL;
+static debug_cli_settings_status_cb_t s_settings_status_cb = NULL;
+
+void debug_cli_set_app_control_callbacks(debug_cli_app_open_cb_t open_cb, debug_cli_app_close_cb_t close_cb,
+                                         debug_cli_app_status_cb_t status_cb, debug_cli_app_connect_cb_t connect_cb) {
+    s_app_open_cb = open_cb;
+    s_app_close_cb = close_cb;
+    s_app_status_cb = status_cb;
+    s_app_connect_cb = connect_cb;
+}
+
+void debug_cli_set_settings_callbacks(debug_cli_settings_open_cb_t open_cb, debug_cli_settings_focus_cb_t focus_cb,
+                                      debug_cli_settings_rotate_cb_t rotate_cb, debug_cli_settings_click_cb_t click_cb,
+                                      debug_cli_settings_status_cb_t status_cb) {
+    s_settings_open_cb = open_cb;
+    s_settings_focus_cb = focus_cb;
+    s_settings_rotate_cb = rotate_cb;
+    s_settings_click_cb = click_cb;
+    s_settings_status_cb = status_cb;
+}
 
 static void debug_cli_copy(char *dst, size_t dst_size, const char *src) {
     if (dst == NULL || dst_size == 0) {
@@ -133,9 +166,277 @@ static void debug_cli_log_result(const char *command, esp_err_t ret) {
 
 static void debug_cli_handle_status(void) {
     ESP_LOGI(TAG, "evt=debug_status behavior=%s busy=%d action_active=%d heap_free=%lu internal_free=%lu",
-             behavior_state_get_current(), behavior_state_is_busy() ? 1 : 0,
-             behavior_state_is_action_active() ? 1 : 0, (unsigned long)esp_get_free_heap_size(),
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+             behavior_state_get_current(), behavior_state_is_busy() ? 1 : 0, behavior_state_is_action_active() ? 1 : 0,
+             (unsigned long)esp_get_free_heap_size(), (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+static void debug_cli_handle_heap(void) {
+    debug_cli_handle_status();
+    mem_monitor_snapshot("debug_heap");
+}
+
+static void debug_cli_handle_heap_tasks(void) {
+    debug_cli_handle_status();
+    mem_monitor_dump_task_owners("debug_heap_tasks");
+}
+
+static animation_request_t debug_cli_animation_request(emoji_anim_type_t type, uint16_t repeat_count) {
+    uint32_t owner_epoch = s_debug_animation_owner_epoch++;
+    animation_request_t request = {
+        .type = type,
+        .priority = ANIM_PRIORITY_SYSTEM,
+        .preempt_policy = ANIM_PREEMPTIBLE,
+        .repeat_count = repeat_count,
+        .source = ANIM_SOURCE_SYSTEM,
+        .owner_epoch = owner_epoch,
+        .correlation_id = owner_epoch,
+    };
+    if (s_debug_animation_owner_epoch == 0U) {
+        s_debug_animation_owner_epoch = 1U;
+    }
+    return request;
+}
+
+static bool debug_cli_wait_animation_committed(animation_ticket_t ticket) {
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout = pdMS_TO_TICKS(DEBUG_ANIM_STRESS_COMMIT_TIMEOUT_MS);
+
+    while ((xTaskGetTickCount() - started) < timeout) {
+        animation_snapshot_t snapshot;
+        if (animation_get_snapshot(&snapshot) != ANIMATION_SERVICE_OK) {
+            return false;
+        }
+        if (snapshot.visible_ticket == ticket) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(DEBUG_ANIM_STRESS_POLL_MS));
+    }
+    return false;
+}
+
+static void debug_cli_handle_anim(size_t argc, char **argv) {
+    if (argc < 2) {
+        ESP_LOGW(TAG, "usage: debug.anim status|play <name> [repeat]|cancel <ticket>|stress [count]");
+        return;
+    }
+    if (strcmp(argv[1], "status") == 0) {
+        animation_snapshot_t snapshot;
+        animation_service_result_t result = animation_get_snapshot(&snapshot);
+        if (result != ANIMATION_SERVICE_OK) {
+            ESP_LOGW(TAG, "debug.anim status failed result=%d", (int)result);
+            return;
+        }
+        ESP_LOGI(TAG,
+                 "debug.anim status active=%lu/%s desired=%lu/%s preparing=%lu/%s visible=%lu/%s queued=%u live=%u "
+                 "terminal=%lu",
+                 (unsigned long)snapshot.active_ticket, animation_registry_name(snapshot.active_type),
+                 (unsigned long)snapshot.desired_ticket, animation_registry_name(snapshot.desired_type),
+                 (unsigned long)snapshot.preparing_ticket, animation_registry_name(snapshot.preparing_type),
+                 (unsigned long)snapshot.visible_ticket, animation_registry_name(snapshot.visible_type),
+                 (unsigned)snapshot.queued_count, (unsigned)snapshot.live_ticket_count,
+                 (unsigned long)snapshot.emitted_terminal_count);
+        return;
+    }
+    if (strcmp(argv[1], "play") == 0) {
+        emoji_anim_type_t type = EMOJI_ANIM_NONE;
+        animation_ticket_t ticket = ANIMATION_TICKET_INVALID;
+        int repeat = 0;
+        if (argc < 3 || !animation_registry_type_from_name(argv[2], &type) ||
+            (argc >= 4 && (!debug_cli_parse_int(argv[3], &repeat) || repeat < 0 || repeat > UINT16_MAX))) {
+            ESP_LOGW(TAG, "usage: debug.anim play <registered_name> [repeat:0..65535]");
+            return;
+        }
+        animation_request_t request = debug_cli_animation_request(type, (uint16_t)repeat);
+        animation_service_result_t result = animation_submit(&request, &ticket);
+        ESP_LOGI(TAG, "debug.anim play name=%s repeat=%d result=%d ticket=%lu", animation_registry_name(type), repeat,
+                 (int)result, (unsigned long)ticket);
+        return;
+    }
+    if (strcmp(argv[1], "cancel") == 0) {
+        int ticket_value = 0;
+        if (argc < 3 || !debug_cli_parse_int(argv[2], &ticket_value) || ticket_value <= 0) {
+            ESP_LOGW(TAG, "usage: debug.anim cancel <ticket>");
+            return;
+        }
+        animation_service_result_t result = animation_cancel((animation_ticket_t)ticket_value);
+        ESP_LOGI(TAG, "debug.anim cancel ticket=%d result=%d", ticket_value, (int)result);
+        return;
+    }
+    if (strcmp(argv[1], "stress") == 0) {
+        static const emoji_anim_type_t types[] = {
+            EMOJI_ANIM_LISTENING,
+            EMOJI_ANIM_THINKING,
+            EMOJI_ANIM_SPEAKING,
+            EMOJI_ANIM_STANDBY,
+        };
+        int count = 100;
+        int accepted = 0;
+        int committed = 0;
+        int timed_out = 0;
+        if (argc >= 3 && (!debug_cli_parse_int(argv[2], &count) || count < 1 || count > 1000)) {
+            ESP_LOGW(TAG, "usage: debug.anim stress [count:1..1000]");
+            return;
+        }
+        for (int index = 0; index < count; ++index) {
+            animation_ticket_t ticket = ANIMATION_TICKET_INVALID;
+            animation_request_t request =
+                debug_cli_animation_request(types[index % (sizeof(types) / sizeof(types[0]))], 0U);
+            if (animation_submit(&request, &ticket) != ANIMATION_SERVICE_OK) {
+                continue;
+            }
+            ++accepted;
+            if (debug_cli_wait_animation_committed(ticket)) {
+                ++committed;
+            } else {
+                ++timed_out;
+                ESP_LOGW(TAG, "debug.anim stress commit timeout ticket=%lu name=%s", (unsigned long)ticket,
+                         animation_registry_name(request.type));
+            }
+            (void)animation_cancel(ticket);
+        }
+        ESP_LOGI(TAG, "debug.anim stress requested=%d accepted=%d committed=%d timed_out=%d", count, accepted,
+                 committed, timed_out);
+        return;
+    }
+    ESP_LOGW(TAG, "unknown debug.anim subcommand: %s", argv[1]);
+}
+
+static void debug_cli_handle_app_open(size_t argc, char **argv) {
+    esp_err_t ret;
+
+    if (argc < 2) {
+        ESP_LOGW(TAG, "debug.app.open requires app_id");
+        return;
+    }
+    if (s_app_open_cb == NULL) {
+        ESP_LOGW(TAG, "debug.app.open rejected: app control unavailable");
+        return;
+    }
+
+    ret = s_app_open_cb(argv[1]);
+    debug_cli_log_result("debug.app.open", ret);
+}
+
+static void debug_cli_handle_app_close(void) {
+    esp_err_t ret;
+
+    if (s_app_close_cb == NULL) {
+        ESP_LOGW(TAG, "debug.app.close rejected: app control unavailable");
+        return;
+    }
+
+    ret = s_app_close_cb();
+    debug_cli_log_result("debug.app.close", ret);
+}
+
+static void debug_cli_handle_app_status(void) {
+    esp_err_t ret;
+
+    if (s_app_status_cb == NULL) {
+        ESP_LOGW(TAG, "debug.app.status rejected: app control unavailable");
+        return;
+    }
+
+    ret = s_app_status_cb();
+    debug_cli_log_result("debug.app.status", ret);
+}
+
+static void debug_cli_handle_app_connect(void) {
+    esp_err_t ret;
+
+    if (s_app_connect_cb == NULL) {
+        ESP_LOGW(TAG, "debug.app.connect rejected: app control unavailable");
+        return;
+    }
+
+    ret = s_app_connect_cb();
+    debug_cli_log_result("debug.app.connect", ret);
+}
+
+static void debug_cli_handle_settings_open(size_t argc, char **argv) {
+    esp_err_t ret;
+
+    if (argc < 2 || argv[1] == NULL || argv[1][0] == '\0') {
+        ESP_LOGW(TAG, "debug.settings.open requires page_id");
+        return;
+    }
+    if (s_settings_open_cb == NULL) {
+        ESP_LOGW(TAG, "debug.settings.open rejected: settings control unavailable");
+        return;
+    }
+
+    ret = s_settings_open_cb(argv[1]);
+    debug_cli_log_result("debug.settings.open", ret);
+}
+
+static void debug_cli_handle_settings_focus(size_t argc, char **argv) {
+    esp_err_t ret;
+
+    if (argc < 2 || argv[1] == NULL || argv[1][0] == '\0') {
+        ESP_LOGW(TAG, "debug.settings.focus requires target_id");
+        return;
+    }
+    if (s_settings_focus_cb == NULL) {
+        ESP_LOGW(TAG, "debug.settings.focus rejected: settings control unavailable");
+        return;
+    }
+
+    ret = s_settings_focus_cb(argv[1]);
+    debug_cli_log_result("debug.settings.focus", ret);
+}
+
+static void debug_cli_handle_settings_rotate(size_t argc, char **argv) {
+    esp_err_t ret;
+    int count = 1;
+    int steps = 0;
+
+    if (argc < 2 || argv[1] == NULL || argv[1][0] == '\0') {
+        ESP_LOGW(TAG, "debug.settings.rotate requires next|prev [count]");
+        return;
+    }
+    if (argc >= 3 && (!debug_cli_parse_int(argv[2], &count) || count < 1)) {
+        ESP_LOGW(TAG, "debug.settings.rotate count must be positive");
+        return;
+    }
+    if (strcmp(argv[1], "next") == 0 || strcmp(argv[1], "down") == 0) {
+        steps = count;
+    } else if (strcmp(argv[1], "prev") == 0 || strcmp(argv[1], "up") == 0) {
+        steps = -count;
+    } else {
+        ESP_LOGW(TAG, "debug.settings.rotate direction must be next|prev");
+        return;
+    }
+    if (s_settings_rotate_cb == NULL) {
+        ESP_LOGW(TAG, "debug.settings.rotate rejected: settings control unavailable");
+        return;
+    }
+
+    ret = s_settings_rotate_cb(steps);
+    debug_cli_log_result("debug.settings.rotate", ret);
+}
+
+static void debug_cli_handle_settings_click(void) {
+    esp_err_t ret;
+
+    if (s_settings_click_cb == NULL) {
+        ESP_LOGW(TAG, "debug.settings.click rejected: settings control unavailable");
+        return;
+    }
+
+    ret = s_settings_click_cb();
+    debug_cli_log_result("debug.settings.click", ret);
+}
+
+static void debug_cli_handle_settings_status(void) {
+    esp_err_t ret;
+
+    if (s_settings_status_cb == NULL) {
+        ESP_LOGW(TAG, "debug.settings.status rejected: settings control unavailable");
+        return;
+    }
+
+    ret = s_settings_status_cb();
+    debug_cli_log_result("debug.settings.status", ret);
 }
 
 static void debug_cli_prepare_motion_debug_window(void) {
@@ -455,9 +756,36 @@ static void debug_cli_handle_line(char *line) {
         debug_touch_guard_suppress_for_ms(DEBUG_CLI_TOUCH_SUPPRESS_MS);
     }
 
-    if (strcmp(argv[0], "debug.status") == 0 || strcmp(argv[0], "debug.mcu") == 0 ||
-        strcmp(argv[0], "debug.heap") == 0) {
+    if (strcmp(argv[0], "debug.status") == 0 || strcmp(argv[0], "debug.mcu") == 0) {
         debug_cli_handle_status();
+    } else if (strcmp(argv[0], "debug.heap") == 0) {
+        debug_cli_handle_heap();
+    } else if (strcmp(argv[0], "debug.heap.tasks") == 0) {
+        debug_cli_handle_heap_tasks();
+    } else if (strcmp(argv[0], "debug.anim") == 0) {
+        debug_cli_handle_anim(argc, argv);
+    } else if (strcmp(argv[0], "debug.app.open") == 0) {
+        debug_cli_handle_app_open(argc, argv);
+    } else if (strcmp(argv[0], "debug.app.close") == 0) {
+        debug_cli_handle_app_close();
+    } else if (strcmp(argv[0], "debug.app.status") == 0) {
+        debug_cli_handle_app_status();
+    } else if (strcmp(argv[0], "debug.app.connect") == 0) {
+        debug_cli_handle_app_connect();
+    } else if (strcmp(argv[0], "debug.sdk.pairing") == 0) {
+        if (!sdk_control_app_debug_log_pairing_code()) {
+            ESP_LOGW(TAG, "debug.sdk.pairing rejected: SDK Control App is not active");
+        }
+    } else if (strcmp(argv[0], "debug.settings.open") == 0) {
+        debug_cli_handle_settings_open(argc, argv);
+    } else if (strcmp(argv[0], "debug.settings.focus") == 0) {
+        debug_cli_handle_settings_focus(argc, argv);
+    } else if (strcmp(argv[0], "debug.settings.rotate") == 0) {
+        debug_cli_handle_settings_rotate(argc, argv);
+    } else if (strcmp(argv[0], "debug.settings.click") == 0) {
+        debug_cli_handle_settings_click();
+    } else if (strcmp(argv[0], "debug.settings.status") == 0) {
+        debug_cli_handle_settings_status();
     } else if (strcmp(argv[0], "debug.behavior") == 0) {
         debug_cli_handle_behavior(argc, argv);
     } else if (strcmp(argv[0], "debug.action") == 0) {
@@ -481,17 +809,43 @@ static void debug_cli_handle_line(char *line) {
 
 static void debug_cli_task(void *arg) {
     char line[DEBUG_CLI_LINE_MAX];
+#if CONFIG_ESP_CONSOLE_UART
+    size_t line_len = 0;
+#endif
 
     (void)arg;
 
     ESP_LOGI(TAG, "debug CLI ready");
     while (true) {
+#if CONFIG_ESP_CONSOLE_UART
+        uint8_t ch = 0;
+        int read_len = uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, &ch, 1, pdMS_TO_TICKS(20));
+        if (read_len <= 0) {
+            continue;
+        }
+        if (ch == '\r' || ch == '\n') {
+            if (line_len == 0) {
+                continue;
+            }
+            line[line_len] = '\0';
+            line_len = 0;
+            debug_cli_handle_line(line);
+            continue;
+        }
+        if (line_len < (sizeof(line) - 1u)) {
+            line[line_len++] = (char)ch;
+        } else {
+            line_len = 0;
+            ESP_LOGW(TAG, "debug CLI line too long");
+        }
+#else
         if (fgets(line, sizeof(line), stdin) == NULL) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
         line[strcspn(line, "\r\n")] = '\0';
         debug_cli_handle_line(line);
+#endif
     }
 }
 

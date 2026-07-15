@@ -1,46 +1,30 @@
 #ifndef HAL_OPUS_H
 #define HAL_OPUS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
-/**
- * @file hal_opus.h
- * @brief Audio transport HAL - PCM passthrough mode (no compression)
- *
- * MVP simplification: Direct PCM transmission without encoding.
- * Frame format: 16-bit, 16kHz, mono PCM.
- *
- * Future: Can be upgraded to Opus codec when needed.
- */
+/* esp_audio_codec documents about 40 KiB of task stack for encoder execution.
+ * Keep the owner task tied to this contract so SILK's speech-only deep path
+ * cannot silently regress to an unsafe stack size. */
+#define HAL_OPUS_MIN_TASK_STACK_BYTES (40U * 1024U)
 
-/**
- * Initialize audio codec
- * @return 0 on success, -1 on error
- */
+/** Initialize the 16 kHz mono 60 ms Opus uplink encoder. */
 int hal_opus_init(void);
 
-/**
- * Process audio for transmission (passthrough - no encoding)
- * @param pcm_in Input PCM data (16-bit, 16kHz, mono)
- * @param pcm_len Length of PCM data in bytes
- * @param out_buf Output buffer
- * @param out_max_len Max output buffer size
- * @return Output bytes on success, -1 on error
- *
- * Note: In PCM mode, this is a simple memcpy passthrough.
- */
+/** Return true only when the real Opus encoder can be initialized. */
+bool hal_opus_is_available(void);
+
+/** Reset predictive encoder state at a turn/connection boundary. */
+int hal_opus_reset(void);
+
+/** Release encoder resources. */
+void hal_opus_deinit(void);
+
+/** Encode exactly one 60 ms PCM16LE frame into one Opus packet. */
 int hal_opus_encode(const uint8_t *pcm_in, int pcm_len, uint8_t *out_buf, int out_max_len);
 
-/**
- * Process received audio for playback (passthrough - no decoding)
- * @param in_data Input audio data
- * @param in_len Length of input data in bytes
- * @param pcm_out Output buffer for PCM data
- * @param pcm_max_len Max output buffer size
- * @return Output bytes on success, -1 on error
- *
- * Note: In PCM mode, this is a simple memcpy passthrough.
- */
+/** Downlink TTS remains PCM; this function intentionally returns an error. */
 int hal_opus_decode(const uint8_t *in_data, int in_len, uint8_t *pcm_out, int pcm_max_len);
 
 #endif /* HAL_OPUS_H */

@@ -6,7 +6,7 @@ Use this document to record known-good version sets. Every GitHub Release should
 
 | WatcheRobot release | App | Server | Desktop | ESP32-S3 firmware | SD-card behavior assets | STM32F103 firmware | Hardware |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Not yet published | Not provided | Not provided | Not provided | `V2.3.0` baseline on this branch | `V2.3.0` asset generator baseline | STM32 snapshot in `firmware/stm32-f103/` | PCB package dated 2026-06-11 to 2026-06-18 |
+| `0.1.0` source package | Not provided | Not provided | Not provided | `V2.3.0` baseline on this branch | `V2.3.0` asset generator baseline | STM32 snapshot in `firmware/stm32-f103/` | PCB package dated 2026-06-11 to 2026-06-18 |
 
 ## Release Checklist
 

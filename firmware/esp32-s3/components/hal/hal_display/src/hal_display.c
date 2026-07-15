@@ -1,22 +1,20 @@
 /**
  * @file hal_display.c
- * @brief Display HAL implementation with SPIFFS-based emoji animation
+ * @brief Display HAL implementation for LVGL surfaces, text, and input devices.
  */
 
 #include "hal_display.h"
-#include "anim_player.h"
-#include "anim_storage.h"
-#include "boot_anim.h"
-#include "display_ui.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "hal_button.h"
 #include "lvgl.h"
 #include "sensecap-watcher.h"
+
+#include <string.h>
 
 /* PNG support is included via lvgl.h when LV_USE_PNG is enabled */
 
@@ -44,28 +42,36 @@ extern const lv_font_t lv_font_montserrat_24;
 #include "esp_lvgl_port.h"
 
 #define TAG "HAL_DISPLAY"
-#define WATCHER_LCD_SAFE_TRANS_QUEUE_DEPTH 1
-#define WATCHER_LVGL_SAFE_DRAW_ROWS 4U
 #define GENERAL_I2C_RECOVERY_PULSES 9
 #define GENERAL_I2C_MAX_PREPARE_ATTEMPTS 3
 #define GENERAL_I2C_BITBANG_DELAY_US 8
-
 static lv_obj_t *label_text = NULL;
 static lv_obj_t *img_emoji = NULL;
 static lv_obj_t *text_overlay = NULL;
+static lv_obj_t *voice_connect_panel = NULL;
+static lv_obj_t *voice_connect_spinner = NULL;
+static lv_obj_t *voice_connect_title_label = NULL;
+static lv_obj_t *voice_connect_detail_label = NULL;
+static lv_obj_t *voice_connect_action_button = NULL;
+static lv_obj_t *voice_connect_action_label = NULL;
+static hal_display_voice_connect_action_cb_t voice_connect_action_cb = NULL;
+static void *voice_connect_action_user_ctx = NULL;
+static int64_t voice_connect_action_last_click_us = 0;
+static lv_obj_t *s_retained_previous_screen_once = NULL;
+static lv_obj_t *s_behavior_screen = NULL;
 static bool minimal_initialized = false;
 static bool is_initialized = false;
 static bool inputs_initialized = false;
-static bool backlight_initialized = false;
 static lv_disp_t *s_display = NULL;
 static lv_indev_t *s_knob_indev = NULL;
 static lv_indev_t *s_touch_indev = NULL;
-static esp_lcd_panel_io_handle_t s_panel_io_handle = NULL;
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
-static esp_lcd_panel_io_handle_t s_touch_io_handle = NULL;
 static esp_lcd_touch_handle_t s_touch_handle = NULL;
 
 esp_lcd_panel_handle_t hal_display_get_panel_handle(void) {
+    if (s_panel_handle == NULL) {
+        return bsp_lcd_get_panel_handle();
+    }
     return s_panel_handle;
 }
 
@@ -155,6 +161,20 @@ static void hal_display_update_text_overlay_visibility_locked(const char *text) 
     } else {
         lv_obj_add_flag(text_overlay, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+static bool hal_display_text_target_ready_locked(void) {
+    if (!is_initialized || label_text == NULL || !lv_obj_is_valid(label_text)) {
+        ESP_LOGW(TAG, "Display text target unavailable");
+        return false;
+    }
+
+    if (text_overlay != NULL && !lv_obj_is_valid(text_overlay)) {
+        ESP_LOGW(TAG, "Display text overlay is stale; continuing without overlay");
+        text_overlay = NULL;
+    }
+
+    return true;
 }
 
 static void hal_display_apply_text_style_locked(const char *text, int font_size, bool alert_text) {
@@ -354,196 +374,6 @@ static bool hal_display_prepare_general_i2c_bus(void) {
     return false;
 }
 
-static const char *hal_display_emoji_name(int emoji_id) {
-    switch (emoji_id) {
-    case 0:
-        return "standby";
-    case 1:
-        return "happy";
-    case 2:
-        return "listening";
-    case 3:
-        return "thinking";
-    case 4:
-        return "processing";
-    case 5:
-        return "speaking";
-    case 6:
-        return "error";
-    case 7:
-        return "bluetooth";
-    case 8:
-        return "custom1";
-    case 9:
-        return "custom2";
-    case 10:
-        return "custom3";
-    case 11:
-        return "standby1";
-    case 12:
-        return "standby2";
-    case 13:
-        return "standby3";
-    case 14:
-        return "standby4";
-    case 15:
-        return "disconnect";
-    case 16:
-        return "shock";
-    case 17:
-        return "sunglasses";
-    case 18:
-        return "sad";
-    case 19:
-        return "get";
-    case 20:
-        return "smile";
-    case 21:
-        return "recharge";
-    case 22:
-        return "speechless";
-    case 23:
-        return "concentration";
-    case 24:
-        return "fondle_love";
-    case 25:
-        return "fondle_anger";
-    case 26:
-        return "blink";
-    case 27:
-        return "upgrade";
-    default:
-        return "unknown";
-    }
-}
-
-static int hal_display_anim_type_to_emoji_id(emoji_anim_type_t type) {
-    switch (type) {
-    case EMOJI_ANIM_STANDBY:
-        return EMOJI_STANDBY;
-    case EMOJI_ANIM_HAPPY:
-        return EMOJI_HAPPY;
-    case EMOJI_ANIM_LISTENING:
-        return EMOJI_LISTENING;
-    case EMOJI_ANIM_THINKING:
-        return EMOJI_THINKING;
-    case EMOJI_ANIM_PROCESSING:
-        return EMOJI_PROCESSING;
-    case EMOJI_ANIM_SPEAKING:
-        return EMOJI_SPEAKING;
-    case EMOJI_ANIM_ERROR:
-        return EMOJI_ERROR;
-    case EMOJI_ANIM_BLUETOOTH:
-        return EMOJI_BLUETOOTH;
-    case EMOJI_ANIM_CUSTOM_1:
-        return EMOJI_CUSTOM_1;
-    case EMOJI_ANIM_CUSTOM_2:
-        return EMOJI_CUSTOM_2;
-    case EMOJI_ANIM_CUSTOM_3:
-        return EMOJI_CUSTOM_3;
-    case EMOJI_ANIM_STANDBY_1:
-        return EMOJI_STANDBY_1;
-    case EMOJI_ANIM_STANDBY_2:
-        return EMOJI_STANDBY_2;
-    case EMOJI_ANIM_STANDBY_3:
-        return EMOJI_STANDBY_3;
-    case EMOJI_ANIM_STANDBY_4:
-        return EMOJI_STANDBY_4;
-    case EMOJI_ANIM_DISCONNECT:
-        return EMOJI_DISCONNECT;
-    case EMOJI_ANIM_SHOCK:
-        return EMOJI_SHOCK;
-    case EMOJI_ANIM_SUNGLASSES:
-        return EMOJI_SUNGLASSES;
-    case EMOJI_ANIM_SAD:
-        return EMOJI_SAD;
-    case EMOJI_ANIM_GET:
-        return EMOJI_GET;
-    case EMOJI_ANIM_SMILE:
-        return EMOJI_SMILE;
-    case EMOJI_ANIM_RECHARGE:
-        return EMOJI_RECHARGE;
-    case EMOJI_ANIM_SPEECHLESS:
-        return EMOJI_SPEECHLESS;
-    case EMOJI_ANIM_CONCENTRATION:
-        return EMOJI_CONCENTRATION;
-    case EMOJI_ANIM_FONDLE_LOVE:
-        return EMOJI_FONDLE_LOVE;
-    case EMOJI_ANIM_FONDLE_ANGER:
-        return EMOJI_FONDLE_ANGER;
-    case EMOJI_ANIM_BLINK:
-        return EMOJI_BLINK;
-    case EMOJI_ANIM_UPGRADE:
-        return EMOJI_UPGRADE;
-    default:
-        return -1;
-    }
-}
-
-/* Map display_ui emoji_type to unified internal animation types. */
-static emoji_anim_type_t map_emoji_type(int ui_emoji_id) {
-    switch (ui_emoji_id) {
-    case 0:                              /* EMOJI_STANDBY */
-        return EMOJI_ANIM_STANDBY;       /* standby */
-    case 1:                              /* EMOJI_HAPPY */
-        return EMOJI_ANIM_HAPPY;         /* happy */
-    case 2:                              /* EMOJI_LISTENING */
-        return EMOJI_ANIM_LISTENING;     /* listening */
-    case 3:                              /* EMOJI_THINKING */
-        return EMOJI_ANIM_THINKING;      /* thinking */
-    case 4:                              /* EMOJI_PROCESSING */
-        return EMOJI_ANIM_PROCESSING;    /* processing */
-    case 5:                              /* EMOJI_SPEAKING */
-        return EMOJI_ANIM_SPEAKING;      /* speaking */
-    case 6:                              /* EMOJI_ERROR */
-        return EMOJI_ANIM_ERROR;         /* error */
-    case 7:                              /* EMOJI_BLUETOOTH */
-        return EMOJI_ANIM_BLUETOOTH;     /* bluetooth */
-    case 8:                              /* EMOJI_CUSTOM_1 */
-        return EMOJI_ANIM_CUSTOM_1;      /* custom1 */
-    case 9:                              /* EMOJI_CUSTOM_2 */
-        return EMOJI_ANIM_CUSTOM_2;      /* custom2 */
-    case 10:                             /* EMOJI_CUSTOM_3 */
-        return EMOJI_ANIM_CUSTOM_3;      /* custom3 */
-    case 11:                             /* EMOJI_STANDBY_1 */
-        return EMOJI_ANIM_STANDBY_1;     /* standby1 */
-    case 12:                             /* EMOJI_STANDBY_2 */
-        return EMOJI_ANIM_STANDBY_2;     /* standby2 */
-    case 13:                             /* EMOJI_STANDBY_3 */
-        return EMOJI_ANIM_STANDBY_3;     /* standby3 */
-    case 14:                             /* EMOJI_STANDBY_4 */
-        return EMOJI_ANIM_STANDBY_4;     /* standby4 */
-    case 15:                             /* EMOJI_DISCONNECT */
-        return EMOJI_ANIM_DISCONNECT;    /* disconnect */
-    case 16:                             /* EMOJI_SHOCK */
-        return EMOJI_ANIM_SHOCK;         /* shock */
-    case 17:                             /* EMOJI_SUNGLASSES */
-        return EMOJI_ANIM_SUNGLASSES;    /* sunglasses */
-    case 18:                             /* EMOJI_SAD */
-        return EMOJI_ANIM_SAD;           /* sad */
-    case 19:                             /* EMOJI_GET */
-        return EMOJI_ANIM_GET;           /* get */
-    case 20:                             /* EMOJI_SMILE */
-        return EMOJI_ANIM_SMILE;         /* smile */
-    case 21:                             /* EMOJI_RECHARGE */
-        return EMOJI_ANIM_RECHARGE;      /* recharge */
-    case 22:                             /* EMOJI_SPEECHLESS */
-        return EMOJI_ANIM_SPEECHLESS;    /* speechless */
-    case 23:                             /* EMOJI_CONCENTRATION */
-        return EMOJI_ANIM_CONCENTRATION; /* concentration */
-    case 24:                             /* EMOJI_FONDLE_LOVE */
-        return EMOJI_ANIM_FONDLE_LOVE;   /* fondle_love */
-    case 25:                             /* EMOJI_FONDLE_ANGER */
-        return EMOJI_ANIM_FONDLE_ANGER;  /* fondle_anger */
-    case 26:                             /* EMOJI_BLINK */
-        return EMOJI_ANIM_BLINK;         /* blink */
-    case 27:                             /* EMOJI_UPGRADE */
-        return EMOJI_ANIM_UPGRADE;       /* upgrade */
-    default:
-        return EMOJI_ANIM_STANDBY;
-    }
-}
-
 static void hal_display_raise_text_overlay_locked(void) {
     if (text_overlay != NULL) {
         lv_obj_move_foreground(text_overlay);
@@ -584,266 +414,272 @@ static void hal_display_create_text_overlay_locked(lv_obj_t *parent, const char 
     hal_display_raise_text_overlay_locked();
 }
 
-static size_t hal_display_max_transfer_bytes(void) {
-    size_t max_transfer = DRV_LCD_H_RES * DRV_LCD_V_RES * DRV_LCD_BITS_PER_PIXEL / 8 / CONFIG_BSP_LCD_SPI_DMA_SIZE_DIV;
-    return max_transfer > 0 ? max_transfer : (DRV_LCD_H_RES * DRV_LCD_BITS_PER_PIXEL / 8);
+static void hal_display_voice_connect_status_clear_locked(void) {
+    if (voice_connect_panel != NULL && lv_obj_is_valid(voice_connect_panel)) {
+        lv_obj_del(voice_connect_panel);
+    }
+    voice_connect_panel = NULL;
+    voice_connect_spinner = NULL;
+    voice_connect_title_label = NULL;
+    voice_connect_detail_label = NULL;
+    voice_connect_action_button = NULL;
+    voice_connect_action_label = NULL;
 }
 
-static size_t hal_display_effective_draw_rows(size_t requested_rows) {
-    const size_t bytes_per_row = DRV_LCD_H_RES * DRV_LCD_BITS_PER_PIXEL / 8;
-    size_t max_rows = hal_display_max_transfer_bytes() / bytes_per_row;
-    if (max_rows == 0) {
-        max_rows = 1;
-    }
-    if (max_rows > WATCHER_LVGL_SAFE_DRAW_ROWS) {
-        max_rows = WATCHER_LVGL_SAFE_DRAW_ROWS;
-    }
-    return requested_rows > max_rows ? max_rows : requested_rows;
+static void hal_display_reset_voice_connect_status_handles_locked(void) {
+    voice_connect_panel = NULL;
+    voice_connect_spinner = NULL;
+    voice_connect_title_label = NULL;
+    voice_connect_detail_label = NULL;
+    voice_connect_action_button = NULL;
+    voice_connect_action_label = NULL;
 }
 
-static int hal_display_effective_trans_queue_depth(void) {
-    if (CONFIG_BSP_LCD_PANEL_SPI_TRANS_Q_DEPTH > WATCHER_LCD_SAFE_TRANS_QUEUE_DEPTH) {
-        ESP_LOGW(TAG, "Clamping LCD trans queue depth from %d to %d to reduce internal DMA pressure",
-                 CONFIG_BSP_LCD_PANEL_SPI_TRANS_Q_DEPTH, WATCHER_LCD_SAFE_TRANS_QUEUE_DEPTH);
-        return WATCHER_LCD_SAFE_TRANS_QUEUE_DEPTH;
-    }
-    return CONFIG_BSP_LCD_PANEL_SPI_TRANS_Q_DEPTH;
-}
-
-static void hal_display_rounder_cb(struct _lv_disp_drv_t *disp_drv, lv_area_t *area) {
-    (void)disp_drv;
-
-    const uint16_t x1 = area->x1;
-    const uint16_t x2 = area->x2;
-
-    area->x1 = (x1 >> 2) << 2;
-    area->x2 = ((x2 >> 2) << 2) + 3;
-}
-
-static esp_err_t hal_display_backlight_init(void) {
-    if (backlight_initialized) {
-        return ESP_OK;
-    }
-
-    const ledc_channel_config_t backlight_channel = {
-        .gpio_num = BSP_LCD_GPIO_BL,
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel = DRV_LCD_LEDC_CH,
-        .intr_type = LEDC_INTR_DISABLE,
-        .timer_sel = LEDC_TIMER_1,
-        .duty = BIT(DRV_LCD_LEDC_DUTY_RES),
-        .hpoint = 0,
-    };
-    const ledc_timer_config_t backlight_timer = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = DRV_LCD_LEDC_DUTY_RES,
-        .timer_num = LEDC_TIMER_1,
-        .freq_hz = 5000,
-        .clk_cfg = LEDC_AUTO_CLK,
-    };
-
-    if (ledc_timer_config(&backlight_timer) != ESP_OK) {
-        return ESP_FAIL;
-    }
-    if (ledc_channel_config(&backlight_channel) != ESP_OK) {
-        return ESP_FAIL;
-    }
-    backlight_initialized = true;
-    return bsp_lcd_brightness_set(0);
-}
-
-static esp_err_t hal_display_lcd_panel_init(void) {
-    if (s_panel_handle != NULL && s_panel_io_handle != NULL) {
-        return ESP_OK;
-    }
-
-    if (bsp_spi_bus_init() != ESP_OK) {
-        return ESP_FAIL;
-    }
-    if (hal_display_backlight_init() != ESP_OK) {
-        return ESP_FAIL;
-    }
-
-    const esp_lcd_panel_io_spi_config_t io_config = {
-        .cs_gpio_num = BSP_LCD_SPI_CS,
-        .dc_gpio_num = -1,
-        .spi_mode = 3,
-        .pclk_hz = DRV_LCD_PIXEL_CLK_HZ,
-        .trans_queue_depth = hal_display_effective_trans_queue_depth(),
-        .lcd_cmd_bits = DRV_LCD_CMD_BITS,
-        .lcd_param_bits = DRV_LCD_PARAM_BITS,
-        .flags =
-            {
-                .quad_mode = true,
-            },
-    };
-    spd2010_vendor_config_t vendor_config = {
-        .flags =
-            {
-                .use_qspi_interface = 1,
-            },
-    };
-    if (esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)BSP_LCD_SPI_NUM, &io_config, &s_panel_io_handle) != ESP_OK) {
-        return ESP_FAIL;
-    }
-
-    const esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = BSP_LCD_GPIO_RST,
-        .rgb_ele_order = DRV_LCD_RGB_ELEMENT_ORDER,
-        .bits_per_pixel = DRV_LCD_BITS_PER_PIXEL,
-        .vendor_config = &vendor_config,
-    };
-    if (esp_lcd_new_panel_spd2010(s_panel_io_handle, &panel_config, &s_panel_handle) != ESP_OK) {
-        return ESP_FAIL;
-    }
-    if (esp_lcd_panel_reset(s_panel_handle) != ESP_OK || esp_lcd_panel_init(s_panel_handle) != ESP_OK ||
-        esp_lcd_panel_mirror(s_panel_handle, DRV_LCD_MIRROR_X, DRV_LCD_MIRROR_Y) != ESP_OK ||
-        esp_lcd_panel_disp_on_off(s_panel_handle, true) != ESP_OK) {
-        return ESP_FAIL;
-    }
-
-    return bsp_lcd_brightness_set(CONFIG_BSP_LCD_DEFAULT_BRIGHTNESS);
-}
-
-static lv_disp_t *hal_display_add_lcd_display(void) {
-    if (s_display != NULL) {
-        return s_display;
-    }
-
-    const size_t requested_rows = LVGL_DRAW_BUFF_HEIGHT;
-    const size_t effective_rows = hal_display_effective_draw_rows(requested_rows);
-    if (effective_rows != requested_rows) {
-        ESP_LOGW(TAG,
-                 "Clamping LVGL draw buffer from %u rows to %u rows so each flush fits SPI max_transfer_sz=%u bytes",
-                 (unsigned)requested_rows, (unsigned)effective_rows, (unsigned)hal_display_max_transfer_bytes());
-    }
-
-    const lvgl_port_display_cfg_t disp_cfg = {
-        .io_handle = s_panel_io_handle,
-        .panel_handle = s_panel_handle,
-        .buffer_size = DRV_LCD_H_RES * effective_rows,
-        .double_buffer = LVGL_DRAW_BUFF_DOUBLE,
-        .hres = DRV_LCD_H_RES,
-        .vres = DRV_LCD_V_RES,
-        .monochrome = false,
-        .rotation =
-            {
-                .swap_xy = DRV_LCD_SWAP_XY,
-                .mirror_x = DRV_LCD_MIRROR_X,
-                .mirror_y = DRV_LCD_MIRROR_Y,
-            },
-        .flags =
-            {
-                .buff_dma = false,
-                .buff_spiram = true,
-#if LVGL_VERSION_MAJOR == 9 && defined(CONFIG_LV_COLOR_16_SWAP)
-                .swap_bytes = true,
-#endif
-            },
-    };
-
-    ESP_LOGI(TAG,
-             "LVGL draw buffer: requested=%u rows, effective=%u rows, %lu pixels, double=%d, psram=%d, dma_div=%d, "
-             "trans_q=%d",
-             (unsigned)requested_rows, (unsigned)effective_rows, (unsigned long)disp_cfg.buffer_size,
-             disp_cfg.double_buffer, disp_cfg.flags.buff_spiram, CONFIG_BSP_LCD_SPI_DMA_SIZE_DIV,
-             hal_display_effective_trans_queue_depth());
-
-    s_display = lvgl_port_add_disp(&disp_cfg);
-    if (s_display != NULL) {
-        s_display->driver->rounder_cb = hal_display_rounder_cb;
-    }
-    return s_display;
-}
-
-static lv_indev_t *hal_display_init_knob_input(void) {
-    if (s_knob_indev != NULL) {
-        return s_knob_indev;
-    }
-
-    const static knob_config_t knob_cfg = {
-        .default_direction = 0,
-        .gpio_encoder_a = BSP_KNOB_A,
-        .gpio_encoder_b = BSP_KNOB_B,
-    };
-    const static button_config_t btn_cfg = {
-        .type = BUTTON_TYPE_CUSTOM,
-        .long_press_time = 500,
-        .short_press_time = 200,
-        .custom_button_config =
-            {
-                .active_level = 0,
-                .button_custom_init = bsp_knob_btn_init,
-                .button_custom_deinit = bsp_knob_btn_deinit,
-                .button_custom_get_key_value = bsp_knob_btn_get_key_value,
-            },
-    };
-    const lvgl_port_encoder_cfg_t encoder_cfg = {
-        .disp = s_display,
-        .encoder_a_b = &knob_cfg,
-        .encoder_enter = &btn_cfg,
-    };
-
-    s_knob_indev = lvgl_port_add_encoder(&encoder_cfg);
-    return s_knob_indev;
-}
-
-static lv_indev_t *hal_display_init_touch_input(void) {
-    if (s_touch_indev != NULL) {
-        return s_touch_indev;
-    }
-
-    const i2c_config_t i2c_conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = BSP_TOUCH_I2C_SDA,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_io_num = BSP_TOUCH_I2C_SCL,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = BSP_TOUCH_I2C_CLK,
-    };
-    if (i2c_param_config(BSP_TOUCH_I2C_NUM, &i2c_conf) != ESP_OK) {
-        return NULL;
-    }
-    if (i2c_driver_install(BSP_TOUCH_I2C_NUM, i2c_conf.mode, 0, 0, ESP_INTR_FLAG_SHARED) != ESP_OK) {
+static lv_obj_t *hal_display_create_voice_connect_label_locked(lv_obj_t *parent, int width, const char *text,
+                                                               int font_size, lv_color_t color) {
+    lv_obj_t *label = lv_label_create(parent);
+    if (label == NULL) {
         return NULL;
     }
 
-    const esp_lcd_touch_config_t tp_cfg = {
-        .x_max = DRV_LCD_H_RES,
-        .y_max = DRV_LCD_V_RES,
-        .rst_gpio_num = GPIO_NUM_NC,
-        .int_gpio_num = GPIO_NUM_NC,
-        .levels =
-            {
-                .reset = 0,
-                .interrupt = 0,
-            },
-        .flags =
-            {
-                .swap_xy = DRV_LCD_SWAP_XY,
-                .mirror_x = DRV_LCD_MIRROR_X,
-                .mirror_y = DRV_LCD_MIRROR_Y,
-            },
-    };
-    const esp_lcd_panel_io_i2c_config_t tp_io_cfg = ESP_LCD_TOUCH_IO_I2C_SPD2010_CONFIG();
-    if (esp_lcd_new_panel_io_i2c(BSP_TOUCH_I2C_NUM, &tp_io_cfg, &s_touch_io_handle) != ESP_OK) {
-        return NULL;
-    }
-    if (esp_lcd_touch_new_i2c_spd2010(s_touch_io_handle, &tp_cfg, &s_touch_handle) != ESP_OK) {
-        return NULL;
+    lv_obj_set_width(label, width);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(label, color, 0);
+    lv_obj_set_style_text_font(label, hal_display_select_text_font(text, font_size), 0);
+    lv_obj_set_style_text_line_space(label, 5, 0);
+    lv_label_set_text(label, text != NULL ? text : "");
+    return label;
+}
+
+static const char *hal_display_action_button_text(const char *action) {
+    static const char prefix[] = "Button: ";
+
+    if (action == NULL) {
+        return "";
     }
 
-    vTaskDelay(pdMS_TO_TICKS(50));
-    esp_lcd_touch_read_data(s_touch_handle);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    if (strncmp(action, prefix, sizeof(prefix) - 1U) == 0) {
+        return action + sizeof(prefix) - 1U;
+    }
 
-    const lvgl_port_touch_cfg_t touch_cfg = {
-        .disp = s_display,
-        .handle = s_touch_handle,
-        .sensitivity = CONFIG_LVGL_INPUT_DEVICE_SENSITIVITY,
-    };
-    s_touch_indev = lvgl_port_add_touch(&touch_cfg);
-    return s_touch_indev;
+    return action;
+}
+
+static void hal_display_voice_connect_action_event_cb(lv_event_t *event) {
+    lv_event_code_t code = lv_event_get_code(event);
+
+    if (code != LV_EVENT_PRESSED && code != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    if (now_us - voice_connect_action_last_click_us < 300000LL) {
+        return;
+    }
+    voice_connect_action_last_click_us = now_us;
+
+    ESP_LOGI(TAG, "Voice connect action event code=%d has_cb=%d", (int)code, voice_connect_action_cb != NULL);
+    if (voice_connect_action_cb != NULL) {
+        voice_connect_action_cb(voice_connect_action_user_ctx);
+    }
+}
+
+static bool hal_display_ensure_voice_connect_status_locked(bool show_spinner, bool alert) {
+    lv_obj_t *scr = lv_disp_get_scr_act(NULL);
+    lv_color_t accent = alert ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_hex(0x2F80FF);
+
+    if (scr == NULL) {
+        return false;
+    }
+
+    if (voice_connect_panel != NULL && !lv_obj_is_valid(voice_connect_panel)) {
+        hal_display_reset_voice_connect_status_handles_locked();
+    }
+
+    if (voice_connect_panel == NULL) {
+        voice_connect_panel = lv_obj_create(scr);
+        if (voice_connect_panel == NULL) {
+            return false;
+        }
+        lv_obj_remove_style_all(voice_connect_panel);
+        lv_obj_set_size(voice_connect_panel, LV_PCT(100), LV_PCT(100));
+        lv_obj_clear_flag(voice_connect_panel, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(voice_connect_panel, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        lv_obj_set_layout(voice_connect_panel, LV_LAYOUT_FLEX);
+        lv_obj_set_flex_flow(voice_connect_panel, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(voice_connect_panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_bg_opa(voice_connect_panel, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(voice_connect_panel, 0, 0);
+        lv_obj_set_style_pad_all(voice_connect_panel, 0, 0);
+        lv_obj_set_style_pad_row(voice_connect_panel, 12, 0);
+        lv_obj_align(voice_connect_panel, LV_ALIGN_CENTER, 0, 0);
+    }
+
+    if (show_spinner && voice_connect_spinner == NULL) {
+        voice_connect_spinner = lv_spinner_create(voice_connect_panel, 900, 70);
+        if (voice_connect_spinner == NULL) {
+            return false;
+        }
+        lv_obj_set_size(voice_connect_spinner, 44, 44);
+        lv_obj_set_style_arc_width(voice_connect_spinner, 4, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(voice_connect_spinner, 4, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(voice_connect_spinner, lv_color_hex(0x303030), LV_PART_MAIN);
+    }
+
+    if (voice_connect_spinner != NULL && lv_obj_is_valid(voice_connect_spinner)) {
+        lv_obj_set_style_arc_color(voice_connect_spinner, accent, LV_PART_INDICATOR);
+        if (show_spinner) {
+            lv_obj_clear_flag(voice_connect_spinner, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(voice_connect_spinner, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (voice_connect_title_label == NULL) {
+        voice_connect_title_label =
+            hal_display_create_voice_connect_label_locked(voice_connect_panel, 340, "", 22, lv_color_white());
+    }
+    if (voice_connect_detail_label == NULL) {
+        voice_connect_detail_label =
+            hal_display_create_voice_connect_label_locked(voice_connect_panel, 340, "", 14, lv_color_hex(0xB8C0CC));
+    }
+    if (voice_connect_action_button == NULL) {
+        voice_connect_action_button = lv_btn_create(voice_connect_panel);
+        if (voice_connect_action_button == NULL) {
+            return false;
+        }
+        lv_obj_set_size(voice_connect_action_button, 160, 56);
+        lv_obj_set_style_radius(voice_connect_action_button, 24, 0);
+        lv_obj_set_style_bg_color(voice_connect_action_button, lv_color_hex(0x2A3038), 0);
+        lv_obj_set_style_border_width(voice_connect_action_button, 2, 0);
+        lv_obj_set_style_border_color(voice_connect_action_button, lv_color_hex(0x7DFFD6), 0);
+        lv_obj_set_style_shadow_color(voice_connect_action_button, lv_color_hex(0x7DFFD6), 0);
+        lv_obj_set_style_shadow_width(voice_connect_action_button, 0, 0);
+        lv_obj_clear_flag(voice_connect_action_button, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(voice_connect_action_button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(voice_connect_action_button, 18);
+        lv_obj_add_event_cb(voice_connect_action_button, hal_display_voice_connect_action_event_cb, LV_EVENT_PRESSED,
+                            NULL);
+        lv_obj_add_event_cb(voice_connect_action_button, hal_display_voice_connect_action_event_cb, LV_EVENT_CLICKED,
+                            NULL);
+
+        voice_connect_action_label = lv_label_create(voice_connect_action_button);
+        if (voice_connect_action_label == NULL) {
+            return false;
+        }
+        lv_obj_set_style_text_align(voice_connect_action_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(voice_connect_action_label, lv_color_white(), 0);
+        lv_obj_clear_flag(voice_connect_action_label, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(voice_connect_action_label, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_center(voice_connect_action_label);
+    }
+
+    return voice_connect_title_label != NULL && voice_connect_detail_label != NULL &&
+           voice_connect_action_button != NULL && voice_connect_action_label != NULL;
+}
+
+int hal_display_voice_connect_status_set(const char *title, const char *detail, const char *action, bool show_spinner,
+                                         bool alert) {
+    if (!is_initialized) {
+        ESP_LOGW(TAG, "Display not initialized for voice connect status");
+        return -1;
+    }
+
+    bool lvgl_locked = lvgl_port_lock(0);
+    if (!lvgl_locked) {
+        ESP_LOGW(TAG, "Failed to lock LVGL for voice connect status");
+        return -1;
+    }
+
+    if (!hal_display_ensure_voice_connect_status_locked(show_spinner, alert)) {
+        lvgl_port_unlock();
+        ESP_LOGW(TAG, "Failed to create voice connect status page");
+        return -1;
+    }
+
+    const char *safe_title = title != NULL ? title : "";
+    const char *safe_detail = detail != NULL ? detail : "";
+    const char *safe_action = action != NULL ? action : "";
+    const char *display_action = hal_display_action_button_text(safe_action);
+
+    if (label_text != NULL && lv_obj_is_valid(label_text)) {
+        lv_label_set_text(label_text, "");
+    }
+    hal_display_update_text_overlay_visibility_locked("");
+
+    lv_obj_set_style_text_font(voice_connect_title_label, hal_display_select_text_font(safe_title, 22), 0);
+    lv_obj_set_style_text_font(voice_connect_detail_label, hal_display_select_text_font(safe_detail, 14), 0);
+    lv_obj_set_style_text_font(voice_connect_action_label, hal_display_select_text_font(display_action, 20), 0);
+    lv_obj_set_style_text_color(voice_connect_detail_label,
+                                alert ? lv_palette_lighten(LV_PALETTE_ORANGE, 2) : lv_color_hex(0xB8C0CC), 0);
+    lv_obj_set_style_text_color(voice_connect_action_label, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(voice_connect_action_button, lv_color_hex(0x0F8F68), 0);
+    lv_obj_set_style_border_color(voice_connect_action_button, lv_color_hex(0xA8FFE8), 0);
+    lv_obj_set_style_shadow_color(voice_connect_action_button, lv_color_hex(0x7DFFD6), 0);
+
+    lv_label_set_text(voice_connect_title_label, safe_title);
+    lv_label_set_text(voice_connect_detail_label, safe_detail);
+    lv_label_set_text(voice_connect_action_label, display_action);
+    lv_obj_center(voice_connect_action_label);
+    if (safe_action[0] != '\0') {
+        lv_obj_clear_flag(voice_connect_panel, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(voice_connect_action_button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(voice_connect_action_button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(voice_connect_action_button, LV_OPA_COVER, 0);
+        lv_obj_set_style_shadow_width(voice_connect_action_button, 18, 0);
+        lv_obj_set_style_shadow_opa(voice_connect_action_button, LV_OPA_50, 0);
+    } else {
+        lv_obj_clear_flag(voice_connect_panel, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(voice_connect_action_button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(voice_connect_action_button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(voice_connect_action_button, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_shadow_width(voice_connect_action_button, 0, 0);
+    }
+    lv_obj_move_foreground(voice_connect_panel);
+
+    lvgl_port_unlock();
+    return 0;
+}
+
+void hal_display_voice_connect_status_set_action_callback(hal_display_voice_connect_action_cb_t cb, void *user_ctx) {
+    voice_connect_action_cb = cb;
+    voice_connect_action_user_ctx = user_ctx;
+    ESP_LOGI(TAG, "Voice connect action callback set has_cb=%d", cb != NULL);
+}
+
+void hal_display_voice_connect_status_clear(void) {
+    if (voice_connect_panel == NULL) {
+        return;
+    }
+
+    bool lvgl_locked = lvgl_port_lock(0);
+    if (!lvgl_locked) {
+        ESP_LOGW(TAG, "Failed to lock LVGL for voice connect status clear");
+        return;
+    }
+
+    hal_display_voice_connect_status_clear_locked();
+    hal_display_raise_text_overlay_locked();
+    lvgl_port_unlock();
+}
+
+static void hal_display_capture_bsp_inputs(void) {
+    lv_indev_t *indev = NULL;
+
+    s_panel_handle = bsp_lcd_get_panel_handle();
+    s_touch_handle = bsp_lcd_get_touch_handle();
+
+    while ((indev = lv_indev_get_next(indev)) != NULL) {
+        lv_indev_type_t type = lv_indev_get_type(indev);
+
+        if (type == LV_INDEV_TYPE_ENCODER && s_knob_indev == NULL) {
+            s_knob_indev = indev;
+        } else if (type == LV_INDEV_TYPE_POINTER && s_touch_indev == NULL) {
+            s_touch_indev = indev;
+        }
+    }
+    inputs_initialized = (s_knob_indev != NULL) || (s_touch_indev != NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -869,34 +705,24 @@ int hal_display_minimal_init(void) {
     }
     ESP_LOGI(TAG, "IO expander initialized, LCD power ON");
 
-    /* 2. Initialize LVGL display only.
-     * Deliberately avoid SDK input-device setup during BLE provisioning. */
-    lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-    lvgl_cfg.task_priority = CONFIG_LVGL_PORT_TASK_PRIORITY;
-    lvgl_cfg.task_affinity = CONFIG_LVGL_PORT_TASK_AFFINITY;
-    lvgl_cfg.task_stack = CONFIG_LVGL_PORT_TASK_STACK_SIZE;
-    lvgl_cfg.task_max_sleep_ms = CONFIG_LVGL_PORT_TASK_MAX_SLEEP_MS;
-    lvgl_cfg.timer_period_ms = CONFIG_LVGL_PORT_TIMER_PERIOD_MS;
-    if (lvgl_port_init(&lvgl_cfg) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize LVGL port");
+    /* 2. Use the board BSP path, matching the factory firmware: display,
+     * encoder, and touch are registered with LVGL as one initialization step.
+     */
+    s_display = bsp_lvgl_init();
+    if (s_display == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize BSP LVGL display and inputs");
         return -1;
     }
-    if (hal_display_lcd_panel_init() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize LCD panel");
-        return -1;
-    }
-    if (hal_display_add_lcd_display() == NULL) {
-        ESP_LOGE(TAG, "Failed to initialize LVGL");
-        return -1;
-    }
-    ESP_LOGI(TAG, "LVGL initialized");
+    hal_display_capture_bsp_inputs();
+    ESP_LOGI(TAG, "LVGL initialized through BSP path (knob=%d touch=%d)", s_knob_indev != NULL ? 1 : 0,
+             s_touch_indev != NULL ? 1 : 0);
 
-    /* 3. Set backlight brightness */
-    esp_err_t ret = bsp_lcd_brightness_set(50);
+    /* 3. Keep the BSP-configured default brightness. */
+    esp_err_t ret = bsp_lcd_brightness_set(CONFIG_BSP_LCD_DEFAULT_BRIGHTNESS);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to set brightness: %d", ret);
     } else {
-        ESP_LOGI(TAG, "Backlight set to 50%%");
+        ESP_LOGI(TAG, "Backlight set to %d%%", CONFIG_BSP_LCD_DEFAULT_BRIGHTNESS);
     }
 
     /* 4. Initialize LVGL PNG decoder (needed for boot animation error emoji) */
@@ -949,17 +775,8 @@ int hal_display_init(void) {
     /* 7. Create text overlay AFTER emoji - so it stays in foreground */
     hal_display_create_text_overlay_locked(scr, "Ready");
 
-    /* 9. Initialize animation system */
-    if (emoji_anim_init(img_emoji) == 0) {
-        /* Start with happy animation */
-        lvgl_port_lock(0);
-        emoji_anim_start(EMOJI_ANIM_HAPPY);
-        hal_display_raise_text_overlay_locked();
-        lvgl_port_unlock();
-    }
-
     is_initialized = true;
-    ESP_LOGI(TAG, "Display initialized with LVGL and emoji animations");
+    ESP_LOGI(TAG, "Display initialized with LVGL animation surface and text overlay");
     return 0;
 }
 
@@ -967,12 +784,12 @@ int hal_display_init(void) {
 /* Display UI init - called after boot animation finishes                */
 /* ------------------------------------------------------------------ */
 
-int hal_display_ui_init(void) {
+static int hal_display_ui_init_internal(const char *initial_text, bool enable_animation) {
     if (is_initialized) {
         return 0; /* Already initialized */
     }
 
-    ESP_LOGI(TAG, "Initializing display UI...");
+    ESP_LOGI(TAG, "Initializing display UI%s...", enable_animation ? "" : " (text only)");
 
     /* 1. Minimal init is already done by hal_display_minimal_init() at boot.
      * hal_display_minimal_init() is idempotent and returns early if already done. */
@@ -981,11 +798,13 @@ int hal_display_ui_init(void) {
         return -1;
     }
 
-    /* 3. Get old boot screen before locking (for deferred deletion) */
-    lv_obj_t *old_boot_scr = boot_anim_get_screen();
-
     /* 4. Create new main screen and load it (under LVGL lock) */
     lvgl_port_lock(0);
+    hal_display_reset_voice_connect_status_handles_locked();
+
+    /* Replace only the currently active screen. Other feature-owned cached
+     * screens remain the responsibility of their owning subsystem. */
+    lv_obj_t *old_active_scr = lv_disp_get_scr_act(NULL);
 
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
@@ -993,83 +812,162 @@ int hal_display_ui_init(void) {
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
-    /* 4. Create emoji image FIRST (centered) - so it's in background */
-    img_emoji = lv_img_create(scr);
-    lv_obj_align(img_emoji, LV_ALIGN_CENTER, 0, 0);
+    if (enable_animation) {
+        img_emoji = lv_img_create(scr);
+        lv_obj_align(img_emoji, LV_ALIGN_CENTER, 0, 0);
+    } else {
+        img_emoji = NULL;
+    }
 
-    /* 5. Create text overlay AFTER emoji - so it's in foreground */
-    hal_display_create_text_overlay_locked(scr, "Ready");
+    /* 5. Create text overlay AFTER emoji - so it's in foreground.
+     * The first-frame text belongs to the app that opens this UI. Do not use a
+     * hard-coded "Ready" here, otherwise every local app can briefly flash a
+     * stale label before its behavior state is applied.
+     */
+    hal_display_create_text_overlay_locked(scr, initial_text != NULL ? initial_text : "");
 
     /* Load the new main screen FIRST - so user sees black screen immediately */
     lv_disp_load_scr(scr);
+    s_behavior_screen = scr;
 
-    /* Defer boot screen deletion until LVGL is idle to avoid refresh-time use-after-free. */
-    if (old_boot_scr) {
-        lv_obj_del_async(old_boot_scr);
+    /* Defer old screen deletion until LVGL is idle to avoid refresh-time use-after-free. */
+    lv_obj_t *retained_screen = s_retained_previous_screen_once;
+    s_retained_previous_screen_once = NULL;
+    if (old_active_scr != NULL && old_active_scr != scr && old_active_scr != retained_screen) {
+        lv_obj_del_async(old_active_scr);
     }
 
     lvgl_port_unlock();
 
-    /* Give LVGL time to refresh the screen before loading animation */
+    /* Give LVGL time to make the new surface active before its owner binds it. */
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    /* 6. Initialize animation system and start default happy animation.
-     * Boot sequence is already handled by boot_anim during early startup. */
-    ESP_LOGI(TAG, "Initializing animation system...");
-    if (emoji_anim_init(img_emoji) == 0) {
-        ESP_LOGI(TAG, "Starting happy animation...");
-        lvgl_port_lock(0);
-        emoji_anim_start(EMOJI_ANIM_HAPPY);
-        hal_display_raise_text_overlay_locked();
-        lvgl_port_unlock();
-        ESP_LOGI(TAG, "Happy animation started");
-    } else {
-        ESP_LOGW(TAG, "Failed to initialize animation system");
-    }
-
     is_initialized = true;
-    ESP_LOGI(TAG, "Display UI initialized with LVGL and emoji animations");
+    ESP_LOGI(TAG, "Display UI initialized with LVGL%s", enable_animation ? " animation surface" : " text only");
     return 0;
 }
 
-int hal_display_input_init(void) {
-    bool button_ready;
+int hal_display_ui_init_with_text(const char *initial_text) {
+    return hal_display_ui_init_internal(initial_text, true);
+}
 
+int hal_display_ui_init_text_only(const char *initial_text) {
+    return hal_display_ui_init_internal(initial_text, false);
+}
+
+int hal_display_ui_upgrade_to_animation(void) {
+    lvgl_port_lock(0);
+    if (!is_initialized || s_behavior_screen == NULL || !lv_obj_is_valid(s_behavior_screen) ||
+        lv_disp_get_scr_act(NULL) != s_behavior_screen) {
+        lvgl_port_unlock();
+        ESP_LOGE(TAG, "Cannot upgrade animation surface outside the HAL-owned behavior screen");
+        return -1;
+    }
+    if (img_emoji != NULL) {
+        lvgl_port_unlock();
+        return 0;
+    }
+
+    img_emoji = lv_img_create(s_behavior_screen);
+    if (img_emoji == NULL) {
+        lvgl_port_unlock();
+        ESP_LOGE(TAG, "Failed to create animation surface on active text UI");
+        return -1;
+    }
+    lv_obj_align(img_emoji, LV_ALIGN_CENTER, 0, 0);
+    if (text_overlay != NULL) {
+        lv_obj_move_foreground(text_overlay);
+    }
+    lvgl_port_unlock();
+
+    ESP_LOGI(TAG, "Text-only behavior UI upgraded with LVGL animation surface");
+    return 0;
+}
+
+int hal_display_ui_init(void) {
+    return hal_display_ui_init_with_text("Ready");
+}
+
+void hal_display_retain_previous_screen_once(void *screen) {
+    s_retained_previous_screen_once = (lv_obj_t *)screen;
+}
+
+static void hal_display_release_behavior_screen_locked(void) {
+    lv_obj_t *old_active_scr = lv_disp_get_scr_act(NULL);
+    lv_obj_t *blank_scr;
+
+    if (s_behavior_screen == NULL || !lv_obj_is_valid(s_behavior_screen)) {
+        return;
+    }
+    if (old_active_scr != s_behavior_screen) {
+        lv_obj_del_async(s_behavior_screen);
+        return;
+    }
+
+    blank_scr = lv_obj_create(NULL);
+
+    if (blank_scr == NULL) {
+        ESP_LOGW(TAG, "Failed to create blank behavior-exit screen");
+        return;
+    }
+
+    lv_obj_set_size(blank_scr, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(blank_scr, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(blank_scr, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(blank_scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(blank_scr, LV_SCROLLBAR_MODE_OFF);
+
+    lv_disp_load_scr(blank_scr);
+    lv_obj_del(old_active_scr);
+}
+
+void hal_display_ui_deinit(void) {
+    if (!is_initialized) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Deinitializing behavior display UI handles");
+
+    lvgl_port_lock(0);
+    hal_display_voice_connect_status_clear_locked();
+    hal_display_release_behavior_screen_locked();
+    img_emoji = NULL;
+    label_text = NULL;
+    text_overlay = NULL;
+    s_behavior_screen = NULL;
+    hal_display_reset_voice_connect_status_handles_locked();
+    is_initialized = false;
+    lvgl_port_unlock();
+}
+
+void *hal_display_get_animation_surface(void) {
+    return (void *)img_emoji;
+}
+
+int hal_display_input_init(void) {
     if (inputs_initialized) {
-        ESP_LOGI(TAG, "Delayed display inputs already initialized (knob=%d touch=%d)", s_knob_indev != NULL ? 1 : 0,
+        ESP_LOGI(TAG, "BSP display inputs already initialized (knob=%d touch=%d)", s_knob_indev != NULL ? 1 : 0,
                  s_touch_indev != NULL ? 1 : 0);
         return 0;
     }
 
     if (hal_display_minimal_init() != 0) {
-        ESP_LOGW(TAG, "Delayed display inputs aborted because minimal display init is unavailable");
+        ESP_LOGW(TAG, "BSP display input check aborted because minimal display init is unavailable");
         return -1;
     }
 
-    ESP_LOGI(TAG, "Initializing delayed display inputs...");
-
-    button_ready = hal_button_io_ready();
-    ESP_LOGI(TAG, "Button IO ready probe result=%d", button_ready ? 1 : 0);
-
-    if (button_ready) {
-        if (hal_display_init_knob_input() == NULL) {
-            ESP_LOGW(TAG, "Knob input initialization failed after successful button probe");
-        }
-    } else {
-        ESP_LOGW(TAG, "Skipping knob input initialization because IO expander button probe failed");
-    }
-    if (hal_display_init_touch_input() == NULL) {
-        ESP_LOGW(TAG, "Touch input initialization failed");
-    }
-
-    inputs_initialized = (s_knob_indev != NULL) || (s_touch_indev != NULL);
-    ESP_LOGI(TAG, "Delayed display inputs ready: knob=%d touch=%d any=%d", s_knob_indev != NULL ? 1 : 0,
+    hal_display_capture_bsp_inputs();
+    ESP_LOGI(TAG, "BSP display inputs ready: knob=%d touch=%d any=%d", s_knob_indev != NULL ? 1 : 0,
              s_touch_indev != NULL ? 1 : 0, inputs_initialized ? 1 : 0);
     return inputs_initialized ? 0 : -1;
 }
 
 bool hal_display_has_knob_input(void) {
     return s_knob_indev != NULL;
+}
+
+bool hal_display_has_touch_input(void) {
+    return s_touch_indev != NULL;
 }
 
 int hal_display_set_text_with_style(const char *text, int font_size, bool alert_text) {
@@ -1092,6 +990,10 @@ int hal_display_set_text_with_style(const char *text, int font_size, bool alert_
         strcpy(truncated + MAX_DISPLAY_CHARS, "...");
         ESP_LOGI(TAG, "Set text (truncated): '%s' -> '%s'", text, truncated);
         lvgl_port_lock(0);
+        if (!hal_display_text_target_ready_locked()) {
+            lvgl_port_unlock();
+            return -1;
+        }
         hal_display_apply_text_style_locked(text, font_size, alert_text);
         lv_label_set_text(label_text, truncated);
         hal_display_update_text_overlay_visibility_locked(truncated);
@@ -1100,6 +1002,10 @@ int hal_display_set_text_with_style(const char *text, int font_size, bool alert_
     } else {
         ESP_LOGI(TAG, "Set text: '%s' (size %d)", text, font_size);
         lvgl_port_lock(0);
+        if (!hal_display_text_target_ready_locked()) {
+            lvgl_port_unlock();
+            return -1;
+        }
         hal_display_apply_text_style_locked(text, font_size, alert_text);
         lv_label_set_text(label_text, text);
         hal_display_update_text_overlay_visibility_locked(text);
@@ -1112,86 +1018,4 @@ int hal_display_set_text_with_style(const char *text, int font_size, bool alert_
 
 int hal_display_set_text(const char *text, int font_size) {
     return hal_display_set_text_with_style(text, font_size, false);
-}
-
-int hal_display_set_emoji(int emoji_id) {
-    if (!is_initialized || !img_emoji) {
-        ESP_LOGW(TAG, "Display not initialized");
-        return -1;
-    }
-
-    /* Map UI emoji type to animation type */
-    emoji_anim_type_t type = map_emoji_type(emoji_id);
-
-    /* emoji_anim_start calls LVGL APIs - must hold lock */
-    lvgl_port_lock(0);
-    int ret = emoji_anim_start(type);
-    hal_display_raise_text_overlay_locked();
-    lvgl_port_unlock();
-    if (ret != 0) {
-        ESP_LOGW(TAG, "Failed to start animation for emoji ID: %d", emoji_id);
-        return -1;
-    }
-
-    const char *emoji_name = hal_display_emoji_name(emoji_id);
-    emoji_anim_type_t displayed_type = emoji_anim_get_type();
-    if (!emoji_anim_is_switch_pending() && displayed_type == type) {
-        ESP_LOGI(TAG, "Set emoji request: %s -> %s animation applied", emoji_name, emoji_type_name(type));
-    } else {
-        ESP_LOGI(TAG, "Set emoji request: %s -> %s animation accepted, async preparation in progress (active=%s)",
-                 emoji_name, emoji_type_name(type),
-                 displayed_type == EMOJI_ANIM_NONE ? "none" : emoji_type_name(displayed_type));
-    }
-    return 0;
-}
-
-int hal_display_get_current_emoji_id(void) {
-    if (!is_initialized || !img_emoji) {
-        return -1;
-    }
-
-    return hal_display_anim_type_to_emoji_id(emoji_anim_get_type());
-}
-
-/**
- * @brief Start speaking animation (for voice interaction)
- */
-int hal_display_start_speaking(void) {
-    if (!is_initialized)
-        return -1;
-    lvgl_port_lock(0);
-    int ret = emoji_anim_start(EMOJI_ANIM_SPEAKING);
-    hal_display_raise_text_overlay_locked();
-    lvgl_port_unlock();
-    return ret;
-}
-
-int hal_display_start_listening(void) {
-    if (!is_initialized)
-        return -1;
-    lvgl_port_lock(0);
-    int ret = emoji_anim_start(EMOJI_ANIM_LISTENING);
-    hal_display_raise_text_overlay_locked();
-    lvgl_port_unlock();
-    return ret;
-}
-
-int hal_display_start_analyzing(void) {
-    if (!is_initialized)
-        return -1;
-    lvgl_port_lock(0);
-    int ret = emoji_anim_start(EMOJI_ANIM_PROCESSING);
-    hal_display_raise_text_overlay_locked();
-    lvgl_port_unlock();
-    return ret;
-}
-
-int hal_display_stop_animation(void) {
-    if (!is_initialized)
-        return -1;
-    lvgl_port_lock(0);
-    int ret = emoji_anim_start(EMOJI_ANIM_STANDBY);
-    hal_display_raise_text_overlay_locked();
-    lvgl_port_unlock();
-    return ret;
 }

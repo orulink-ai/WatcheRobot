@@ -173,6 +173,20 @@ esp_err_t mcu_link_bootstrap_start(void) {
     return mcu_link_bootstrap_send_hello_req();
 }
 
+void mcu_link_bootstrap_stop(void) {
+    if (!s_link_initialized) {
+        mcu_link_uart_deinit();
+        return;
+    }
+
+    mcu_link_uart_deinit();
+    memset(&s_link, 0, sizeof(s_link));
+    s_link_initialized = false;
+    s_first_hello_req_us = 0;
+    s_last_hello_req_us = 0;
+    ESP_LOGI(TAG, "MCU link bootstrap stopped");
+}
+
 mcu_link_state_t mcu_link_bootstrap_get_state(void) {
     return s_link_initialized ? mcu_link_get_state(&s_link) : MCU_LINK_STATE_DOWN;
 }

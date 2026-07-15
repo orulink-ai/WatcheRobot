@@ -25,6 +25,9 @@ param(
     [switch]$WakeWord,
 
     [Parameter()]
+    [switch]$HeapTaskTracking,
+
+    [Parameter()]
     [switch]$NoMonitor,
 
     [Parameter()]
@@ -464,6 +467,10 @@ if ($BuildPath) {
         $resolvedBuildPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath $BuildPath))
     }
 }
+elseif ($HeapTaskTracking) {
+    $variantBuildName = if ($NoWake) { "build-no-wake-heap-task-tracking" } else { "build-heap-task-tracking" }
+    $resolvedBuildPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath $variantBuildName))
+}
 
 if ($NoWake -and $WakeWord) {
     throw "-NoWake and -WakeWord cannot be used together."
@@ -473,22 +480,35 @@ $useNoWake = $NoWake -or ((-not $WakeWord) -and $projectVersion -eq "V2.3.0")
 $resolvedSdkconfigPath = $null
 $sdkconfigDefaultsValue = $null
 if ($useNoWake) {
-    if (-not $BuildPath) {
+    if (-not $BuildPath -and -not $HeapTaskTracking) {
         $resolvedBuildPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath "build-no-wake"))
     }
-
+}
+if ($HeapTaskTracking) {
+    $resolvedSdkconfigPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedBuildPath "sdkconfig"))
+} elseif ($useNoWake) {
     $resolvedSdkconfigPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath "sdkconfig.no-wake"))
-    $sdkconfigDefaultPaths = @(
-        [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath "sdkconfig.defaults")),
-        [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath "sdkconfig.no-wake.defaults"))
-    )
+}
 
+$baseSdkconfigPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath $(if ($useNoWake) { "sdkconfig.no-wake" } else { "sdkconfig" })))
+$sdkconfigDefaultPaths = @()
+if ($HeapTaskTracking) {
+    $sdkconfigDefaultPaths += $baseSdkconfigPath
+} else {
+    $sdkconfigDefaultPaths += [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath "sdkconfig.defaults"))
+}
+if ($useNoWake -and -not $HeapTaskTracking) {
+    $sdkconfigDefaultPaths += [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath "sdkconfig.no-wake.defaults"))
+}
+if ($HeapTaskTracking) {
+    $sdkconfigDefaultPaths += [System.IO.Path]::GetFullPath((Join-Path $resolvedProjectPath "sdkconfig.heap-task-tracking.defaults"))
+}
+if ($useNoWake -or $HeapTaskTracking) {
     foreach ($sdkconfigDefaultPath in $sdkconfigDefaultPaths) {
         if (-not (Test-Path $sdkconfigDefaultPath)) {
-            throw "no-wake build is missing default sdkconfig file: $sdkconfigDefaultPath"
+            throw "build is missing default sdkconfig file: $sdkconfigDefaultPath"
         }
     }
-
     $sdkconfigDefaultsValue = $sdkconfigDefaultPaths -join ";"
 }
 
@@ -508,9 +528,11 @@ if ($resolvedBuildPath) {
     $flashArgs += "-B"
     $flashArgs += $resolvedBuildPath
 }
-if ($useNoWake) {
+if ($useNoWake -or $HeapTaskTracking) {
     $flashArgs += "-D"
     $flashArgs += "SDKCONFIG=$resolvedSdkconfigPath"
+}
+if ($useNoWake -or $HeapTaskTracking) {
     $flashArgs += "-D"
     $flashArgs += "SDKCONFIG_DEFAULTS=$sdkconfigDefaultsValue"
 }
@@ -546,8 +568,11 @@ if ($resolvedBuildPath) {
     Write-Host "Build   : $resolvedBuildPath"
 }
 Write-Host "Variant : $(if ($useNoWake) { 'no-wake' } else { 'wake-word' })"
+Write-Host "Diag    : $(if ($HeapTaskTracking) { 'heap-task-tracking' } else { 'off' })"
 if ($useNoWake) {
     Write-Host "SDKCONF : $resolvedSdkconfigPath"
+}
+if ($useNoWake -or $HeapTaskTracking) {
     Write-Host "Defaults: $sdkconfigDefaultsValue"
 }
 if ($DeviceAlias) {
@@ -579,6 +604,12 @@ if ($NoMonitor) {
 
 if ($DryRun) {
     exit 0
+}
+if ($HeapTaskTracking) {
+    $null = New-Item -ItemType Directory -Path $resolvedBuildPath -Force
+    if (-not $NoBuild) {
+        Remove-Item -LiteralPath $resolvedSdkconfigPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Push-Location $resolvedProjectPath

@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "server_pairing.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
@@ -18,7 +19,7 @@
 
 /* Buffer sizes */
 #define RX_BUF_SIZE 512
-#define TX_BUF_SIZE 256
+#define TX_BUF_SIZE 512
 
 /* Global state */
 static bool g_initialized = false;
@@ -48,10 +49,16 @@ static void get_device_id(char *buf, size_t len) {
 /* Helper: Parse ANNOUNCE response                                     */
 /* ------------------------------------------------------------------ */
 
-static int parse_announce(const char *json, server_info_t *info) {
+static int parse_announce(const char *json, const char *expected_nonce, server_info_t *info) {
     cJSON *root = cJSON_Parse(json);
     if (!root) {
         ESP_LOGW(TAG, "Failed to parse JSON");
+        return -1;
+    }
+
+    if (!server_pairing_verify_announce_json(json, expected_nonce)) {
+        ESP_LOGW(TAG, "ANNOUNCE authentication rejected");
+        cJSON_Delete(root);
         return -1;
     }
 
@@ -103,6 +110,18 @@ static int parse_announce(const char *json, server_info_t *info) {
         info->server[sizeof(info->server) - 1] = '\0';
     }
 
+    cJSON *server_id = cJSON_GetObjectItem(root, "server_id");
+    if (server_id && cJSON_IsString(server_id)) {
+        strncpy(info->server_id, server_id->valuestring, sizeof(info->server_id) - 1);
+        info->server_id[sizeof(info->server_id) - 1] = '\0';
+    }
+
+    cJSON *pairing_id = cJSON_GetObjectItem(root, "pairing_id");
+    if (pairing_id && cJSON_IsString(pairing_id)) {
+        strncpy(info->pairing_id, pairing_id->valuestring, sizeof(info->pairing_id) - 1);
+        info->pairing_id[sizeof(info->pairing_id) - 1] = '\0';
+    }
+
     cJSON_Delete(root);
     info->discovered = true;
     return 0;
@@ -123,7 +142,27 @@ int discovery_init(void) {
 /* Public: Start service discovery                                     */
 /* ------------------------------------------------------------------ */
 
-int discovery_start_with_timeout(server_info_t *info, int timeout_ms) {
+static bool discovery_cancel_requested(discovery_cancel_fn_t cancel_fn, void *cancel_ctx) {
+    return cancel_fn != NULL && cancel_fn(cancel_ctx);
+}
+
+static bool discovery_delay_or_cancel(int delay_ms, discovery_cancel_fn_t cancel_fn, void *cancel_ctx) {
+    int remaining_ms = delay_ms;
+
+    while (remaining_ms > 0) {
+        int chunk_ms = remaining_ms > 100 ? 100 : remaining_ms;
+
+        if (discovery_cancel_requested(cancel_fn, cancel_ctx)) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(chunk_ms));
+        remaining_ms -= chunk_ms;
+    }
+
+    return discovery_cancel_requested(cancel_fn, cancel_ctx);
+}
+
+int discovery_start_with_cancel(server_info_t *info, int timeout_ms, discovery_cancel_fn_t cancel_fn, void *cancel_ctx) {
     if (!g_initialized) {
         ESP_LOGE(TAG, "Discovery not initialized");
         return -1;
@@ -136,6 +175,7 @@ int discovery_start_with_timeout(server_info_t *info, int timeout_ms) {
     char rx_buf[RX_BUF_SIZE];
     char mac_str[18];
     char device_id[32];
+    char nonce[SERVER_PAIRING_NONCE_LEN] = {0};
 
     /* Create UDP socket */
     sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -163,8 +203,14 @@ int discovery_start_with_timeout(server_info_t *info, int timeout_ms) {
     get_mac_string(mac_str, sizeof(mac_str));
     get_device_id(device_id, sizeof(device_id));
 
-    /* Build discovery message */
-    snprintf(tx_buf, sizeof(tx_buf), "{\"cmd\":\"DISCOVER\",\"device_id\":\"%s\",\"mac\":\"%s\"}", device_id, mac_str);
+    if (server_pairing_make_nonce(nonce, sizeof(nonce)) != ESP_OK) {
+        nonce[0] = '\0';
+    }
+    if (server_pairing_build_discover_json(tx_buf, sizeof(tx_buf), device_id, mac_str, nonce) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to build discovery payload");
+        close(sock);
+        return -1;
+    }
 
     /* Setup broadcast address */
     struct sockaddr_in dest_addr;
@@ -194,6 +240,10 @@ int discovery_start_with_timeout(server_info_t *info, int timeout_ms) {
     while (1) {
         /* Check timeout */
         int64_t elapsed = (esp_timer_get_time() / 1000) - start_time;
+        if (discovery_cancel_requested(cancel_fn, cancel_ctx)) {
+            ESP_LOGI(TAG, "Discovery cancelled after %lld ms", elapsed);
+            break;
+        }
         if (elapsed >= effective_timeout_ms) {
             ESP_LOGW(TAG, "Discovery timeout after %lld ms", elapsed);
             break;
@@ -220,7 +270,7 @@ int discovery_start_with_timeout(server_info_t *info, int timeout_ms) {
             ESP_LOGI(TAG, "Received from %s: %s", inet_ntoa(from_addr.sin_addr), rx_buf);
 
             /* Parse response */
-            if (parse_announce(rx_buf, &g_server_info) == 0) {
+            if (parse_announce(rx_buf, nonce, &g_server_info) == 0) {
                 ESP_LOGI(TAG, "Discovered server: %s:%u (v%s, protocol=%s, server=%s)",
                          g_server_info.ip,
                          g_server_info.port,
@@ -236,7 +286,10 @@ int discovery_start_with_timeout(server_info_t *info, int timeout_ms) {
             }
         } else {
             /* Timeout - wait before retry */
-            vTaskDelay(pdMS_TO_TICKS(500));
+            if (discovery_delay_or_cancel(500, cancel_fn, cancel_ctx)) {
+                ESP_LOGI(TAG, "Discovery cancelled while waiting for retry");
+                break;
+            }
         }
 
         /* Reset retry count periodically */
@@ -251,7 +304,10 @@ int discovery_start_with_timeout(server_info_t *info, int timeout_ms) {
                 delay_ms = (int)remaining_ms;
             }
             if (delay_ms > 0) {
-                vTaskDelay(pdMS_TO_TICKS(delay_ms));
+                if (discovery_delay_or_cancel(delay_ms, cancel_fn, cancel_ctx)) {
+                    ESP_LOGI(TAG, "Discovery cancelled before next retry interval");
+                    break;
+                }
             }
             retry_count = 0;
         }
@@ -259,6 +315,10 @@ int discovery_start_with_timeout(server_info_t *info, int timeout_ms) {
 
     close(sock);
     return ret;
+}
+
+int discovery_start_with_timeout(server_info_t *info, int timeout_ms) {
+    return discovery_start_with_cancel(info, timeout_ms, NULL, NULL);
 }
 
 int discovery_start(server_info_t *info) {

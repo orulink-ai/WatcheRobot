@@ -17,11 +17,24 @@
 
 typedef void (*ble_service_connection_callback_t)(bool connected);
 
+typedef enum {
+    BLE_SERVICE_WIFI_CONFIG_EVENT_SAVED = 0,
+    BLE_SERVICE_WIFI_CONFIG_EVENT_CLEARED,
+} ble_service_wifi_config_event_t;
+
+typedef void (*ble_service_wifi_config_callback_t)(ble_service_wifi_config_event_t event);
+
 esp_err_t ble_service_init(void);
+esp_err_t ble_service_deinit(void);
 esp_err_t ble_service_start_advertising(void);
 esp_err_t ble_service_stop_advertising(void);
+esp_err_t ble_service_disconnect(void);
+esp_err_t ble_service_reset_session(void);
 bool ble_service_is_connected(void);
+bool ble_service_is_advertising_enabled(void);
+bool ble_service_is_advertising_active(void);
 esp_err_t ble_service_get_local_mac(char *buffer, size_t buffer_len);
 void ble_service_register_connection_callback(ble_service_connection_callback_t cb);
+void ble_service_register_wifi_config_callback(ble_service_wifi_config_callback_t cb);
 
 #endif /* BLE_SERVICE_H */

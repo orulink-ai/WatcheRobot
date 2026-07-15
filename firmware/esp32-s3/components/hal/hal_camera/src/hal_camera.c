@@ -500,6 +500,16 @@ static void hal_camera_abort_capture(void) {
     }
 }
 
+static esp_err_t hal_camera_request_frame(bool from_stream) {
+    if (from_stream) {
+        return sscma_client_invoke(s_ctx.client, 1, false, true);
+    }
+
+    /* Seeed's Watcher firmware uses SAMPLE for a one-shot still image and
+       reserves INVOKE for inference/preview traffic. */
+    return sscma_client_sample(s_ctx.client, 1);
+}
+
 static esp_err_t hal_camera_take_image_string(bool from_stream, char **image, int *image_size,
                                               hal_camera_capture_timing_t *timing) {
     esp_err_t ret;
@@ -517,7 +527,7 @@ static esp_err_t hal_camera_take_image_string(bool from_stream, char **image, in
     ESP_RETURN_ON_ERROR(hal_camera_prepare_capture(from_stream), TAG, "prepare capture failed");
 
     invoke_start_us = esp_timer_get_time();
-    ret = sscma_client_invoke(s_ctx.client, 1, false, true);
+    ret = hal_camera_request_frame(from_stream);
     invoke_return_us = esp_timer_get_time();
     if (ret != ESP_OK) {
         hal_camera_abort_capture();
@@ -847,6 +857,79 @@ esp_err_t hal_camera_init(void) {
 
     hal_camera_log_device_info();
     return ESP_OK;
+}
+
+esp_err_t hal_camera_deinit(void) {
+    esp_err_t status = ESP_OK;
+    esp_err_t ret;
+    bool callbacks_registered = false;
+
+    if (s_ctx.lock != NULL) {
+        status = hal_camera_stop();
+        if (status != ESP_OK) {
+            ESP_LOGW(TAG, "camera deinit deferred because stream stop failed: %s", esp_err_to_name(status));
+            return status;
+        }
+    }
+
+    if (s_ctx.lock != NULL && xSemaphoreTake(s_ctx.lock, portMAX_DELAY) == pdTRUE) {
+        callbacks_registered = s_ctx.callbacks_registered;
+        xSemaphoreGive(s_ctx.lock);
+    }
+
+    if (s_ctx.client != NULL && callbacks_registered) {
+        ret = sscma_client_register_callback(s_ctx.client, NULL, NULL);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "camera deinit deferred because callback unregister failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
+    if (s_ctx.lock != NULL && xSemaphoreTake(s_ctx.lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
+    }
+
+    if (s_ctx.lock != NULL) {
+        s_ctx.initialized = false;
+        s_ctx.connected = false;
+        s_ctx.init_in_progress = false;
+        s_ctx.callbacks_registered = false;
+        s_ctx.client_started = false;
+        s_ctx.capture_in_progress = false;
+        s_ctx.streaming = false;
+        s_ctx.stream_stop_requested = false;
+        s_ctx.stream_task = NULL;
+        s_ctx.stream_cb = NULL;
+        s_ctx.stream_ctx = NULL;
+        s_ctx.stream_fps = 0;
+        s_ctx.stream_frames_ok = 0;
+        s_ctx.stream_frames_err = 0;
+        hal_camera_clear_capture_locked();
+        xSemaphoreGive(s_ctx.lock);
+    }
+
+    if (s_ctx.client != NULL) {
+        ret = bsp_sscma_client_deinit();
+        if (ret != ESP_OK && status == ESP_OK) {
+            status = ret;
+        }
+        s_ctx.client = NULL;
+    }
+
+    if (s_ctx.connect_sem != NULL) {
+        vSemaphoreDelete(s_ctx.connect_sem);
+        s_ctx.connect_sem = NULL;
+    }
+    if (s_ctx.capture_sem != NULL) {
+        vSemaphoreDelete(s_ctx.capture_sem);
+        s_ctx.capture_sem = NULL;
+    }
+    if (s_ctx.lock != NULL) {
+        vSemaphoreDelete(s_ctx.lock);
+        s_ctx.lock = NULL;
+    }
+
+    return status;
 }
 
 esp_err_t hal_camera_configure(int width, int height, int quality, int *applied_width, int *applied_height) {

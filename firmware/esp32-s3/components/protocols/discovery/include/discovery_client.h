@@ -15,7 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define WATCHER_PROTOCOL_VERSION "0.1.5"
+#define WATCHER_PROTOCOL_VERSION "0.1.6"
 
 /* Discovery configuration */
 #define DISCOVERY_PORT 37020
@@ -30,8 +30,12 @@ typedef struct {
     char version[16]; /* Server version */
     char protocol_version[16]; /* Protocol version from discovery */
     char server[32];           /* Server name */
+    char server_id[64];        /* Paired server identity */
+    char pairing_id[32];       /* Paired hardware record */
     bool discovered;  /* Discovery successful flag */
 } server_info_t;
+
+typedef bool (*discovery_cancel_fn_t)(void *ctx);
 
 /**
  * @brief Initialize discovery client
@@ -62,6 +66,17 @@ int discovery_start(server_info_t *info);
  * @return 0 on success (server found), -1 on failure/timeout
  */
 int discovery_start_with_timeout(server_info_t *info, int timeout_ms);
+
+/**
+ * @brief Start service discovery with a caller-provided timeout and cancellation hook
+ *
+ * @param info Pointer to store discovered server info
+ * @param timeout_ms Discovery timeout in milliseconds. Values <= 0 use the default.
+ * @param cancel_fn Optional callback. Return true to abort discovery early.
+ * @param cancel_ctx Opaque context passed to cancel_fn.
+ * @return 0 on success (server found), -1 on failure/timeout/cancel
+ */
+int discovery_start_with_cancel(server_info_t *info, int timeout_ms, discovery_cancel_fn_t cancel_fn, void *cancel_ctx);
 
 /**
  * @brief Get discovered server URL

@@ -6,6 +6,7 @@
 #ifndef ANIM_STORAGE_H
 #define ANIM_STORAGE_H
 
+#include "animation_registry.h"
 #include "lvgl.h"
 
 #include <stdbool.h>
@@ -15,7 +16,7 @@
 #ifdef CONFIG_WATCHER_ANIM_RING_FRAMES
 #define WATCHER_ANIM_RING_FRAMES CONFIG_WATCHER_ANIM_RING_FRAMES
 #else
-#define WATCHER_ANIM_RING_FRAMES 3
+#define WATCHER_ANIM_RING_FRAMES 4
 #endif
 
 #define ANIM_MAX_PATH_LEN 96
@@ -24,45 +25,14 @@
 #define ANIM_MANIFEST_FALLBACK_PATH "/sdcard/anim_manifest.bin"
 #define ANIM_FRAME_FLAG_INDEXED8 0x0001U
 
-#ifdef CONFIG_WATCHER_ANIM_SWITCH_FADE_MS
-#define WATCHER_ANIM_SWITCH_FADE_MS CONFIG_WATCHER_ANIM_SWITCH_FADE_MS
-#else
-#define WATCHER_ANIM_SWITCH_FADE_MS 140
-#endif
-
 typedef enum {
-    EMOJI_ANIM_BOOT = 0,
-    EMOJI_ANIM_HAPPY,
-    EMOJI_ANIM_ERROR,
-    EMOJI_ANIM_BLUETOOTH,
-    EMOJI_ANIM_SPEAKING,
-    EMOJI_ANIM_LISTENING,
-    EMOJI_ANIM_PROCESSING,
-    EMOJI_ANIM_STANDBY,
-    EMOJI_ANIM_THINKING,
-    EMOJI_ANIM_CUSTOM_1,
-    EMOJI_ANIM_CUSTOM_2,
-    EMOJI_ANIM_CUSTOM_3,
-    EMOJI_ANIM_STANDBY_1,
-    EMOJI_ANIM_STANDBY_2,
-    EMOJI_ANIM_STANDBY_3,
-    EMOJI_ANIM_STANDBY_4,
-    EMOJI_ANIM_DISCONNECT,
-    EMOJI_ANIM_SHOCK,
-    EMOJI_ANIM_SUNGLASSES,
-    EMOJI_ANIM_SAD,
-    EMOJI_ANIM_GET,
-    EMOJI_ANIM_SMILE,
-    EMOJI_ANIM_RECHARGE,
-    EMOJI_ANIM_SPEECHLESS,
-    EMOJI_ANIM_CONCENTRATION,
-    EMOJI_ANIM_FONDLE_LOVE,
-    EMOJI_ANIM_FONDLE_ANGER,
-    EMOJI_ANIM_BLINK,
-    EMOJI_ANIM_UPGRADE,
-    EMOJI_ANIM_COUNT,
-    EMOJI_ANIM_NONE = -1
-} emoji_anim_type_t;
+    ANIM_STORAGE_OK = 0,
+    ANIM_STORAGE_INVALID_RESOURCE = -1,
+    ANIM_STORAGE_SD_OPEN_FAILED = -2,
+    ANIM_STORAGE_SD_READ_FAILED = -3,
+    ANIM_STORAGE_PACK_CORRUPT = -4,
+    ANIM_STORAGE_NO_MEMORY = -5,
+} anim_storage_result_t;
 
 typedef struct {
     bool available;
@@ -101,6 +71,7 @@ typedef struct {
     uint16_t frame_count;
     uint32_t payload_offset;
     uint32_t frame_data_size;
+    uint32_t payload_size;
     uint32_t file_pos;
     bool file_pos_valid;
 } anim_stream_t;

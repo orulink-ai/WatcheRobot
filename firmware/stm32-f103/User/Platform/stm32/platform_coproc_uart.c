@@ -107,11 +107,28 @@ static uint8_t Platform_CoprocUart_SetServoAngle(void *ctx, uint8_t servoIndex, 
     return ok;
 }
 
+static uint8_t Platform_CoprocUart_SetServoDegX10(void *ctx, uint8_t servoIndex, int16_t degX10, uint16_t *pulseUs)
+{
+    uint8_t ok;
+
+    (void)ctx;
+
+    ok = App_SetServoDegX10(servoIndex, degX10, pulseUs);
+    return ok;
+}
+
 static uint8_t Platform_CoprocUart_StopServo(void *ctx, uint8_t servoIndex)
 {
     (void)ctx;
 
     return App_StopServoMotion(servoIndex);
+}
+
+static uint8_t Platform_CoprocUart_ReleaseServo(void *ctx, uint8_t servoIndex)
+{
+    (void)ctx;
+
+    return App_ReleaseServo(servoIndex);
 }
 
 #if (APP_SERVO_FEEDBACK_ENABLE != 0U)
@@ -875,7 +892,9 @@ void Platform_CoprocUart_Init(void)
             .readTouchFn = Platform_CoprocUart_ReadTouch,
 #endif
             .setServoAngleFn = Platform_CoprocUart_SetServoAngle,
+            .setServoDegX10Fn = Platform_CoprocUart_SetServoDegX10,
             .stopServoFn = Platform_CoprocUart_StopServo,
+            .releaseServoFn = Platform_CoprocUart_ReleaseServo,
 #if (APP_SERVO_FEEDBACK_ENABLE != 0U)
             .readServoFeedbackFn = Platform_CoprocUart_ReadServoFeedback,
 #endif
@@ -892,7 +911,8 @@ void Platform_CoprocUart_Init(void)
             .stopBottomLedEffectFn = Platform_CoprocUart_StopBottomLedEffect,
 #endif
             .setPower5VFn = Platform_CoprocUart_SetPower5V,
-            .touchDebounceMs = 30U
+            .touchDebounceMs = 30U,
+            .servoFeedbackStateIntervalMs = APP_COPROC_SERVO_FEEDBACK_STATE_INTERVAL_MS
         };
         CoprocRuntime_Init(&s_uart2State.runtime, &runtimeConfig);
         CoprocProtocol_SetDispatchExtension(&s_uart2State.protocol, CoprocRuntime_ProcessFrame, &s_uart2State.runtime);

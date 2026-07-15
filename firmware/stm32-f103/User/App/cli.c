@@ -26,6 +26,7 @@ static uint8_t Cli_TryHandleServoLimitCommand(const char *cmd);
 static uint8_t Cli_TryHandleServoStatusCommand(const char *cmd);
 static uint8_t Cli_TryHandleServoCommand(const char *cmd);
 static uint8_t Cli_TryHandleServoFeedbackCommand(const char *cmd);
+static uint8_t Cli_TryHandleServoCalCommand(const char *cmd);
 static uint8_t Cli_TryHandleServoAngleCommand(const char *cmd);
 static uint8_t Cli_TryHandleWs2812Command(const char *cmd);
 static uint8_t Cli_TryHandleBottomIrTestCommand(const char *cmd);
@@ -96,6 +97,7 @@ void Cli_ExecuteCommand(const char *cmd)
         Platform_Uart_Print("  servo_off [id] - Release servo PWM output\r\n");
         Platform_Uart_Print("  servo_recip [id] - Start servo reciprocating motion\r\n");
         Platform_Uart_Print("  servo_fb    - Read servo feedback ADC raw/mV\r\n");
+        Platform_Uart_Print("  servo_cal [id] [samples] - Sample servo feedback raw min/max/avg\r\n");
         Platform_Uart_Print("  servo_angle [id] - Read estimated servo angle from feedback\r\n");
         Platform_Uart_Print("  ws red|green|blue|white|off - Control side WS2812\r\n");
         Platform_Uart_Print("  ws rgb <r> <g> <b> - Set side WS2812 RGB (0~255)\r\n");
@@ -144,6 +146,8 @@ void Cli_ExecuteCommand(const char *cmd)
     } else if (Cli_TryHandleServoStatusCommand(trimmedCmd) != 0U) {
         return;
     } else if (Cli_TryHandleServoFeedbackCommand(trimmedCmd) != 0U) {
+        return;
+    } else if (Cli_TryHandleServoCalCommand(trimmedCmd) != 0U) {
         return;
     } else if (Cli_TryHandleServoAngleCommand(trimmedCmd) != 0U) {
         return;
@@ -737,8 +741,10 @@ static uint8_t Cli_TryHandleServoStatusCommand(const char *cmd)
     char *endPtr;
     unsigned long servoIndex = 1UL;
     Servo_StateTypeDef state;
+    App_ServoFeedbackSnapshotTypeDef snapshot;
     uint8_t minAngle;
     uint8_t maxAngle;
+    uint8_t hasFeedback;
 
     if (strncmp(cursor, "servo_status", 12U) != 0) {
         return 0U;
@@ -762,6 +768,7 @@ static uint8_t Cli_TryHandleServoStatusCommand(const char *cmd)
         Platform_Uart_Print("Servo id must be 1 or 2\r\n");
         return 1U;
     }
+    hasFeedback = App_GetServoFeedbackSnapshot((uint8_t)servoIndex, &snapshot);
 
     Platform_Uart_Print("========== Servo Status ==========\r\n");
     Platform_Uart_Printf("  Servo : %lu\r\n", servoIndex);
@@ -773,6 +780,15 @@ static uint8_t Cli_TryHandleServoStatusCommand(const char *cmd)
     Platform_Uart_Printf("  Update : %u ms\r\n", state.motionUpdatePeriodMs);
     Platform_Uart_Printf("  Limit : %u~%u deg\r\n", minAngle, maxAngle);
     Platform_Uart_Printf("  Signal: %s\r\n", state.isSignalActive ? "ACTIVE" : "RELEASED");
+    if ((hasFeedback != 0U) && (snapshot.feedbackValid != 0U)) {
+        Platform_Uart_Print("  Feedback: VALID\r\n");
+        Platform_Uart_Printf("  Command Angle : %u deg\r\n", snapshot.commandAngle);
+        Platform_Uart_Printf("  Feedback Raw  : %u\r\n", snapshot.feedbackRaw);
+        Platform_Uart_Printf("  Feedback V    : %u mV\r\n", snapshot.feedbackMv);
+        Platform_Uart_Printf("  Feedback Angle: %u deg\r\n", snapshot.feedbackAngle);
+    } else {
+        Platform_Uart_Print("  Feedback: INVALID\r\n");
+    }
     Platform_Uart_Print("==================================\r\n");
     return 1U;
 }
@@ -1116,6 +1132,86 @@ static uint8_t Cli_TryHandleServoFeedbackCommand(const char *cmd)
         Platform_Uart_Print("  Servo2     : feedback not configured\r\n");
     }
     Platform_Uart_Print("====================================\r\n");
+
+    return 1U;
+}
+
+static uint8_t Cli_TryHandleServoCalCommand(const char *cmd)
+{
+    const char *cursor = cmd;
+    char *endPtr;
+    unsigned long servoIndex = 1UL;
+    unsigned long sampleCount = 64UL;
+    uint16_t raw;
+    uint16_t currentRaw = 0U;
+    uint16_t minRaw = APP_SERVO_FEEDBACK_ADC_MAX;
+    uint16_t maxRaw = 0U;
+    uint32_t sumRaw = 0U;
+    unsigned long index;
+
+    if (strncmp(cursor, "servo_cal", 9U) != 0) {
+        return 0U;
+    }
+
+    cursor += 9;
+    while (*cursor == ' ') {
+        cursor++;
+    }
+
+    if (*cursor != '\0') {
+        servoIndex = strtoul(cursor, &endPtr, 10);
+        if (endPtr == cursor) {
+            Platform_Uart_Print("Use: servo_cal [id] [samples]\r\n");
+            return 1U;
+        }
+        cursor = endPtr;
+        while (*cursor == ' ') {
+            cursor++;
+        }
+    }
+
+    if (*cursor != '\0') {
+        sampleCount = strtoul(cursor, &endPtr, 10);
+        if ((endPtr == cursor) || (*endPtr != '\0')) {
+            Platform_Uart_Print("Use: servo_cal [id] [samples]\r\n");
+            return 1U;
+        }
+    }
+
+    if ((servoIndex < 1UL) || (servoIndex > 2UL)) {
+        Platform_Uart_Print("Servo id must be 1 or 2\r\n");
+        return 1U;
+    }
+    if (sampleCount == 0UL) {
+        sampleCount = 1UL;
+    }
+    if (sampleCount > 1000UL) {
+        sampleCount = 1000UL;
+    }
+
+    for (index = 0UL; index < sampleCount; index++) {
+        if (App_GetServoFeedbackRaw((uint8_t)servoIndex, &raw) == 0U) {
+            Platform_Uart_Print("Servo feedback not configured or read failed\r\n");
+            return 1U;
+        }
+        currentRaw = raw;
+        if (raw < minRaw) {
+            minRaw = raw;
+        }
+        if (raw > maxRaw) {
+            maxRaw = raw;
+        }
+        sumRaw += raw;
+    }
+
+    Platform_Uart_Print("========== Servo Calibration ==========\r\n");
+    Platform_Uart_Printf("  Servo   : %lu\r\n", servoIndex);
+    Platform_Uart_Printf("  Samples : %lu\r\n", sampleCount);
+    Platform_Uart_Printf("  Current : %u\r\n", currentRaw);
+    Platform_Uart_Printf("  Min     : %u\r\n", minRaw);
+    Platform_Uart_Printf("  Max     : %u\r\n", maxRaw);
+    Platform_Uart_Printf("  Avg     : %lu\r\n", sumRaw / sampleCount);
+    Platform_Uart_Print("=======================================\r\n");
 
     return 1U;
 }

@@ -13,6 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 project(${CMAKE_PROJECT_NAME} LANGUAGES C ASM)
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 option(WATCHER_BUILD_FIRMWARE "Build the STM32 firmware target." ON)
 option(WATCHER_BUILD_HOST_TESTS "Build the native host protocol tests." OFF)
@@ -52,7 +53,8 @@ function(watcher_apply_arm_gcc_options target_name)
 
         target_compile_options(${target_name} PRIVATE
             ${WATCHER_ARM_MCU_FLAGS}
-            $<$<CONFIG:Debug>:-Og>
+            $<$<CONFIG:Debug>:-Os>
+            $<$<CONFIG:Release>:-Os>
             $<$<COMPILE_LANGUAGE:C>:-ffunction-sections>
             $<$<COMPILE_LANGUAGE:C>:-fdata-sections>
             $<$<COMPILE_LANGUAGE:ASM>:-x>
@@ -86,9 +88,21 @@ add_library(coproc_protocol_core STATIC
     ${PROTOCOL_SOURCES}
 )
 
+set(WATCHER_BUILD_INFO_HEADER "${CMAKE_BINARY_DIR}/generated/watcher_build_info.h")
+add_custom_target(watcher_build_info_gen
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/generated"
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_SOURCE_DIR}/Tools/generate_build_info.py"
+            --repo-root "${CMAKE_SOURCE_DIR}"
+            --output "${WATCHER_BUILD_INFO_HEADER}"
+    BYPRODUCTS "${WATCHER_BUILD_INFO_HEADER}"
+    COMMENT "Generating WatcheRobot STM32 build metadata")
+add_dependencies(coproc_protocol_core watcher_build_info_gen)
+
 target_include_directories(coproc_protocol_core PUBLIC
     User/Config
     User/Protocol
+    "${CMAKE_BINARY_DIR}/generated"
 )
 
 if(WATCHER_STRESS_BUILD OR WATCHER_BUILD_HOST_TESTS)

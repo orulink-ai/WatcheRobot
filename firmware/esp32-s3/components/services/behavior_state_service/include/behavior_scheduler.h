@@ -4,8 +4,8 @@
 #include "behavior_types.h"
 
 #include <stdbool.h>
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,6 +17,7 @@ typedef struct {
     int next_motion_index;
     int next_expression_index;
     int next_sound_index;
+    int next_light_index;
     int next_action_motion_index;
 } behavior_scheduler_snapshot_t;
 
@@ -28,6 +29,7 @@ typedef enum {
     BEHAVIOR_SCHEDULER_COMMAND_ACTION_MOTION,
     BEHAVIOR_SCHEDULER_COMMAND_EXPRESSION,
     BEHAVIOR_SCHEDULER_COMMAND_SOUND,
+    BEHAVIOR_SCHEDULER_COMMAND_LIGHT,
 } behavior_scheduler_command_type_t;
 
 typedef struct {
@@ -35,6 +37,7 @@ typedef struct {
     const behavior_motion_event_t *motion;
     const behavior_expression_event_t *expression;
     const behavior_sound_event_t *sound;
+    const behavior_light_event_t *light;
 } behavior_scheduler_command_t;
 
 typedef struct {
@@ -46,6 +49,7 @@ typedef struct {
     int next_action_motion_index;
     int next_expression_index;
     int next_sound_index;
+    int next_light_index;
 } behavior_scheduler_tick_input_t;
 
 typedef struct {
@@ -53,6 +57,7 @@ typedef struct {
     int next_action_motion_index;
     int next_expression_index;
     int next_sound_index;
+    int next_light_index;
     behavior_scheduler_command_t commands[BEHAVIOR_SCHEDULER_COMMAND_CAPACITY];
     size_t command_count;
     bool has_more_due_events;
@@ -64,6 +69,11 @@ bool behavior_scheduler_all_state_events_dispatched(const behavior_scheduler_sna
 bool behavior_scheduler_all_action_events_dispatched(const behavior_action_def_t *action, int next_action_motion_index);
 uint32_t behavior_scheduler_non_loop_done_at_ms(const behavior_state_def_t *state, const behavior_action_def_t *action,
                                                 uint32_t default_hold_ms);
+const char *behavior_scheduler_animation_transition_target(const behavior_state_def_t *state,
+                                                           const char *completed_animation);
+bool behavior_scheduler_should_defer_animation_transition_target(const behavior_state_def_t *state,
+                                                                 const char *requested_state,
+                                                                 const char *completed_animation);
 void behavior_scheduler_collect_due_events(const behavior_scheduler_tick_input_t *input,
                                            behavior_scheduler_tick_result_t *out_result);
 

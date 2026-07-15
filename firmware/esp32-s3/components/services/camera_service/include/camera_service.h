@@ -17,8 +17,10 @@
 typedef void (*camera_service_frame_cb_t)(const uint8_t *jpeg, size_t size, uint32_t timestamp_ms, void *ctx);
 
 esp_err_t camera_service_init(void);
+esp_err_t camera_service_deinit(void);
 esp_err_t camera_service_configure(int width, int height, int quality, int *applied_width, int *applied_height);
 esp_err_t camera_service_register_frame_callback(camera_service_frame_cb_t cb, void *ctx);
+esp_err_t camera_service_unregister_frame_callback(void);
 esp_err_t camera_service_start_stream(int fps);
 esp_err_t camera_service_stop_stream(void);
 esp_err_t camera_service_capture_once(void);

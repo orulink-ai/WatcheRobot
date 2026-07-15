@@ -1,13 +1,23 @@
 menu "Watcher WebSocket Client"
 
+    config WATCHER_WS_AUDIO_UPLINK_OPUS
+        bool "Advertise Opus microphone uplink"
+        default y
+        help
+            Advertise and use 16 kHz mono 60 ms Opus packets only after the
+            server explicitly selects Opus in the sys.client.hello ACK. PCM is
+            always retained as a compatibility fallback.
+
     config WATCHER_WS_AUDIO_QUEUE_DEPTH
         int "Audio upload queue depth"
-        default 4
-        range 2 8
+        default 128
+        range 8 128
         help
             Number of 1920-byte audio upload frames staged in PSRAM. The
-            protocol fragments payloads, so four frames keeps jitter tolerance
-            while reducing always-reserved PSRAM.
+            uploader normally sends two-frame batches and raises that to four
+            frames under queue or latency pressure. One hundred twenty-eight
+            slots provide about 7.7 seconds of headroom for transient Wi-Fi
+            retransmission stalls without consuming scarce internal RAM.
 
     config WATCHER_WS_AUDIO_STATS_LOG_INTERVAL_FRAMES
         int "Audio upload stats log interval"
@@ -19,14 +29,13 @@ menu "Watcher WebSocket Client"
 
     config WATCHER_WS_TTS_QUEUE_DEPTH
         int "TTS playback queue depth"
-        default 32
-        range 2 32
+        default 64
+        range 2 64
         help
-            Number of 4096-byte TTS frames staged in PSRAM before playback.
-            Thirty-two frames provide about 2.7 seconds of playback buffering
-            at 24kHz 16-bit mono. The frame pool is placed in PSRAM, so this
-            absorbs desktop/server TTS bursts without spending scarce
-            internal DMA-capable memory.
+            Number of 4096-byte TTS frames available for cloud speech
+            playback. Sixty-four frames provide about 5.4 seconds of PSRAM
+            buffering at 24kHz 16-bit mono, absorbing desktop/server TTS
+            bursts without spending scarce internal DMA-capable memory.
 
     config WATCHER_WS_TTS_MAX_PAYLOAD_BYTES
         int "Maximum inbound TTS payload bytes"
@@ -46,6 +55,45 @@ menu "Watcher WebSocket Client"
             playback slot before dropping the current inbound TTS chunk. The
             wait applies TCP backpressure when server-side TTS delivery is
             faster than local I2S playback.
+
+    config WATCHER_WS_TTS_START_BUFFER_FRAMES
+        int "TTS playback start buffer frames"
+        default 16
+        range 1 32
+        help
+            Number of 4096-byte TTS frames to buffer before starting cloud
+            speech playback. Sixteen frames provide roughly 1.36 seconds of
+            startup cushion at 24 kHz 16-bit mono. A short stream is still
+            allowed to drain as soon as its LAST frame arrives.
+
+    config WATCHER_WS_TTS_REBUFFER_FRAMES
+        int "TTS playback recovery buffer frames"
+        default 12
+        range 1 32
+        help
+            Amount of real PCM audio to accumulate after playback starvation
+            before resuming I2S writes. Twelve 4096-byte frames provide roughly
+            1.02 seconds of recovery cushion. A short tail still drains when
+            the stream LAST marker has arrived.
+
+    config WATCHER_WS_TTS_STARVATION_WARN_MS
+        int "TTS playback queue starvation warning (ms)"
+        default 60
+        range 0 1000
+        help
+            Log and count a playback queue starvation event when TTS playback
+            is already active but no queued frame arrives for at least this
+            many milliseconds. This catches audible stutter even when no
+            frames are dropped.
+
+    config WATCHER_WS_TTS_BUFFER_STATUS_INTERVAL_MS
+        int "TTS buffer status uplink interval (ms)"
+        default 200
+        range 50 2000
+        help
+            Minimum interval between non-forced TTS playback buffer status
+            events sent to the server. The server uses these watermarks to
+            adapt audio downlink pacing without requiring per-frame ACKs.
 
     config WATCHER_WS_TTS_RX_LOG_INTERVAL_FRAMES
         int "TTS receive log interval"

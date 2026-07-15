@@ -46,6 +46,15 @@ static CoprocStatus CoprocDispatch_RequirePayloadLength(const CoprocFrame *frame
     return (frame->header.payloadLength == expectedLength) ? COPROC_STATUS_OK : COPROC_STATUS_INVALID_SIZE;
 }
 
+static CoprocStatus CoprocDispatch_RequirePayloadLengthAtLeast(const CoprocFrame *frame, uint16_t minLength)
+{
+    if (frame == NULL) {
+        return COPROC_STATUS_INVALID_ARG;
+    }
+
+    return (frame->header.payloadLength >= minLength) ? COPROC_STATUS_OK : COPROC_STATUS_INVALID_SIZE;
+}
+
 static CoprocStatus CoprocDispatch_SendMessage(const CoprocTxMessage *message,
                                                CoprocDispatchTxWriteFn txWriteFn,
                                                void *txWriteCtx)
@@ -193,7 +202,7 @@ CoprocStatus CoprocDispatch_ProcessFrame(const CoprocFrame *frame,
                                      CoprocDispatch_ReadU16Le(&frame->payload[5]));
             return COPROC_STATUS_OK;
         case COPROC_SYS_MSG_HELLO_RSP:
-            if (CoprocDispatch_RequirePayloadLength(frame, COPROC_PAYLOAD_LEN_HELLO_RSP) != COPROC_STATUS_OK) {
+            if (CoprocDispatch_RequirePayloadLengthAtLeast(frame, COPROC_HELLO_BASE_PAYLOAD_LEN) != COPROC_STATUS_OK) {
                 return COPROC_STATUS_INVALID_SIZE;
             }
             CoprocDispatch_EmitEvent(eventFn, eventCtx, COPROC_DISPATCH_EVENT_HELLO_RSP, frame, 0u, 0u, 0u, 0u);

@@ -164,7 +164,7 @@
 当前固定基线为：
 
 ```text
-Protocol baseline: orulink-ai/WatcheRobot@proto/v2.0.0-stm32-align-20260416
+Protocol baseline: Ro-In-AI/WatcheRobot-Firmware@proto/v2.0.0-stm32-align-20260416
 ```
 
 本仓不再维护第二份独立协议字段表。协议字段、消息号、`ACK/NACK/FAULT` 语义、`HELLO_REQ -> ACK -> HELLO_RSP` 合同，一律以上游真源为准。

@@ -15,6 +15,7 @@ static behavior_state_def_t make_state(bool loop, bool hold, uint32_t timeline_e
     state.motion_count = 2;
     state.expression_count = 1;
     state.sound_count = 1;
+    state.light_count = 1;
     return state;
 }
 
@@ -46,6 +47,7 @@ static void test_state_completion_ignores_state_motion_when_action_active(void) 
         .next_motion_index = 0,
         .next_expression_index = 1,
         .next_sound_index = 1,
+        .next_light_index = 1,
         .next_action_motion_index = 1,
     };
 
@@ -61,6 +63,7 @@ static void test_state_completion_requires_state_motion_without_action(void) {
         .next_motion_index = 1,
         .next_expression_index = 1,
         .next_sound_index = 1,
+        .next_light_index = 1,
         .next_action_motion_index = 0,
     };
 
@@ -81,15 +84,41 @@ static void test_non_loop_done_uses_timeline_default_and_action_duration(void) {
     assert(behavior_scheduler_non_loop_done_at_ms(NULL, &long_action, 1200) == 0);
 }
 
+static void test_animation_transition_requires_matching_completed_animation(void) {
+    behavior_state_def_t state = {0};
+
+    snprintf(state.animation_complete_anim, sizeof(state.animation_complete_anim), "%s", "standby_end");
+    snprintf(state.animation_complete_state, sizeof(state.animation_complete_state), "%s", "listening");
+
+    assert(behavior_scheduler_animation_transition_target(&state, NULL) == NULL);
+    assert(behavior_scheduler_animation_transition_target(&state, "standby_loop") == NULL);
+    assert(strcmp(behavior_scheduler_animation_transition_target(&state, "standby_end"), "listening") == 0);
+}
+
+static void test_animation_transition_defers_early_target_request(void) {
+    behavior_state_def_t state = {0};
+
+    snprintf(state.animation_complete_anim, sizeof(state.animation_complete_anim), "%s", "standby_end");
+    snprintf(state.animation_complete_state, sizeof(state.animation_complete_state), "%s", "listening");
+
+    assert(behavior_scheduler_should_defer_animation_transition_target(&state, "listening", NULL));
+    assert(behavior_scheduler_should_defer_animation_transition_target(&state, "listening", "standby_loop"));
+    assert(!behavior_scheduler_should_defer_animation_transition_target(&state, "thinking", NULL));
+    assert(!behavior_scheduler_should_defer_animation_transition_target(&state, "listening", "standby_end"));
+}
+
 static void test_collect_due_events_dispatches_in_stable_order(void) {
     behavior_motion_event_t state_motion[] = {
         {.at_ms = 0, .x_deg = 90, .y_deg = 120, .duration_ms = 100},
     };
     behavior_expression_event_t expressions[] = {
-        {.at_ms = 5, .anim = "standby"},
+        {.at_ms = 0, .anim = "standby"},
     };
     behavior_sound_event_t sounds[] = {
         {.at_ms = 10, .sound_id = "boot"},
+    };
+    behavior_light_event_t lights[] = {
+        {.at_ms = 5, .effect = "breathing", .red = 77, .green = 163, .blue = 255},
     };
     behavior_state_def_t state = {
         .motion = state_motion,
@@ -98,6 +127,8 @@ static void test_collect_due_events_dispatches_in_stable_order(void) {
         .expression_count = 1,
         .sound = sounds,
         .sound_count = 1,
+        .light = lights,
+        .light_count = 1,
     };
     behavior_scheduler_tick_input_t input = {
         .state = &state,
@@ -107,17 +138,43 @@ static void test_collect_due_events_dispatches_in_stable_order(void) {
 
     behavior_scheduler_collect_due_events(&input, &result);
 
-    assert(result.command_count == 3);
+    assert(result.command_count == 4);
     assert(result.commands[0].type == BEHAVIOR_SCHEDULER_COMMAND_STATE_MOTION);
     assert(result.commands[0].motion == &state_motion[0]);
     assert(result.commands[1].type == BEHAVIOR_SCHEDULER_COMMAND_EXPRESSION);
     assert(result.commands[1].expression == &expressions[0]);
     assert(result.commands[2].type == BEHAVIOR_SCHEDULER_COMMAND_SOUND);
     assert(result.commands[2].sound == &sounds[0]);
+    assert(result.commands[3].type == BEHAVIOR_SCHEDULER_COMMAND_LIGHT);
+    assert(result.commands[3].light == &lights[0]);
     assert(result.next_motion_index == 1);
     assert(result.next_expression_index == 1);
     assert(result.next_sound_index == 1);
+    assert(result.next_light_index == 1);
     assert(!result.has_more_due_events);
+}
+
+static void test_collect_due_events_never_dispatches_second_primary_animation(void) {
+    behavior_expression_event_t expressions[] = {
+        {.at_ms = 0, .anim = "standby"},
+        {.at_ms = 100, .anim = "happy"},
+    };
+    behavior_state_def_t state = {
+        .expression = expressions,
+        .expression_count = 2,
+    };
+    behavior_scheduler_tick_input_t input = {
+        .state = &state,
+        .state_elapsed_ms = 100,
+    };
+    behavior_scheduler_tick_result_t result = {0};
+
+    behavior_scheduler_collect_due_events(&input, &result);
+
+    assert(result.command_count == 1);
+    assert(result.commands[0].type == BEHAVIOR_SCHEDULER_COMMAND_EXPRESSION);
+    assert(result.commands[0].expression == &expressions[0]);
+    assert(result.next_expression_index == 2);
 }
 
 static void test_collect_due_events_action_overrides_state_motion(void) {
@@ -250,7 +307,12 @@ int main(void) {
          test_state_completion_requires_state_motion_without_action},
         {"non_loop_done_uses_timeline_default_and_action_duration",
          test_non_loop_done_uses_timeline_default_and_action_duration},
+        {"animation_transition_requires_matching_completed_animation",
+         test_animation_transition_requires_matching_completed_animation},
+        {"animation_transition_defers_early_target_request", test_animation_transition_defers_early_target_request},
         {"collect_due_events_dispatches_in_stable_order", test_collect_due_events_dispatches_in_stable_order},
+        {"collect_due_events_never_dispatches_second_primary_animation",
+         test_collect_due_events_never_dispatches_second_primary_animation},
         {"collect_due_events_action_overrides_state_motion", test_collect_due_events_action_overrides_state_motion},
         {"collect_due_events_prequeues_contiguous_action_motion",
          test_collect_due_events_prequeues_contiguous_action_motion},

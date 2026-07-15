@@ -2,12 +2,19 @@
 
 All notable changes to the Animation Service component will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Animation Registry is now the sole source for stable IDs, names, aliases,
+  default loop policy, encoding and fallback FPS.
+- Manifest v2 and AnimPack headers are authoritative for generated resource
+  frame counts, loop policy and timing.
+- Removed the obsolete UI emoji projection and runtime JSON metadata override.
+
 ## [2.1.0] - 2024-03-13
 
 ### Added
 - RGB565 cache system for fast frame switching (<1ms latency)
-- Metadata system with JSON configuration support
-- `anim_meta.h/c` - Runtime animation configuration
 - `anim_cache_*` API for PSRAM-based frame caching
 - `emoji_anim_prefetch_type()` for proactive cache loading
 - `emoji_anim_get_fps()` / `emoji_anim_set_fps()` runtime FPS control

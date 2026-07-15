@@ -25,7 +25,9 @@ static Servo_InstanceTypeDef *Servo_GetInstance(Servo_HandleTypeDef servo);
 static Servo_StatusTypeDef Servo_StartPwmOutput(Servo_ConfigTypeDef *config);
 static Servo_StatusTypeDef Servo_WritePulseInternal(Servo_ConfigTypeDef *config, uint16_t pulse);
 static Servo_StatusTypeDef Servo_InitFeedback(Servo_ConfigTypeDef *config);
-static Servo_StatusTypeDef Servo_ReadFeedbackPair(ADC_HandleTypeDef *adcHandle, uint16_t *sample1, uint16_t *sample2);
+static Servo_StatusTypeDef Servo_ReadFeedbackChannel(ADC_HandleTypeDef *adcHandle,
+                                                     uint32_t adcChannel,
+                                                     uint16_t *sample);
 static uint16_t Servo_ClampPulse(const Servo_ConfigTypeDef *config, uint16_t pulse);
 static uint16_t Servo_AngleToPulse(const Servo_ConfigTypeDef *config, uint8_t angle);
 static uint16_t Servo_NormalizeMotionUpdatePeriod(uint16_t updatePeriodMs);
@@ -63,7 +65,13 @@ Servo_HandleTypeDef Servo_Init(const Servo_ConfigTypeDef *config)
     }
     if ((config->pFeedbackAdcHandle != NULL) &&
         ((config->feedbackSampleIndex < 1U) || (config->feedbackSampleIndex > 2U) ||
-         (config->feedbackRawMin >= config->feedbackRawMax))) {
+         (config->feedbackRawMin >= config->feedbackRawMax) ||
+         (config->feedbackAngleMin > config->feedbackAngleMax) ||
+         ((config->feedbackRawMid != 0U) &&
+          ((config->feedbackRawMid <= config->feedbackRawMin) || (config->feedbackRawMid >= config->feedbackRawMax) ||
+           (config->feedbackAngleMid <= config->feedbackAngleMin) ||
+           (config->feedbackAngleMid >= config->feedbackAngleMax))) ||
+         (config->feedbackAngleMax > 180U))) {
         return NULL;
     }
 
@@ -359,8 +367,7 @@ Servo_StatusTypeDef Servo_GetFeedbackRaw(Servo_HandleTypeDef servo, uint16_t *ad
 {
     Servo_InstanceTypeDef *instance = Servo_GetInstance(servo);
     uint32_t sum = 0U;
-    uint16_t sample1;
-    uint16_t sample2;
+    uint16_t sample;
     uint8_t sampleIndex;
 
     if ((instance == NULL) || (adcRaw == NULL) || (instance->config.pFeedbackAdcHandle == NULL)) {
@@ -368,11 +375,13 @@ Servo_StatusTypeDef Servo_GetFeedbackRaw(Servo_HandleTypeDef servo, uint16_t *ad
     }
 
     for (sampleIndex = 0U; sampleIndex < SERVO_FEEDBACK_AVG_SAMPLES; sampleIndex++) {
-        if (Servo_ReadFeedbackPair(instance->config.pFeedbackAdcHandle, &sample1, &sample2) != SERVO_OK) {
+        if (Servo_ReadFeedbackChannel(instance->config.pFeedbackAdcHandle,
+                                      instance->config.feedbackAdcChannel,
+                                      &sample) != SERVO_OK) {
             return SERVO_ERROR;
         }
 
-        sum += (instance->config.feedbackSampleIndex == 1U) ? sample1 : sample2;
+        sum += sample;
     }
 
     *adcRaw = (uint16_t)(sum / SERVO_FEEDBACK_AVG_SAMPLES);
@@ -388,34 +397,67 @@ uint16_t Servo_ConvertFeedbackToMv(uint16_t adcRaw)
     return (uint16_t)(((uint32_t)adcRaw * SERVO_FEEDBACK_VREF_MV) / SERVO_FEEDBACK_ADC_MAX);
 }
 
-Servo_StatusTypeDef Servo_GetFeedbackAngle(Servo_HandleTypeDef servo, uint8_t *angle)
+Servo_StatusTypeDef Servo_ConvertFeedbackRawToAngle(Servo_HandleTypeDef servo, uint16_t adcRaw, uint8_t *angle)
 {
     Servo_InstanceTypeDef *instance = Servo_GetInstance(servo);
-    uint16_t adcRaw;
+    uint16_t rawMin;
+    uint16_t rawMax;
+    uint8_t angleMin;
+    uint8_t angleMax;
+    uint8_t angleRange;
     uint32_t scaledAngle;
 
     if ((instance == NULL) || (angle == NULL) || (instance->config.pFeedbackAdcHandle == NULL) ||
-        (instance->config.feedbackRawMin >= instance->config.feedbackRawMax)) {
+        (instance->config.feedbackRawMin >= instance->config.feedbackRawMax) ||
+        (instance->config.feedbackAngleMin > instance->config.feedbackAngleMax)) {
         return SERVO_ERROR_PARAM;
     }
+
+    angleMin = instance->config.feedbackAngleMin;
+    angleMax = instance->config.feedbackAngleMax;
+    rawMin = instance->config.feedbackRawMin;
+    rawMax = instance->config.feedbackRawMax;
+
+    if ((instance->config.feedbackRawMid > instance->config.feedbackRawMin) &&
+        (instance->config.feedbackRawMid < instance->config.feedbackRawMax) &&
+        (instance->config.feedbackAngleMid > instance->config.feedbackAngleMin) &&
+        (instance->config.feedbackAngleMid < instance->config.feedbackAngleMax)) {
+        if (adcRaw <= instance->config.feedbackRawMid) {
+            rawMax = instance->config.feedbackRawMid;
+            angleMax = instance->config.feedbackAngleMid;
+        } else {
+            rawMin = instance->config.feedbackRawMid;
+            angleMin = instance->config.feedbackAngleMid;
+        }
+    }
+
+    angleRange = (uint8_t)(angleMax - angleMin);
+
+    if (adcRaw <= rawMin) {
+        *angle = angleMin;
+        return SERVO_OK;
+    }
+    if (adcRaw >= rawMax) {
+        *angle = angleMax;
+        return SERVO_OK;
+    }
+
+    scaledAngle = (uint32_t)angleMin +
+                  ((((uint32_t)(adcRaw - rawMin) * angleRange) + ((uint32_t)(rawMax - rawMin) / 2U)) /
+                   (uint32_t)(rawMax - rawMin));
+    *angle = (uint8_t)scaledAngle;
+    return SERVO_OK;
+}
+
+Servo_StatusTypeDef Servo_GetFeedbackAngle(Servo_HandleTypeDef servo, uint8_t *angle)
+{
+    uint16_t adcRaw;
 
     if (Servo_GetFeedbackRaw(servo, &adcRaw) != SERVO_OK) {
         return SERVO_ERROR;
     }
 
-    if (adcRaw <= instance->config.feedbackRawMin) {
-        *angle = 0U;
-        return SERVO_OK;
-    }
-    if (adcRaw >= instance->config.feedbackRawMax) {
-        *angle = 180U;
-        return SERVO_OK;
-    }
-
-    scaledAngle = ((uint32_t)(adcRaw - instance->config.feedbackRawMin) * 180U) /
-                  (uint32_t)(instance->config.feedbackRawMax - instance->config.feedbackRawMin);
-    *angle = (uint8_t)scaledAngle;
-    return SERVO_OK;
+    return Servo_ConvertFeedbackRawToAngle(servo, adcRaw, angle);
 }
 
 Servo_StatusTypeDef Servo_StartReciprocating(Servo_HandleTypeDef servo)
@@ -807,30 +849,61 @@ static Servo_StatusTypeDef Servo_InitFeedback(Servo_ConfigTypeDef *config)
     return (HAL_ADCEx_Calibration_Start(config->pFeedbackAdcHandle) == HAL_OK) ? SERVO_OK : SERVO_ERROR_INIT;
 }
 
-static Servo_StatusTypeDef Servo_ReadFeedbackPair(ADC_HandleTypeDef *adcHandle, uint16_t *sample1, uint16_t *sample2)
+static Servo_StatusTypeDef Servo_ReadFeedbackChannel(ADC_HandleTypeDef *adcHandle, uint32_t adcChannel, uint16_t *sample)
 {
-    if ((adcHandle == NULL) || (sample1 == NULL) || (sample2 == NULL)) {
+    ADC_TypeDef *adcInstance;
+    ADC_ChannelConfTypeDef adcConfig = {0};
+    uint32_t savedCr1;
+    uint32_t savedSqr1;
+    uint32_t savedSqr2;
+    uint32_t savedSqr3;
+    uint32_t savedSmpr1;
+    uint32_t savedSmpr2;
+    uint32_t savedScanConvMode;
+    uint32_t savedNbrOfConversion;
+    Servo_StatusTypeDef status = SERVO_ERROR;
+
+    if ((adcHandle == NULL) || (sample == NULL)) {
         return SERVO_ERROR_PARAM;
     }
 
-    if (HAL_ADC_Start(adcHandle) != HAL_OK) {
-        return SERVO_ERROR;
-    }
+    adcInstance = adcHandle->Instance;
+    savedCr1 = adcInstance->CR1;
+    savedSqr1 = adcInstance->SQR1;
+    savedSqr2 = adcInstance->SQR2;
+    savedSqr3 = adcInstance->SQR3;
+    savedSmpr1 = adcInstance->SMPR1;
+    savedSmpr2 = adcInstance->SMPR2;
+    savedScanConvMode = adcHandle->Init.ScanConvMode;
+    savedNbrOfConversion = adcHandle->Init.NbrOfConversion;
 
-    if (HAL_ADC_PollForConversion(adcHandle, SERVO_FEEDBACK_ADC_TIMEOUT_MS) != HAL_OK) {
+    adcHandle->Init.ScanConvMode = ADC_SCAN_DISABLE;
+    adcHandle->Init.NbrOfConversion = 1U;
+    adcConfig.Channel = adcChannel;
+    adcConfig.Rank = ADC_REGULAR_RANK_1;
+    adcConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+
+    if ((HAL_ADC_Init(adcHandle) == HAL_OK) && (HAL_ADC_ConfigChannel(adcHandle, &adcConfig) == HAL_OK) &&
+        (HAL_ADC_Start(adcHandle) == HAL_OK)) {
+        if (HAL_ADC_PollForConversion(adcHandle, SERVO_FEEDBACK_ADC_TIMEOUT_MS) == HAL_OK) {
+            *sample = (uint16_t)HAL_ADC_GetValue(adcHandle);
+            status = SERVO_OK;
+        }
         (void)HAL_ADC_Stop(adcHandle);
-        return SERVO_ERROR;
     }
-    *sample1 = (uint16_t)HAL_ADC_GetValue(adcHandle);
 
-    if (HAL_ADC_PollForConversion(adcHandle, SERVO_FEEDBACK_ADC_TIMEOUT_MS) != HAL_OK) {
-        (void)HAL_ADC_Stop(adcHandle);
-        return SERVO_ERROR;
-    }
-    *sample2 = (uint16_t)HAL_ADC_GetValue(adcHandle);
+    adcInstance->CR1 = savedCr1;
+    adcInstance->SQR1 = savedSqr1;
+    adcInstance->SQR2 = savedSqr2;
+    adcInstance->SQR3 = savedSqr3;
+    adcInstance->SMPR1 = savedSmpr1;
+    adcInstance->SMPR2 = savedSmpr2;
+    adcHandle->Init.ScanConvMode = savedScanConvMode;
+    adcHandle->Init.NbrOfConversion = savedNbrOfConversion;
 
-    return (HAL_ADC_Stop(adcHandle) == HAL_OK) ? SERVO_OK : SERVO_ERROR;
+    return status;
 }
+
 
 static void Servo_ArmReleaseDeadline(Servo_InstanceTypeDef *instance, uint32_t nowTickMs)
 {

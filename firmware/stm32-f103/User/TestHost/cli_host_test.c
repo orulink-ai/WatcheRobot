@@ -24,6 +24,7 @@ static uint8_t s_bottomCountSetCount;
 static uint16_t s_lastBottomLedCount;
 static uint8_t s_bottomLightTestCount;
 static uint8_t s_bottomIrReadCount;
+static uint8_t s_servoFeedbackReadCount;
 static uint8_t s_servoMoveCount;
 static uint8_t s_servoStopCount;
 static uint8_t s_servoLimitSetCount;
@@ -36,8 +37,8 @@ static uint8_t s_lastServoProfile;
 static uint8_t s_lastServoEaseStrengthPercent;
 static uint16_t s_lastServoMotionStartPulse;
 static uint16_t s_lastServoMotionTargetPulse;
-static uint8_t s_servoMinLimit[3] = {0U, 0U, 0U};
-static uint8_t s_servoMaxLimit[3] = {0U, 180U, 180U};
+static uint8_t s_servoMinLimit[3] = {0U, 100U, 30U};
+static uint8_t s_servoMaxLimit[3] = {0U, 130U, 150U};
 
 #define ASSERT_TRUE(expr)                                                                                               \
     do {                                                                                                                \
@@ -70,6 +71,7 @@ static void reset_capture(void)
     s_lastBottomLedCount = 0U;
     s_bottomLightTestCount = 0U;
     s_bottomIrReadCount = 0U;
+    s_servoFeedbackReadCount = 0U;
     s_servoMoveCount = 0U;
     s_servoStopCount = 0U;
     s_servoLimitSetCount = 0U;
@@ -82,10 +84,10 @@ static void reset_capture(void)
     s_lastServoEaseStrengthPercent = SERVO_MOTION_EASE_STRENGTH_DEFAULT_PERCENT;
     s_lastServoMotionStartPulse = 1500U;
     s_lastServoMotionTargetPulse = 1500U;
-    s_servoMinLimit[1] = 0U;
-    s_servoMaxLimit[1] = 180U;
-    s_servoMinLimit[2] = 0U;
-    s_servoMaxLimit[2] = 180U;
+    s_servoMinLimit[1] = 100U;
+    s_servoMaxLimit[1] = 130U;
+    s_servoMinLimit[2] = 30U;
+    s_servoMaxLimit[2] = 150U;
 }
 
 static void append_output(const char *text)
@@ -132,6 +134,9 @@ static void test_help_lists_bottom_light_test_commands(void)
     ASSERT_TRUE(strstr(s_uartOutput, "ws_bottom rainbow|cyber") != NULL);
     ASSERT_TRUE(strstr(s_uartOutput, "ws_bottom test") != NULL);
     ASSERT_TRUE(strstr(s_uartOutput, "bottom_light_test") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "servo_fb") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "servo_cal [id] [samples]") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "servo_angle [id]") != NULL);
     ASSERT_TRUE(strstr(s_uartOutput, "bottom_ir_test") != NULL);
     ASSERT_TRUE(strstr(s_uartOutput, "bottom_ir") != NULL);
     ASSERT_TRUE(strstr(s_uartOutput, "servo_move_time <id> <angle> <ms>") != NULL);
@@ -257,7 +262,7 @@ static void test_servo_limit_command_updates_runtime_limit(void)
 
     Cli_ExecuteCommand("servo_limits");
     ASSERT_TRUE(strstr(s_uartOutput, "Servo1: 20~160 deg") != NULL);
-    ASSERT_TRUE(strstr(s_uartOutput, "Servo2: 0~180 deg") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo2: 30~150 deg") != NULL);
 }
 
 static void test_ws_red_controls_side_light(void)
@@ -378,6 +383,66 @@ static void test_bottom_ir_test_reads_adc_threshold(void)
     ASSERT_TRUE(strstr(s_uartOutput, "Active    : YES") != NULL);
 }
 
+static void test_servo_fb_prints_both_feedback_channels(void)
+{
+    reset_capture();
+
+    Cli_ExecuteCommand("servo_fb");
+
+    ASSERT_EQ_U32(s_servoFeedbackReadCount, 2U);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo Feedback") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo1 Raw : 512") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo1 V   : 412 mV") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo2 Raw : 768") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo2 V   : 618 mV") != NULL);
+}
+
+static void test_servo_status_prints_feedback_snapshot(void)
+{
+    reset_capture();
+
+    Cli_ExecuteCommand("servo_status 2");
+
+    ASSERT_EQ_U32(s_servoFeedbackReadCount, 1U);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo Status") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo : 2") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Feedback: VALID") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Command Angle : 120 deg") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Feedback Raw  : 768") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Feedback V    : 618 mV") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Feedback Angle: 135 deg") != NULL);
+}
+
+static void test_servo_angle_prints_feedback_angle(void)
+{
+    reset_capture();
+
+    Cli_ExecuteCommand("servo_angle 2");
+
+    ASSERT_EQ_U32(s_servoFeedbackReadCount, 2U);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo Angle") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo : 2") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Raw   : 768") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "V     : 618 mV") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Angle : 135 deg") != NULL);
+}
+
+static void test_servo_cal_prints_feedback_raw_stats(void)
+{
+    reset_capture();
+
+    Cli_ExecuteCommand("servo_cal 1 4");
+
+    ASSERT_EQ_U32(s_servoFeedbackReadCount, 4U);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo Calibration") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Servo   : 1") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Samples : 4") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Current : 512") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Min     : 512") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Max     : 512") != NULL);
+    ASSERT_TRUE(strstr(s_uartOutput, "Avg     : 512") != NULL);
+}
+
 int main(void)
 {
     run_test(test_help_lists_bottom_light_test_commands, "help_lists_bottom_light_test_commands");
@@ -402,6 +467,10 @@ int main(void)
     run_test(test_ws_bottom_cyber_alias_controls_bottom_light, "ws_bottom_cyber_alias_controls_bottom_light");
     run_test(test_bottom_light_test_alias_runs_bottom_light_test, "bottom_light_test_alias_runs_bottom_light_test");
     run_test(test_bottom_ir_test_reads_adc_threshold, "bottom_ir_test_reads_adc_threshold");
+    run_test(test_servo_fb_prints_both_feedback_channels, "servo_fb_prints_both_feedback_channels");
+    run_test(test_servo_status_prints_feedback_snapshot, "servo_status_prints_feedback_snapshot");
+    run_test(test_servo_angle_prints_feedback_angle, "servo_angle_prints_feedback_angle");
+    run_test(test_servo_cal_prints_feedback_raw_stats, "servo_cal_prints_feedback_raw_stats");
 
     if (s_testFailures != 0) {
         fprintf(stderr, "%d test(s) failed\n", s_testFailures);
@@ -444,6 +513,16 @@ uint8_t App_SetServoAngle(uint8_t servoIndex, uint8_t angle, uint16_t *pulseUs)
     s_lastServoAngle = angle;
     if (pulseUs != NULL) {
         *pulseUs = 1500U;
+    }
+    return 1U;
+}
+
+uint8_t App_SetServoDegX10(uint8_t servoIndex, int16_t degX10, uint16_t *pulseUs)
+{
+    s_lastServoIndex = servoIndex;
+    s_lastServoAngle = (uint8_t)(((uint16_t)degX10 + 5U) / 10U);
+    if (pulseUs != NULL) {
+        *pulseUs = (uint16_t)(500U + (((uint32_t)(uint16_t)degX10 * 2000U + 900U) / 1800U));
     }
     return 1U;
 }
@@ -553,31 +632,41 @@ uint8_t App_GetServoCommandAngle(uint8_t servoIndex, uint8_t *angle)
 
 uint8_t App_GetServoFeedbackSnapshot(uint8_t servoIndex, App_ServoFeedbackSnapshotTypeDef *snapshot)
 {
-    (void)servoIndex;
-    (void)snapshot;
-    return 0U;
+    if (snapshot == NULL) {
+        return 0U;
+    }
+
+    snapshot->servoIndex = servoIndex;
+    snapshot->commandAngle = (servoIndex == 2U) ? 120U : 90U;
+    snapshot->commandPulseUs = (servoIndex == 2U) ? 1833U : 1500U;
+    snapshot->feedbackValid = 1U;
+    snapshot->feedbackRaw = (servoIndex == 2U) ? 768U : 512U;
+    snapshot->feedbackMv = App_ConvertServoFeedbackToMv(snapshot->feedbackRaw);
+    snapshot->feedbackAngle = (servoIndex == 2U) ? 135U : 120U;
+    s_servoFeedbackReadCount++;
+    return 1U;
 }
 
 uint8_t App_GetServoFeedbackRaw(uint8_t servoIndex, uint16_t *adcRaw)
 {
-    (void)servoIndex;
     if (adcRaw != NULL) {
-        *adcRaw = 0U;
+        *adcRaw = (servoIndex == 2U) ? 768U : 512U;
     }
+    s_servoFeedbackReadCount++;
     return 1U;
 }
 
 uint16_t App_ConvertServoFeedbackToMv(uint16_t adcRaw)
 {
-    return adcRaw;
+    return (uint16_t)(((uint32_t)adcRaw * 3300U) / 4095U);
 }
 
 uint8_t App_GetServoFeedbackAngle(uint8_t servoIndex, uint8_t *angle)
 {
-    (void)servoIndex;
     if (angle != NULL) {
-        *angle = 90U;
+        *angle = (servoIndex == 2U) ? 135U : 120U;
     }
+    s_servoFeedbackReadCount++;
     return 1U;
 }
 

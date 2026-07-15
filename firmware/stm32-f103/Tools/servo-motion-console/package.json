@@ -1,0 +1,14 @@
+{
+  "name": "watcherobot-stm32-debug-page",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5174",
+    "build": "vite build",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "vite": "^8.0.13"
+  }
+}

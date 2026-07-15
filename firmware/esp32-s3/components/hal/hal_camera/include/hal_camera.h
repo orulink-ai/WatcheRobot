@@ -41,6 +41,16 @@ typedef void (*hal_camera_frame_cb_t)(const uint8_t *jpeg, size_t size, uint32_t
 esp_err_t hal_camera_init(void);
 
 /**
+ * @brief Release camera HAL runtime resources owned by the active app/session.
+ *
+ * Stops streaming, drops pending capture state, and releases the SSCMA client
+ * tasks and buffers. Shared board-level SPI/IO setup remains owned by the BSP.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t hal_camera_deinit(void);
+
+/**
  * @brief Configure the active HX6538 camera sensor output profile.
  *
  * Supported profiles currently map to the sensor catalog reported by the coprocessor:

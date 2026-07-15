@@ -47,6 +47,8 @@ static void camera_service_frame_cb_internal(const uint8_t *jpeg, size_t size, u
     camera_service_context_t *service = (camera_service_context_t *)ctx;
     camera_service_frame_cb_t user_cb = NULL;
     void *user_ctx = NULL;
+    uint32_t capture_count = 0;
+    bool streaming = false;
 
     if (service == NULL || jpeg == NULL || size == 0) {
         return;
@@ -56,17 +58,19 @@ static void camera_service_frame_cb_internal(const uint8_t *jpeg, size_t size, u
         service->last_frame_size = size;
         service->last_timestamp_ms = timestamp_ms;
         service->capture_count++;
+        capture_count = service->capture_count;
+        streaming = service->streaming;
         user_cb = service->frame_cb;
         user_ctx = service->frame_ctx;
         xSemaphoreGive(service->lock);
     }
 
-    if (service->capture_count == 1 || (service->capture_count % CAMERA_SERVICE_LOG_EVERY) == 0) {
+    if (capture_count == 1 || (capture_count % CAMERA_SERVICE_LOG_EVERY) == 0) {
         ESP_LOGI(TAG, "frame #%lu ok, jpeg=%u bytes ts=%lu ms streaming=%s",
-                 (unsigned long)service->capture_count,
+                 (unsigned long)capture_count,
                  (unsigned int)size,
                  (unsigned long)timestamp_ms,
-                 service->streaming ? "true" : "false");
+                 streaming ? "true" : "false");
     }
 
     if (user_cb != NULL) {
@@ -120,6 +124,42 @@ esp_err_t camera_service_register_frame_callback(camera_service_frame_cb_t cb, v
     return ESP_OK;
 }
 
+esp_err_t camera_service_unregister_frame_callback(void) {
+    return camera_service_register_frame_callback(NULL, NULL);
+}
+
+esp_err_t camera_service_deinit(void) {
+    esp_err_t status = ESP_OK;
+    esp_err_t ret;
+
+    if (s_ctx.lock != NULL && xSemaphoreTake(s_ctx.lock, portMAX_DELAY) == pdTRUE) {
+        s_ctx.frame_cb = NULL;
+        s_ctx.frame_ctx = NULL;
+        xSemaphoreGive(s_ctx.lock);
+    }
+
+    ret = hal_camera_deinit();
+    if (ret != ESP_OK) {
+        status = ret;
+    }
+
+    if (s_ctx.lock != NULL && xSemaphoreTake(s_ctx.lock, portMAX_DELAY) == pdTRUE) {
+        s_ctx.initialized = false;
+        s_ctx.streaming = false;
+        s_ctx.last_frame_size = 0;
+        s_ctx.last_timestamp_ms = 0;
+        s_ctx.capture_count = 0;
+        xSemaphoreGive(s_ctx.lock);
+    }
+
+    if (s_ctx.lock != NULL) {
+        vSemaphoreDelete(s_ctx.lock);
+        s_ctx.lock = NULL;
+    }
+
+    return status;
+}
+
 esp_err_t camera_service_start_stream(int fps) {
     ESP_RETURN_ON_ERROR(camera_service_init(), TAG, "camera_service_init failed");
 
@@ -150,13 +190,15 @@ esp_err_t camera_service_start_stream(int fps) {
 esp_err_t camera_service_stop_stream(void) {
     esp_err_t ret = hal_camera_stop();
 
-    if (xSemaphoreTake(s_ctx.lock, portMAX_DELAY) == pdTRUE) {
+    if (ret == ESP_OK && xSemaphoreTake(s_ctx.lock, portMAX_DELAY) == pdTRUE) {
         s_ctx.streaming = false;
         xSemaphoreGive(s_ctx.lock);
     }
 
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "camera stream service stopped");
+    } else {
+        ESP_LOGW(TAG, "camera stream service stop incomplete: %s", esp_err_to_name(ret));
     }
 
     return ret;

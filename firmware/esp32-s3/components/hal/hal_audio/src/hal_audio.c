@@ -1,6 +1,7 @@
 #include "hal_audio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "sensecap-watcher.h"
@@ -13,10 +14,35 @@
 
 static bool codec_initialized = false;                    /* codec init is global, only once */
 static bool is_running = false;                           /* current running state */
+static bool is_playback_mode = false;                     /* recording input or playback output */
+#ifdef CONFIG_ENABLE_WAKE_WORD
+static bool wake_word_stream_desired = false;             /* live WakeNet runtime owns idle mic path */
+#endif
 static uint32_t current_sample_rate = SAMPLE_RATE_RECORD; /* current sample rate */
+static uint8_t current_volume = CONFIG_WATCHER_AUDIO_VOLUME;
 static esp_codec_dev_handle_t mic_handle = NULL;
 static esp_codec_dev_handle_t speaker_handle = NULL;
 static uint32_t consecutive_read_failures = 0;
+static StaticSemaphore_t audio_lock_buffer;
+static SemaphoreHandle_t audio_lock = NULL;
+
+static bool hal_audio_lock(void) {
+    if (audio_lock == NULL) {
+        audio_lock = xSemaphoreCreateRecursiveMutexStatic(&audio_lock_buffer);
+        if (audio_lock == NULL) {
+            ESP_LOGE(TAG, "Failed to create audio lock");
+            return false;
+        }
+    }
+
+    return xSemaphoreTakeRecursive(audio_lock, portMAX_DELAY) == pdTRUE;
+}
+
+static void hal_audio_unlock(void) {
+    if (audio_lock != NULL) {
+        xSemaphoreGiveRecursive(audio_lock);
+    }
+}
 
 static void hal_audio_prepare_output(void) {
     esp_err_t ret;
@@ -33,7 +59,7 @@ static void hal_audio_prepare_output(void) {
         ESP_LOGW(TAG, "Failed to unmute codec output: %s", esp_err_to_name(ret));
     }
 
-    ret = bsp_codec_volume_set(CONFIG_WATCHER_AUDIO_VOLUME, NULL);
+    ret = bsp_codec_volume_set(current_volume, NULL);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to set codec output volume: %s", esp_err_to_name(ret));
     }
@@ -43,7 +69,12 @@ static void hal_audio_prepare_output(void) {
 int hal_audio_init(void) {
     uint32_t initial_sample_rate = current_sample_rate;
 
+    if (!hal_audio_lock()) {
+        return -1;
+    }
+
     if (codec_initialized) {
+        hal_audio_unlock();
         return 0;
     }
 
@@ -52,6 +83,7 @@ int hal_audio_init(void) {
     esp_err_t ret = bsp_codec_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init codec: %s", esp_err_to_name(ret));
+        hal_audio_unlock();
         return -1;
     }
 
@@ -61,11 +93,13 @@ int hal_audio_init(void) {
 
     if (!mic_handle) {
         ESP_LOGE(TAG, "Failed to get microphone handle");
+        hal_audio_unlock();
         return -1;
     }
 
     if (!speaker_handle) {
         ESP_LOGE(TAG, "Failed to get speaker handle");
+        hal_audio_unlock();
         return -1;
     }
 
@@ -76,21 +110,63 @@ int hal_audio_init(void) {
     current_sample_rate = initial_sample_rate;
     hal_audio_prepare_output();
 
-    ESP_LOGI(TAG, "Audio codec initialized (%luHz, volume=%d)", current_sample_rate, CONFIG_WATCHER_AUDIO_VOLUME);
+    ESP_LOGI(TAG, "Audio codec initialized (%luHz, volume=%u)", current_sample_rate, (unsigned)current_volume);
+    hal_audio_unlock();
     return 0;
 }
 
-/* Track audio mode: recording (input) or playback (output) */
-static bool is_playback_mode = false;
+int hal_audio_deinit(void) {
+    esp_err_t ret;
+
+    if (!hal_audio_lock()) {
+        return -1;
+    }
+
+#ifdef CONFIG_ENABLE_WAKE_WORD
+    wake_word_stream_desired = false;
+#endif
+    is_playback_mode = false;
+    is_running = false;
+    current_sample_rate = SAMPLE_RATE_RECORD;
+    consecutive_read_failures = 0;
+
+    if (!codec_initialized) {
+        mic_handle = NULL;
+        speaker_handle = NULL;
+        hal_audio_unlock();
+        return 0;
+    }
+
+    ret = bsp_codec_deinit();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Audio codec deinit returned warning: %s", esp_err_to_name(ret));
+        hal_audio_unlock();
+        return -1;
+    }
+
+    mic_handle = NULL;
+    speaker_handle = NULL;
+    codec_initialized = false;
+
+    ESP_LOGI(TAG, "Audio codec deinitialized");
+    hal_audio_unlock();
+    return 0;
+}
 
 /* Set sample rate for playback (call before TTS playback) */
 void hal_audio_set_sample_rate(uint32_t sample_rate) {
+    if (!hal_audio_lock()) {
+        return;
+    }
+
     if (!codec_initialized) {
         current_sample_rate = sample_rate;
+        hal_audio_unlock();
         return;
     }
 
     if (current_sample_rate == sample_rate) {
+        hal_audio_unlock();
         return; /* No change needed */
     }
 
@@ -104,6 +180,7 @@ void hal_audio_set_sample_rate(uint32_t sample_rate) {
         bsp_codec_set_fs(sample_rate, 16, 1);
         current_sample_rate = sample_rate;
         ESP_LOGI(TAG, "Sample rate switch complete (playback mode, no stop needed)");
+        hal_audio_unlock();
         return;
     }
 
@@ -113,12 +190,44 @@ void hal_audio_set_sample_rate(uint32_t sample_rate) {
     current_sample_rate = sample_rate;
 
     ESP_LOGI(TAG, "Sample rate switch complete");
+    hal_audio_unlock();
+}
+
+void hal_audio_set_volume(uint8_t volume_percent) {
+    esp_err_t ret;
+
+    if (volume_percent > 100) {
+        volume_percent = 100;
+    }
+
+    if (!hal_audio_lock()) {
+        return;
+    }
+
+    current_volume = volume_percent;
+    if (codec_initialized) {
+        ret = bsp_codec_volume_set(current_volume, NULL);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to apply codec volume %u: %s", (unsigned)current_volume, esp_err_to_name(ret));
+        }
+    }
+    ESP_LOGI(TAG, "Audio volume set to %u", (unsigned)current_volume);
+    hal_audio_unlock();
+}
+
+uint8_t hal_audio_get_volume(void) {
+    return current_volume;
 }
 
 /* Mark audio as being used for playback (not just recording) */
 void hal_audio_set_playback_mode(bool enable) {
+    if (!hal_audio_lock()) {
+        return;
+    }
+
     is_playback_mode = enable;
     ESP_LOGI(TAG, "Audio mode: %s", enable ? "playback" : "recording");
+    hal_audio_unlock();
 }
 
 bool hal_audio_is_running(void) {
@@ -130,9 +239,14 @@ bool hal_audio_is_playback_mode(void) {
 }
 
 int hal_audio_start(void) {
+    if (!hal_audio_lock()) {
+        return -1;
+    }
+
     /* Ensure codec is initialized */
     if (!codec_initialized) {
         if (hal_audio_init() != 0) {
+            hal_audio_unlock();
             return -1;
         }
     }
@@ -144,12 +258,14 @@ int hal_audio_start(void) {
         }
         ESP_LOGD(TAG, "Audio already running (sample rate: %lu Hz, playback=%d)", current_sample_rate,
                  is_playback_mode);
+        hal_audio_unlock();
         return 0;
     }
 
     esp_err_t ret = bsp_codec_set_fs(current_sample_rate, 16, 1);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to open audio path at %lu Hz: %s", current_sample_rate, esp_err_to_name(ret));
+        hal_audio_unlock();
         return -1;
     }
 
@@ -159,22 +275,30 @@ int hal_audio_start(void) {
         hal_audio_prepare_output();
     }
     ESP_LOGI(TAG, "Audio started (sample rate: %lu Hz)", current_sample_rate);
+    hal_audio_unlock();
     return 0;
 }
 
 int hal_audio_read(uint8_t *out_buf, int max_len) {
-    if (!mic_handle) {
+    int result = -1;
+
+    if (!hal_audio_lock()) {
         return -1;
+    }
+
+    if (!mic_handle) {
+        goto cleanup;
     }
 
     /* In wake word mode, audio should always be available */
     /* If is_running is false, return 0 (no data) instead of -1 (error) to avoid error spam */
     if (!is_running) {
 #ifdef CONFIG_ENABLE_WAKE_WORD
-        return 0; /* In wake word mode, gracefully handle temporary unavailability */
+        result = 0; /* In wake word mode, gracefully handle temporary unavailability */
 #else
-        return -1;
+        result = -1;
 #endif
+        goto cleanup;
     }
 
     size_t bytes_read = 0;
@@ -188,21 +312,33 @@ int hal_audio_read(uint8_t *out_buf, int max_len) {
                      esp_err_to_name(ret), (unsigned long)consecutive_read_failures, is_running, is_playback_mode,
                      current_sample_rate);
         }
-        return 0;
+        result = 0;
+        goto cleanup;
 #else
         ESP_LOGE(TAG, "Read error: %s", esp_err_to_name(ret));
-        return -1;
+        result = -1;
+        goto cleanup;
 #endif
     }
 
     consecutive_read_failures = 0;
-    return (int)bytes_read;
+    result = (int)bytes_read;
+
+cleanup:
+    hal_audio_unlock();
+    return result;
 }
 
 int hal_audio_write(const uint8_t *data, int len) {
+    int result = -1;
+
+    if (!hal_audio_lock()) {
+        return -1;
+    }
+
     if (!is_running || !speaker_handle) {
         ESP_LOGW(TAG, "Write blocked: is_running=%d, speaker_handle=%p", is_running, speaker_handle);
-        return -1;
+        goto cleanup;
     }
 
     size_t bytes_written = 0;
@@ -213,18 +349,62 @@ int hal_audio_write(const uint8_t *data, int len) {
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Write error: %s", esp_err_to_name(ret));
-        return -1;
+        goto cleanup;
     }
 
-    return (int)bytes_written;
+    result = (int)bytes_written;
+
+cleanup:
+    hal_audio_unlock();
+    return result;
+}
+
+int hal_audio_drain_playback(uint32_t timeout_ms) {
+    int result = -1;
+
+    if (!hal_audio_lock()) {
+        return -1;
+    }
+    if (!is_running || !is_playback_mode || speaker_handle == NULL) {
+        ESP_LOGW(TAG, "Playback drain rejected: running=%d playback=%d speaker=%p", is_running, is_playback_mode,
+                 speaker_handle);
+        goto cleanup;
+    }
+
+    esp_err_t ret = bsp_i2s_wait_tx_drain(timeout_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Playback DMA drain failed: %s timeout_ms=%lu", esp_err_to_name(ret),
+                 (unsigned long)timeout_ms);
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    hal_audio_unlock();
+    return result;
 }
 
 int hal_audio_stop(void) {
+    if (!hal_audio_lock()) {
+        return -1;
+    }
+
     if (!is_running) {
+        hal_audio_unlock();
         return 0;
     }
 
 #ifdef CONFIG_ENABLE_WAKE_WORD
+    if (!wake_word_stream_desired) {
+        is_playback_mode = false;
+        is_running = false;
+        current_sample_rate = SAMPLE_RATE_RECORD;
+        consecutive_read_failures = 0;
+        ESP_LOGI(TAG, "Audio stopped (wake stream not requested, mode=idle)");
+        hal_audio_unlock();
+        return 0;
+    }
+
     /* Wake word detection needs a continuous 16 kHz microphone stream.
      * Playback users call stop after local SFX/TTS; in wake mode, restore
      * the shared codec path to recording instead of disabling it. */
@@ -236,10 +416,12 @@ int hal_audio_stop(void) {
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to restore wake audio path: %s", esp_err_to_name(ret));
         is_running = false;
+        hal_audio_unlock();
         return -1;
     }
     consecutive_read_failures = 0;
     ESP_LOGI(TAG, "Audio stop requested; wake word path restored at %lu Hz", current_sample_rate);
+    hal_audio_unlock();
     return 0;
 #else
     /* No wake-word detector needs a continuous microphone stream. Treat stop
@@ -249,6 +431,72 @@ int hal_audio_stop(void) {
     current_sample_rate = SAMPLE_RATE_RECORD;
     consecutive_read_failures = 0;
     ESP_LOGI(TAG, "Audio stopped (codec stays initialized, mode=idle)");
+    hal_audio_unlock();
     return 0;
 #endif
+}
+
+void hal_audio_set_wake_word_stream_desired(bool enable) {
+#ifdef CONFIG_ENABLE_WAKE_WORD
+    if (!hal_audio_lock()) {
+        return;
+    }
+
+    wake_word_stream_desired = enable;
+    ESP_LOGD(TAG, "Wake word stream desired=%d", enable ? 1 : 0);
+    hal_audio_unlock();
+#else
+    (void)enable;
+#endif
+}
+
+int hal_audio_enter_app_idle(void) {
+    esp_err_t ret;
+
+    if (!hal_audio_lock()) {
+        return -1;
+    }
+
+#ifdef CONFIG_ENABLE_WAKE_WORD
+    wake_word_stream_desired = false;
+#endif
+    is_playback_mode = false;
+    is_running = false;
+    current_sample_rate = SAMPLE_RATE_RECORD;
+    consecutive_read_failures = 0;
+
+    if (!codec_initialized) {
+        ESP_LOGI(TAG, "Audio entered app-idle state (codec not initialized)");
+        hal_audio_unlock();
+        return 0;
+    }
+
+    ret = bsp_codec_dev_stop();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to close audio path for app idle: %s", esp_err_to_name(ret));
+        hal_audio_unlock();
+        return -1;
+    }
+
+    ESP_LOGI(TAG, "Audio entered app-idle state");
+    hal_audio_unlock();
+    return 0;
+}
+
+int hal_audio_release_idle(void) {
+#ifdef CONFIG_ENABLE_WAKE_WORD
+    bool wake_stream_requested = false;
+
+    if (!hal_audio_lock()) {
+        return -1;
+    }
+    wake_stream_requested = wake_word_stream_desired;
+    hal_audio_unlock();
+
+    if (wake_stream_requested) {
+        return hal_audio_stop();
+    }
+#endif
+
+    return hal_audio_deinit();
 }

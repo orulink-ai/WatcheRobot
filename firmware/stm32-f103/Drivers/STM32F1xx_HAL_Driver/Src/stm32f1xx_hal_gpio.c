@@ -382,7 +382,7 @@ void HAL_GPIO_DeInit(GPIO_TypeDef  *GPIOx, uint32_t GPIO_Pin)
         /* Clear Rising Falling edge configuration */
         CLEAR_BIT(EXTI->FTSR, (uint32_t)iocurrent);
         CLEAR_BIT(EXTI->RTSR, (uint32_t)iocurrent);
-
+        
         tmp = 0x0FuL << (4u * (position & 0x03u));
         CLEAR_BIT(AFIO->EXTICR[position >> 2u], tmp);
       }
@@ -583,3 +583,4 @@ __weak void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 /**
   * @}
   */
+

@@ -17,9 +17,25 @@
 extern "C" {
 #endif
 
+#define MCU_LINK_GIT_BRANCH_MAX_LEN 64u
+#define MCU_LINK_GIT_COMMIT_MAX_LEN 17u
+
+typedef struct {
+    bool version_valid;
+    uint8_t fw_major;
+    uint8_t fw_minor;
+    uint8_t fw_patch;
+    uint8_t hw_version;
+    bool git_valid;
+    bool git_dirty;
+    char git_branch[MCU_LINK_GIT_BRANCH_MAX_LEN];
+    char git_commit[MCU_LINK_GIT_COMMIT_MAX_LEN];
+} mcu_link_peer_info_t;
+
 typedef struct {
     mcu_link_fsm_t fsm;
     mcu_link_stats_t stats;
+    mcu_link_peer_info_t peer_info;
     uint32_t next_tx_seq;
     struct {
         uint8_t stream[MCU_FRAME_MAX_WIRE_SIZE];
@@ -37,6 +53,8 @@ typedef enum {
     MCU_LINK_RX_EVENT_NACK,
     MCU_LINK_RX_EVENT_FAULT,
     MCU_LINK_RX_EVENT_MOTION_DONE,
+    MCU_LINK_RX_EVENT_SERVO_FEEDBACK_RSP,
+    MCU_LINK_RX_EVENT_SERVO_FEEDBACK = MCU_LINK_RX_EVENT_SERVO_FEEDBACK_RSP,
     MCU_LINK_RX_EVENT_LED_DONE,
     MCU_LINK_RX_EVENT_TOUCH_EVENT,
     MCU_LINK_RX_EVENT_MAG_STATE,
@@ -61,6 +79,7 @@ bool mcu_link_is_ready(const mcu_link_t *link);
 bool mcu_link_snapshot_supported(const mcu_link_t *link);
 const mcu_link_stats_t *mcu_link_get_stats(const mcu_link_t *link);
 esp_err_t mcu_link_copy_stats(const mcu_link_t *link, mcu_link_stats_t *out_stats);
+esp_err_t mcu_link_copy_peer_info(const mcu_link_t *link, mcu_link_peer_info_t *out_info);
 esp_err_t mcu_link_record_ack_timeout(mcu_link_t *link);
 esp_err_t mcu_link_record_crc_error(mcu_link_t *link);
 esp_err_t mcu_link_record_reconnect(mcu_link_t *link);

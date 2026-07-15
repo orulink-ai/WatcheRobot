@@ -3,6 +3,8 @@
 
 #include "main.h"
 
+HAL_StatusTypeDef HAL_ADC_Init(ADC_HandleTypeDef *hadc);
+HAL_StatusTypeDef HAL_ADC_ConfigChannel(ADC_HandleTypeDef *hadc, ADC_ChannelConfTypeDef *sConfig);
 HAL_StatusTypeDef HAL_ADCEx_Calibration_Start(ADC_HandleTypeDef *hadc);
 HAL_StatusTypeDef HAL_ADC_Start(ADC_HandleTypeDef *hadc);
 HAL_StatusTypeDef HAL_ADC_PollForConversion(ADC_HandleTypeDef *hadc, uint32_t timeout);

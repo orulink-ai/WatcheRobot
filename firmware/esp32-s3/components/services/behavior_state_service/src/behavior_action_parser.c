@@ -1,4 +1,5 @@
 #include "behavior_action_parser.h"
+#include "behavior_memory.h"
 
 #include "cJSON.h"
 
@@ -309,8 +310,7 @@ esp_err_t behavior_action_parse_json(const char *action_id, const char *json, si
                     goto cleanup;
                 }
             } else if (parser_strcasecmp(axis_name, "x") == 0) {
-                if (!append_keyframe(&y_frames, &y_count, &y_capacity, frame_number,
-                                     clamp_servo_y_angle(angle_deg))) {
+                if (!append_keyframe(&y_frames, &y_count, &y_capacity, frame_number, clamp_servo_y_angle(angle_deg))) {
                     ret = ESP_ERR_NO_MEM;
                     goto cleanup;
                 }
@@ -364,7 +364,8 @@ esp_err_t behavior_action_parse_json(const char *action_id, const char *json, si
 
     frame_count = dedup_frame_numbers(frame_numbers, frame_count);
     if (frame_count > 0) {
-        events = (behavior_motion_event_t *)calloc((size_t)frame_count, sizeof(behavior_motion_event_t));
+        events =
+            (behavior_motion_event_t *)behavior_persistent_calloc((size_t)frame_count, sizeof(behavior_motion_event_t));
         if (events == NULL) {
             ret = ESP_ERR_NO_MEM;
             goto cleanup;

@@ -11,6 +11,8 @@ extern "C" {
 
 #define WATCHER_SDK_DISCOVERY_PORT 37021U
 #define WATCHER_SDK_WEBSOCKET_DEFAULT_PORT 8766U
+#define WATCHER_SDK_DISCOVERY_PROTOCOL_VERSION "1.1"
+#define WATCHER_SDK_PAIRING_CODE_LENGTH 6U
 
 typedef struct {
     char ip[16];
@@ -21,7 +23,7 @@ typedef struct {
 
 typedef bool (*watcher_sdk_discovery_cancel_fn_t)(void *context);
 
-int watcher_sdk_discovery_start(watcher_sdk_gateway_info_t *out_gateway, uint32_t timeout_ms,
+int watcher_sdk_discovery_start(watcher_sdk_gateway_info_t *out_gateway, const char *pairing_code, uint32_t timeout_ms,
                                 watcher_sdk_discovery_cancel_fn_t cancel_fn, void *cancel_context);
 char *watcher_sdk_discovery_ws_url(const watcher_sdk_gateway_info_t *gateway);
 void watcher_sdk_device_identity(char *device_id, size_t device_id_size, char *mac, size_t mac_size);

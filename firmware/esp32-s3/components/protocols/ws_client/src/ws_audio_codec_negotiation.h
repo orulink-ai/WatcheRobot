@@ -13,8 +13,8 @@ typedef struct {
     bool explicit_selection;
 } ws_audio_codec_negotiation_result_t;
 
-ws_audio_codec_negotiation_result_t ws_audio_codec_negotiate(
-    const char *codec, int sample_rate, int channels, int frame_duration_ms,
-    const char *packetization, int version, bool opus_available);
+ws_audio_codec_negotiation_result_t ws_audio_codec_negotiate(const char *codec, int sample_rate, int channels,
+                                                             int frame_duration_ms, const char *packetization,
+                                                             int version, bool opus_available);
 
 #endif

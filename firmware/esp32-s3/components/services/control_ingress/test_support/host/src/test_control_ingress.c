@@ -9,6 +9,11 @@
 
 int64_t control_ingress_host_esp_timer_now_us = 0;
 unsigned control_ingress_host_last_task_stack_depth = 0;
+char control_ingress_host_last_state_id[64] = "";
+char control_ingress_host_last_anim_id[64] = "";
+char control_ingress_host_last_action_id[64] = "";
+char control_ingress_host_last_sound_id[64] = "";
+bool control_ingress_host_uses_default_sound = false;
 
 typedef struct {
     int interrupt_calls;
@@ -38,6 +43,11 @@ static void reset_stub(void) {
     memset(&s_stub, 0, sizeof(s_stub));
     s_stub.next_seq = 42u;
     control_ingress_host_esp_timer_now_us = 0;
+    control_ingress_host_last_state_id[0] = '\0';
+    control_ingress_host_last_anim_id[0] = '\0';
+    control_ingress_host_last_action_id[0] = '\0';
+    control_ingress_host_last_sound_id[0] = '\0';
+    control_ingress_host_uses_default_sound = false;
 }
 
 static esp_err_t stub_interrupt_action(const char *source) {
@@ -362,7 +372,6 @@ static void test_state_queue_reports_timeout_when_full(void) {
     int i;
 
     assert(control_ingress_init() == ESP_OK);
-    control_ingress_reset_state_queue_for_test();
     for (i = 0; i < 16; ++i) {
         assert(control_ingress_submit_state_set(&req) == ESP_OK);
     }
@@ -418,6 +427,13 @@ static void test_ai_status_voice_flow_states_clear_text(void) {
     text = control_ingress_ai_status_text_for_test(&req);
     assert(text != NULL);
     assert(strcmp(text, "") == 0);
+
+    memset(&req, 0, sizeof(req));
+    snprintf(req.status, sizeof(req.status), "%s", "custom3");
+    snprintf(req.message, sizeof(req.message), "%s", "codex MCP tool call started: codex");
+    text = control_ingress_ai_status_text_for_test(&req);
+    assert(text != NULL);
+    assert(strcmp(text, "") == 0);
 }
 
 static void test_ai_status_empty_message_clears_text(void) {
@@ -430,7 +446,7 @@ static void test_ai_status_empty_message_clears_text(void) {
     assert(strcmp(text, "") == 0);
 }
 
-static void test_ai_status_non_voice_flow_clears_text(void) {
+static void test_all_ai_statuses_clear_text(void) {
     control_ai_status_request_t req = {0};
     const char *text;
 
@@ -441,37 +457,266 @@ static void test_ai_status_non_voice_flow_clears_text(void) {
     assert(strcmp(text, "") == 0);
 }
 
-static void test_custom2_status_is_deferred_until_tts_completes(void) {
+static void submit_ai_status_for_completion_state(const char *status, const char *message) {
     control_ai_status_request_t req = {0};
 
-    control_ingress_reset_deferred_ai_status_for_test();
-    snprintf(req.status, sizeof(req.status), "%s", "custom2");
-    req.defer_ui_until_tts_complete = true;
-
-    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
-    assert(control_ingress_has_deferred_ai_status_for_test());
-    assert(strcmp(control_ingress_deferred_ai_status_for_test(), "custom2") == 0);
+    snprintf(req.status, sizeof(req.status), "%s", status);
+    if (message != NULL) {
+        snprintf(req.message, sizeof(req.message), "%s", message);
+    }
+    (void)control_ingress_submit_ai_status(&req);
 }
 
-static void test_deferred_ai_status_keeps_only_latest_until_tts_completes(void) {
+static void test_tts_completion_defaults_to_happy_without_task_status(void) {
+    control_ingress_reset_ai_task_state_for_test();
+
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
+    submit_ai_status_for_completion_state("thinking", "");
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
+}
+
+static void test_tts_completion_keeps_task_working_after_first_reply(void) {
+    control_ingress_reset_ai_task_state_for_test();
+
+    submit_ai_status_for_completion_state("custom2", "");
+    assert(strcmp(control_ingress_tts_completion_state(), "custom2") == 0);
+
+    submit_ai_status_for_completion_state("speaking", "");
+    assert(strcmp(control_ingress_tts_completion_state(), "custom2") == 0);
+}
+
+static void test_tts_completion_uses_terminal_task_status(void) {
+    control_ingress_reset_ai_task_state_for_test();
+
+    submit_ai_status_for_completion_state("custom2", "");
+    submit_ai_status_for_completion_state("happy", "done");
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
+
+    submit_ai_status_for_completion_state("custom2", "");
+    submit_ai_status_for_completion_state("failed", "");
+    assert(strcmp(control_ingress_tts_completion_state(), "error") == 0);
+
+    submit_ai_status_for_completion_state("thinking", "");
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
+}
+
+static void test_deferred_ai_status_updates_completion_without_replacing_speaking(void) {
     control_ai_status_request_t req = {0};
 
-    control_ingress_reset_deferred_ai_status_for_test();
-    assert(control_ingress_init() == ESP_OK);
-    control_ingress_reset_state_queue_for_test();
-    snprintf(req.status, sizeof(req.status), "%s", "processing");
+    control_ingress_reset_ai_task_state_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "completed");
     req.defer_ui_until_tts_complete = true;
 
     assert(control_ingress_submit_ai_status(&req) == ESP_OK);
-    assert(control_ingress_has_deferred_ai_status_for_test());
-    assert(strcmp(control_ingress_deferred_ai_status_for_test(), "processing") == 0);
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
+}
 
-    snprintf(req.status, sizeof(req.status), "%s", "sunglasses");
+static void test_suppressed_ai_status_updates_lifecycle_without_enqueuing_ui(void) {
+    control_ai_status_request_t req = {0};
+
+    control_ingress_reset_ai_task_state_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "thinking");
+    req.suppress_ui = true;
+
     assert(control_ingress_submit_ai_status(&req) == ESP_OK);
-    assert(strcmp(control_ingress_deferred_ai_status_for_test(), "sunglasses") == 0);
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
+}
 
-    assert(control_ingress_flush_deferred_ai_status_after_tts() == ESP_OK);
-    assert(!control_ingress_has_deferred_ai_status_for_test());
+static void test_authoritative_task_count_keeps_foreground_execution_active(void) {
+    control_ai_status_request_t req = {0};
+
+    control_ingress_reset_ai_task_state_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "custom2");
+    snprintf(req.state_domain, sizeof(req.state_domain), "%s", "task");
+    req.has_active_task_count = true;
+    req.active_task_count = 2;
+    (void)control_ingress_submit_ai_status(&req);
+    assert(control_ingress_has_active_ai_task());
+    assert(strcmp(control_ingress_tts_completion_state(), "custom2") == 0);
+
+    snprintf(req.status, sizeof(req.status), "%s", "happy");
+    req.active_task_count = 1;
+    (void)control_ingress_submit_ai_status(&req);
+    assert(control_ingress_has_active_ai_task());
+    assert(strcmp(control_ingress_tts_completion_state(), "custom2") == 0);
+
+    req.active_task_count = 0;
+    (void)control_ingress_submit_ai_status(&req);
+    assert(!control_ingress_has_active_ai_task());
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
+}
+
+static void test_dialogue_terminal_does_not_release_active_task(void) {
+    control_ai_status_request_t req = {0};
+
+    control_ingress_reset_ai_task_state_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "custom2");
+    snprintf(req.state_domain, sizeof(req.state_domain), "%s", "task");
+    req.has_active_task_count = true;
+    req.active_task_count = 1;
+    (void)control_ingress_submit_ai_status(&req);
+
+    memset(&req, 0, sizeof(req));
+    snprintf(req.status, sizeof(req.status), "%s", "happy");
+    snprintf(req.state_domain, sizeof(req.state_domain), "%s", "dialogue");
+    (void)control_ingress_submit_ai_status(&req);
+    assert(control_ingress_has_active_ai_task());
+    assert(strcmp(control_ingress_tts_completion_state(), "custom2") == 0);
+}
+
+static void test_transport_disconnect_clears_active_task_lifecycle(void) {
+    control_ai_status_request_t req = {0};
+
+    control_ingress_reset_ai_task_state_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "custom2");
+    snprintf(req.state_domain, sizeof(req.state_domain), "%s", "task");
+    req.has_active_task_count = true;
+    req.active_task_count = 1;
+    (void)control_ingress_submit_ai_status(&req);
+    assert(control_ingress_has_active_ai_task());
+
+    control_ingress_clear_active_ai_tasks();
+
+    assert(!control_ingress_has_active_ai_task());
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
+}
+
+static void test_processing_and_tool_calling_use_distinct_existing_states(void) {
+    control_ai_status_request_t req = {0};
+
+    reset_stub();
+    snprintf(req.status, sizeof(req.status), "%s", "processing");
+    assert(control_ingress_apply_ai_status_for_test(&req) == ESP_OK);
+    assert(strcmp(control_ingress_host_last_state_id, "processing") == 0);
+
+    reset_stub();
+    memset(&req, 0, sizeof(req));
+    snprintf(req.status, sizeof(req.status), "%s", "tool_calling");
+    assert(control_ingress_apply_ai_status_for_test(&req) == ESP_OK);
+    assert(strcmp(control_ingress_host_last_state_id, "custom3") == 0);
+
+    reset_stub();
+    memset(&req, 0, sizeof(req));
+    snprintf(req.status, sizeof(req.status), "%s", "custom3");
+    assert(control_ingress_apply_ai_status_for_test(&req) == ESP_OK);
+    assert(strcmp(control_ingress_host_last_state_id, "custom3") == 0);
+}
+
+static void test_ai_status_empty_sound_uses_default_and_nonempty_sound_overrides(void) {
+    control_ai_status_request_t req = {0};
+
+    /* Transport parsers intentionally collapse an omitted sound_file and an
+     * explicitly empty sound_file into the same empty request buffer. */
+    reset_stub();
+    snprintf(req.status, sizeof(req.status), "%s", "thinking");
+    assert(control_ingress_apply_ai_status_for_test(&req) == ESP_OK);
+    assert(control_ingress_host_uses_default_sound);
+    assert(strcmp(control_ingress_host_last_sound_id, "") == 0);
+
+    reset_stub();
+    snprintf(req.sound_file, sizeof(req.sound_file), "%s", "thinking");
+    assert(control_ingress_apply_ai_status_for_test(&req) == ESP_OK);
+    assert(!control_ingress_host_uses_default_sound);
+    assert(strcmp(control_ingress_host_last_sound_id, "thinking") == 0);
+}
+
+static void test_explicit_empty_action_file_does_not_infer_status_action(void) {
+    control_ai_status_request_t req = {0};
+
+    reset_stub();
+    snprintf(req.status, sizeof(req.status), "%s", "custom2");
+    snprintf(req.image_name, sizeof(req.image_name), "%s", "custom2");
+    req.has_action_file = true;
+    req.action_file[0] = '\0';
+
+    assert(control_ingress_apply_ai_status_for_test(&req) == ESP_OK);
+    assert(strcmp(control_ingress_host_last_state_id, "custom2") == 0);
+    assert(strcmp(control_ingress_host_last_anim_id, "custom2") == 0);
+    assert(strcmp(control_ingress_host_last_action_id, "") == 0);
+
+    reset_stub();
+    req.has_action_file = false;
+    assert(control_ingress_apply_ai_status_for_test(&req) == ESP_OK);
+    assert(strcmp(control_ingress_host_last_action_id, "custom2") == 0);
+}
+
+static void test_processing_and_tool_calling_hold_foreground_lease(void) {
+    control_ai_status_request_t req = {0};
+
+    control_ingress_reset_ai_task_state_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "processing");
+    snprintf(req.state_domain, sizeof(req.state_domain), "%s", "dialogue_pending");
+    req.has_foreground_active = true;
+    req.foreground_active = true;
+    req.suppress_ui = true;
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(control_ingress_has_foreground_ai_lease());
+    assert(!control_ingress_has_active_ai_task());
+    assert(strcmp(control_ingress_tts_completion_state(), "processing") == 0);
+
+    control_ingress_clear_active_ai_tasks();
+    memset(&req, 0, sizeof(req));
+    snprintf(req.status, sizeof(req.status), "%s", "tool_calling");
+    snprintf(req.state_domain, sizeof(req.state_domain), "%s", "task");
+    req.has_foreground_active = true;
+    req.foreground_active = true;
+    req.suppress_ui = true;
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(control_ingress_has_foreground_ai_lease());
+    assert(control_ingress_has_active_ai_task());
+    assert(strcmp(control_ingress_tts_completion_state(), "custom3") == 0);
+
+    memset(&req, 0, sizeof(req));
+    snprintf(req.status, sizeof(req.status), "%s", "happy");
+    snprintf(req.state_domain, sizeof(req.state_domain), "%s", "task");
+    req.has_active_task_count = true;
+    req.active_task_count = 0;
+    req.has_foreground_active = true;
+    req.foreground_active = false;
+    req.suppress_ui = true;
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(!control_ingress_has_foreground_ai_lease());
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
+}
+
+static void test_foreground_lease_combines_server_foreground_and_active_task_count(void) {
+    control_ai_status_request_t req = {0};
+
+    control_ingress_reset_ai_task_state_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "happy");
+    req.has_active_task_count = true;
+    req.active_task_count = 1;
+    req.has_foreground_active = true;
+    req.foreground_active = false;
+    req.suppress_ui = true;
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(control_ingress_has_foreground_ai_lease());
+
+    req.active_task_count = 0;
+    req.foreground_active = true;
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(control_ingress_has_foreground_ai_lease());
+
+    req.foreground_active = false;
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(!control_ingress_has_foreground_ai_lease());
+}
+
+static void test_message_fallback_preserves_processing_and_terminal_lifecycle(void) {
+    control_ai_status_request_t req = {0};
+
+    control_ingress_reset_ai_task_state_for_test();
+    snprintf(req.status, sizeof(req.status), "%s", "brain_update");
+    snprintf(req.message, sizeof(req.message), "%s", "processing request");
+    req.suppress_ui = true;
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(control_ingress_has_foreground_ai_lease());
+    assert(strcmp(control_ingress_tts_completion_state(), "processing") == 0);
+
+    snprintf(req.message, sizeof(req.message), "%s", "completed successfully");
+    assert(control_ingress_submit_ai_status(&req) == ESP_OK);
+    assert(!control_ingress_has_foreground_ai_lease());
+    assert(strcmp(control_ingress_tts_completion_state(), "happy") == 0);
 }
 
 int main(void) {
@@ -489,17 +734,37 @@ int main(void) {
         {"stop_interrupts_action_loop_before_servo_stop", test_stop_interrupts_action_loop_before_servo_stop},
         {"jog_vector_request_interrupts_and_preserves_both_axes",
          test_jog_vector_request_interrupts_and_preserves_both_axes},
-        {"jog_vector_stream_interrupts_only_on_stream_start",
-         test_jog_vector_stream_interrupts_only_on_stream_start},
+        {"jog_vector_stream_interrupts_only_on_stream_start", test_jog_vector_stream_interrupts_only_on_stream_start},
         {"state_task_has_crash_safe_stack_budget", test_state_task_has_crash_safe_stack_budget},
+        {"state_queue_reports_timeout_when_full", test_state_queue_reports_timeout_when_full},
         {"resource_names_accept_design_export_aliases", test_resource_names_accept_design_export_aliases},
         {"ai_status_voice_flow_states_clear_text", test_ai_status_voice_flow_states_clear_text},
         {"ai_status_empty_message_clears_text", test_ai_status_empty_message_clears_text},
-        {"ai_status_non_voice_flow_clears_text", test_ai_status_non_voice_flow_clears_text},
-        {"custom2_status_is_deferred_until_tts_completes", test_custom2_status_is_deferred_until_tts_completes},
-        {"deferred_ai_status_keeps_only_latest_until_tts_completes",
-         test_deferred_ai_status_keeps_only_latest_until_tts_completes},
-        {"state_queue_reports_timeout_when_full", test_state_queue_reports_timeout_when_full},
+        {"all_ai_statuses_clear_text", test_all_ai_statuses_clear_text},
+        {"tts_completion_defaults_to_happy_without_task_status",
+         test_tts_completion_defaults_to_happy_without_task_status},
+        {"tts_completion_keeps_task_working_after_first_reply",
+         test_tts_completion_keeps_task_working_after_first_reply},
+        {"tts_completion_uses_terminal_task_status", test_tts_completion_uses_terminal_task_status},
+        {"deferred_ai_status_updates_completion_without_replacing_speaking",
+         test_deferred_ai_status_updates_completion_without_replacing_speaking},
+        {"suppressed_ai_status_updates_lifecycle_without_enqueuing_ui",
+         test_suppressed_ai_status_updates_lifecycle_without_enqueuing_ui},
+        {"authoritative_task_count_keeps_foreground_execution_active",
+         test_authoritative_task_count_keeps_foreground_execution_active},
+        {"dialogue_terminal_does_not_release_active_task", test_dialogue_terminal_does_not_release_active_task},
+        {"transport_disconnect_clears_active_task_lifecycle", test_transport_disconnect_clears_active_task_lifecycle},
+        {"processing_and_tool_calling_use_distinct_existing_states",
+         test_processing_and_tool_calling_use_distinct_existing_states},
+        {"ai_status_empty_sound_uses_default_and_nonempty_sound_overrides",
+         test_ai_status_empty_sound_uses_default_and_nonempty_sound_overrides},
+        {"explicit_empty_action_file_does_not_infer_status_action",
+         test_explicit_empty_action_file_does_not_infer_status_action},
+        {"processing_and_tool_calling_hold_foreground_lease", test_processing_and_tool_calling_hold_foreground_lease},
+        {"foreground_lease_combines_server_foreground_and_active_task_count",
+         test_foreground_lease_combines_server_foreground_and_active_task_count},
+        {"message_fallback_preserves_processing_and_terminal_lifecycle",
+         test_message_fallback_preserves_processing_and_terminal_lifecycle},
     };
     size_t i;
 

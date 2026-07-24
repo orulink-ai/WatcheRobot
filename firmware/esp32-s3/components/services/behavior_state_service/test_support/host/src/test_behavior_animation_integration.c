@@ -105,6 +105,18 @@ static char *read_source(const char *relative_path) {
     return contents;
 }
 
+static size_t count_occurrences(const char *haystack, const char *needle) {
+    size_t count = 0U;
+    size_t needle_len = strlen(needle);
+    const char *cursor = haystack;
+
+    while ((cursor = strstr(cursor, needle)) != NULL) {
+        count++;
+        cursor += needle_len;
+    }
+    return count;
+}
+
 static void test_static_animation_architecture_gate(void) {
     char *service = read_source("src/behavior_state_service.c");
     char *executor = read_source("src/behavior_executor.c");
@@ -140,12 +152,44 @@ static void test_display_command_carries_repeat_owner_and_correlation(void) {
     assert(command.correlation_id == 123U);
 }
 
+static void test_same_state_override_refresh_advances_animation_correlation(void) {
+    char *service = read_source("src/behavior_state_service.c");
+    const char *helper = strstr(service, "static void behavior_refresh_same_state_overrides_locked");
+    const char *helper_end = helper != NULL ? strstr(helper, "\n}") : NULL;
+    const char *correlation_advance =
+        helper != NULL ? strstr(helper, "behavior_begin_animation_correlation_locked();") : NULL;
+
+    assert(helper != NULL);
+    assert(helper_end != NULL);
+    assert(correlation_advance != NULL);
+    assert(correlation_advance < helper_end);
+    assert(count_occurrences(service, "behavior_refresh_same_state_overrides_locked(") == 3U);
+    free(service);
+}
+
+static void test_one_shot_resources_are_restartable_and_do_not_inherit_state_loop(void) {
+    char *service = read_source("src/behavior_state_service.c");
+    char *header = read_source("include/behavior_state_service.h");
+
+    assert(strstr(header, "behavior_state_set_with_resources_and_action_once") != NULL);
+    assert(strstr(service, "!s_ctx.resources_one_shot") != NULL);
+    assert(strstr(service, "state_request.resources_one_shot") != NULL);
+    assert(strstr(service, "behavior_scheduler_effective_animation_playback(event->playback_mode,") != NULL);
+    assert(strstr(service, "behavior_scheduler_action_should_loop(s_ctx.current_state, s_ctx.current_action,") != NULL);
+    assert(strstr(service, "if (!resources_one_shot && !s_ctx.resources_one_shot &&") != NULL);
+
+    free(header);
+    free(service);
+}
+
 int main(void) {
     test_priority_and_protection_policy();
     test_terminal_reducer_matches_ticket_epoch_type_and_source();
     test_terminal_reducer_distinguishes_failure_and_release();
     test_static_animation_architecture_gate();
     test_display_command_carries_repeat_owner_and_correlation();
+    test_same_state_override_refresh_advances_animation_correlation();
+    test_one_shot_resources_are_restartable_and_do_not_inherit_state_loop();
     puts("behavior animation integration host tests passed");
     return 0;
 }

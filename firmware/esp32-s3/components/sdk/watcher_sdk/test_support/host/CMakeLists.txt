@@ -22,22 +22,32 @@ target_include_directories(watcher_sdk_core_host_tests PRIVATE
 
 add_test(NAME watcher_sdk_core_host_tests COMMAND watcher_sdk_core_host_tests)
 
-if(DEFINED ENV{IDF_PATH})
-    set(IDF_PATH "$ENV{IDF_PATH}")
+set(WATCHER_IDF_PATH "" CACHE PATH "ESP-IDF checkout used by host protocol tests")
+set(IDF_PATH_HINTS
+    "${WATCHER_IDF_PATH}"
+    "$ENV{IDF_PATH}"
+    "$ENV{HOME}/esp/esp-idf"
+    "C:/Espressif/frameworks/esp-idf-v5.2.1"
+)
+find_path(CJSON_DIR
+    NAMES cJSON.c
+    HINTS ${IDF_PATH_HINTS}
+    PATH_SUFFIXES components/json/cJSON
+)
+
+if(CJSON_DIR AND EXISTS "${CJSON_DIR}/cJSON.c" AND EXISTS "${CJSON_DIR}/cJSON.h")
+    add_executable(watcher_sdk_protocol_host_tests
+        "${CJSON_DIR}/cJSON.c"
+        "${WATCHER_SDK_DIR}/src/watcher_sdk_protocol.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/test_watcher_sdk_protocol.c"
+    )
+
+    target_include_directories(watcher_sdk_protocol_host_tests PRIVATE
+        "${WATCHER_SDK_DIR}/include"
+        "${CJSON_DIR}"
+    )
+
+    add_test(NAME watcher_sdk_protocol_host_tests COMMAND watcher_sdk_protocol_host_tests)
 else()
-    set(IDF_PATH "C:/Espressif/frameworks/esp-idf-v5.2.1")
+    message(STATUS "Skipping watcher_sdk_protocol_host_tests: cJSON.c and cJSON.h were not found in an ESP-IDF checkout")
 endif()
-set(CJSON_DIR "${IDF_PATH}/components/json/cJSON")
-
-add_executable(watcher_sdk_protocol_host_tests
-    "${CJSON_DIR}/cJSON.c"
-    "${WATCHER_SDK_DIR}/src/watcher_sdk_protocol.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_watcher_sdk_protocol.c"
-)
-
-target_include_directories(watcher_sdk_protocol_host_tests PRIVATE
-    "${WATCHER_SDK_DIR}/include"
-    "${CJSON_DIR}"
-)
-
-add_test(NAME watcher_sdk_protocol_host_tests COMMAND watcher_sdk_protocol_host_tests)

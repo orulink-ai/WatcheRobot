@@ -1,6 +1,6 @@
 #include "behavior_action_parser.h"
-#include "behavior_catalog_parser.h"
 #include "behavior_catalog_loader.h"
+#include "behavior_catalog_parser.h"
 #include "behavior_memory.h"
 
 #include <assert.h>
@@ -250,8 +250,8 @@ static void test_catalog_parser_loads_animation_repeat_and_failure_transition(vo
                                "\"hold_until_replaced\":true,"
                                "\"on_animation_complete\":{\"anim\":\"standby\",\"state\":\"standby_loop\"},"
                                "\"on_animation_failed\":{\"state\":\"standby_loop\"},"
-                                   "\"expression\":[{\"anim\":\"standby\",\"playback_mode\":\"repeat\","
-                                   "\"repeat_count\":2,\"fade_in_ms\":3000}],"
+                               "\"expression\":[{\"anim\":\"standby\",\"playback_mode\":\"repeat\","
+                               "\"repeat_count\":2,\"fade_in_ms\":3000}],"
                                "\"motion\":[],\"sound\":[]"
                                "},"
                                "\"standby_loop\":{\"loop\":true,\"expression\":[{\"anim\":\"standby_loop\"}]}"
@@ -289,22 +289,21 @@ static void test_catalog_parser_loads_explicit_animation_playback_modes(void) {
 }
 
 static void test_catalog_parser_accepts_public_behavior_schema(void) {
-    static const char json[] =
-        "{"
-        "\"schema_version\":\"1.0\","
-        "\"default_behavior\":\"greeting\","
-        "\"behaviors\":{"
-        "\"greeting\":{"
-        "\"loop\":false,"
-        "\"motion\":[{\"at_ms\":0,\"pan_deg\":110,\"tilt_deg\":120,\"duration_ms\":300,"
-        "\"profile\":\"linear\"}],"
-        "\"animation\":[{\"at_ms\":0,\"anim\":\"happy\",\"playback_mode\":\"once\"}],"
-        "\"audio\":[{\"at_ms\":20,\"sound_id\":\"hello\"}],"
-        "\"light\":[{\"at_ms\":0,\"effect\":\"breathing\",\"red\":77,\"green\":163,"
-        "\"blue\":255,\"brightness\":70,\"period_ms\":800,\"repeat\":1}]"
-        "}"
-        "}"
-        "}";
+    static const char json[] = "{"
+                               "\"schema_version\":\"1.0\","
+                               "\"default_behavior\":\"greeting\","
+                               "\"behaviors\":{"
+                               "\"greeting\":{"
+                               "\"loop\":false,"
+                               "\"motion\":[{\"at_ms\":0,\"pan_deg\":110,\"tilt_deg\":120,\"duration_ms\":300,"
+                               "\"profile\":\"linear\"}],"
+                               "\"animation\":[{\"at_ms\":0,\"anim\":\"happy\",\"playback_mode\":\"once\"}],"
+                               "\"audio\":[{\"at_ms\":20,\"sound_id\":\"hello\"}],"
+                               "\"light\":[{\"at_ms\":0,\"effect\":\"breathing\",\"red\":77,\"green\":163,"
+                               "\"blue\":255,\"brightness\":70,\"period_ms\":800,\"repeat\":1}]"
+                               "}"
+                               "}"
+                               "}";
     behavior_catalog_t catalog = {0};
     const behavior_state_def_t *greeting;
 
@@ -742,6 +741,27 @@ static void test_production_voice_flow_states_clear_text_and_keep_anim(void) {
     free(json);
 }
 
+static void test_production_fondle_anger_is_one_shot(void) {
+    behavior_catalog_t catalog = {0};
+    const behavior_state_def_t *fondle_anger = NULL;
+    size_t json_len = 0;
+    char *json = read_file(BEHAVIOR_PRODUCTION_STATES_JSON, &json_len);
+
+    assert(json != NULL);
+    assert(behavior_catalog_parse_json(json, json_len, NULL, NULL, &catalog) == ESP_OK);
+    fondle_anger = find_state(&catalog, "fondle_anger");
+
+    assert(fondle_anger != NULL);
+    assert(!fondle_anger->loop);
+    assert(!fondle_anger->hold_until_replaced);
+    assert(fondle_anger->expression_count == 1);
+    assert(strcmp(fondle_anger->expression[0].anim, "fondle_anger") == 0);
+    assert(fondle_anger->expression[0].playback_mode == ANIM_PLAYBACK_ONCE);
+
+    behavior_free_catalog(&catalog);
+    free(json);
+}
+
 static void test_production_animations_never_depend_on_resource_loop_fallback(void) {
     behavior_catalog_t catalog = {0};
     size_t json_len = 0;
@@ -771,8 +791,8 @@ static void test_catalog_loader_prefers_valid_sd_candidate(void) {
     behavior_catalog_t catalog = {0};
     size_t selected = SIZE_MAX;
 
-    assert(behavior_catalog_load_first_valid(candidates, ARRAY_SIZE(candidates), 128U * 1024U, NULL, NULL,
-                                             &catalog, &selected) == ESP_OK);
+    assert(behavior_catalog_load_first_valid(candidates, ARRAY_SIZE(candidates), 128U * 1024U, NULL, NULL, &catalog,
+                                             &selected) == ESP_OK);
     assert(selected == 0U);
     assert(catalog.state_count > 0);
     behavior_free_catalog(&catalog);
@@ -792,8 +812,8 @@ static void test_catalog_loader_falls_back_when_sd_candidate_is_invalid(void) {
     assert(fputs("{invalid-json", file) >= 0);
     fclose(file);
 
-    assert(behavior_catalog_load_first_valid(candidates, ARRAY_SIZE(candidates), 128U * 1024U, NULL, NULL,
-                                             &catalog, &selected) == ESP_OK);
+    assert(behavior_catalog_load_first_valid(candidates, ARRAY_SIZE(candidates), 128U * 1024U, NULL, NULL, &catalog,
+                                             &selected) == ESP_OK);
     assert(selected == 1U);
     assert(catalog.state_count > 0);
     behavior_free_catalog(&catalog);
@@ -837,6 +857,7 @@ int main(void) {
         {"catalog_parser_rejects_invalid_motion_angle", test_catalog_parser_rejects_invalid_motion_angle},
         {"catalog_parser_clamps_y_axis_angle", test_catalog_parser_clamps_y_axis_angle},
         {"production_fondle_love_is_one_shot", test_production_fondle_love_is_one_shot},
+        {"production_fondle_anger_is_one_shot", test_production_fondle_anger_is_one_shot},
         {"production_recharge_is_one_shot_hold", test_production_recharge_is_one_shot_hold},
         {"production_standby_variants_are_states", test_production_standby_variants_are_states},
         {"production_voice_sleep_transitions_are_states", test_production_voice_sleep_transitions_are_states},

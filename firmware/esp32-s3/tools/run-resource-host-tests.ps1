@@ -21,6 +21,10 @@ $suites = @(
         Source = Join-Path $firmwareRoot "components\services\behavior_state_service\test_support\host"
     },
     @{
+        Name = "control_ingress"
+        Source = Join-Path $firmwareRoot "components\services\control_ingress\test_support\host"
+    },
+    @{
         Name = "anim_service"
         Source = Join-Path $firmwareRoot "components\services\anim_service\test_support\host"
     },

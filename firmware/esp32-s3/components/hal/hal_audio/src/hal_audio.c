@@ -12,11 +12,11 @@
 #define SAMPLE_RATE_RECORD 16000 /* ASR expects 16kHz */
 #define SAMPLE_RATE_PLAY 24000   /* 火山引擎 TTS uses 24kHz */
 
-static bool codec_initialized = false;                    /* codec init is global, only once */
-static bool is_running = false;                           /* current running state */
-static bool is_playback_mode = false;                     /* recording input or playback output */
+static bool codec_initialized = false; /* codec init is global, only once */
+static bool is_running = false;        /* current running state */
+static bool is_playback_mode = false;  /* recording input or playback output */
 #ifdef CONFIG_ENABLE_WAKE_WORD
-static bool wake_word_stream_desired = false;             /* live WakeNet runtime owns idle mic path */
+static bool wake_word_stream_desired = false; /* live WakeNet runtime owns idle mic path */
 #endif
 static uint32_t current_sample_rate = SAMPLE_RATE_RECORD; /* current sample rate */
 static uint8_t current_volume = CONFIG_WATCHER_AUDIO_VOLUME;
@@ -373,8 +373,7 @@ int hal_audio_drain_playback(uint32_t timeout_ms) {
 
     esp_err_t ret = bsp_i2s_wait_tx_drain(timeout_ms);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Playback DMA drain failed: %s timeout_ms=%lu", esp_err_to_name(ret),
-                 (unsigned long)timeout_ms);
+        ESP_LOGW(TAG, "Playback DMA drain failed: %s timeout_ms=%lu", esp_err_to_name(ret), (unsigned long)timeout_ms);
         goto cleanup;
     }
     result = 0;

@@ -7,7 +7,7 @@ code on each session, discovers a desktop gateway on `37021/UDP`, then connects 
 The protocol reuses the Watcher `{type, code, data}` envelope, `command_id`, `sys.ack`/`sys.nack`, WebSocket
 ping/pong, and WSPK media packets. Authentication negotiates protocol `1.0`, device ID, firmware version, and these
 capabilities: `behavior`, `animation`, `motion`, `audio`, `audio.stream`, `light`, `microphone`, and
-`camera.capture`.
+`camera.capture`, plus `input.back_touch`, `input.screen_touch`, and `input.roller` for physical input events.
 
 ACK means accepted. A finite operation reports `starting`, `running`, and one terminal state using
 `evt.sdk.operation` and `operation_id`. Repeated `command_id` values return the cached response rather than executing
@@ -36,6 +36,16 @@ lifecycle adaptation.
 `evt.audio.buffer_status` correlates terminal status to the originating non-zero stream ID. Python uses device queue
 statistics for a bounded send window. Stop, replacement, disconnect, session reset, or App close revoke the stream
 and clear playback. Queue/sequence errors, a short hardware write, or SHA mismatch are not successful completion.
+
+Authenticated physical input is forwarded as `evt.sdk.input`:
+
+- rear touch: `source=back_touch`, `action=press|release|long_press`, `touch_id`, and the STM32 timestamp;
+- screen: `source=screen_touch`, `action=tap`, display `x`/`y`, and the ESP32 timestamp;
+- roller: `source=roller`, `action=rotate`, signed accumulated `delta`, and the ESP32 timestamp.
+
+The SDK App uses a bounded newest-event queue, so input never blocks hardware/event tasks. When no authenticated SDK
+session owns rear touch, the existing local fondle Behavior remains active. Roller short click still owns local App
+exit and long hold still owns system shutdown; only rotation is forwarded to Python.
 
 On disconnect or app close, the SDK context is destroyed, all Jobs are cancelled, media is closed, outputs are
 stopped, and a new pairing code is generated. v1 is plain `ws://` for trusted LANs; TLS, durable trust, remote wake,

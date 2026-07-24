@@ -153,6 +153,14 @@ typedef struct {
     char image_name[WS_RESOURCE_NAME_MAX];
     char action_file[WS_RESOURCE_NAME_MAX];
     char sound_file[WS_RESOURCE_NAME_MAX];
+    char state_domain[16];
+    char task_id[64];
+    int active_task_count;
+    bool has_active_task_count;
+    bool foreground_active;
+    bool has_foreground_active;
+    bool has_action_file;
+    bool tts_downlink_complete;
 } ws_ai_status_t;
 
 typedef struct {

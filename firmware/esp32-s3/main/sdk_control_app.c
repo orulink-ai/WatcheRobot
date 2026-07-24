@@ -3,6 +3,7 @@
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
@@ -23,10 +24,12 @@
 #define TAG "SDK_CONTROL_APP"
 #define SDK_TEXT_QUEUE_DEPTH 8U
 #define SDK_NACK_QUEUE_DEPTH 4U
+#define SDK_INPUT_QUEUE_DEPTH 16U
 #define SDK_TEXT_MESSAGE_MAX 1024U
 #define SDK_RESPONSE_MAX 768U
 #define SDK_COMMAND_CACHE_SIZE 8U
 #define SDK_DISCOVERY_TIMEOUT_MS 5000U
+#define SDK_HELLO_RESPONSE_TIMEOUT_MS 5000U
 #define SDK_NETWORK_TASK_STACK 4096U
 #define SDK_NETWORK_EXIT_TIMEOUT_MS 2000U
 #define SDK_HANDLER_EXIT_TIMEOUT_MS 250U
@@ -54,11 +57,13 @@ static sdk_control_app_ui_t s_ui = {0};
 static watcher_sdk_context_t *s_sdk = NULL;
 static QueueHandle_t s_text_queue = NULL;
 static QueueHandle_t s_nack_queue = NULL;
+static QueueHandle_t s_input_queue = NULL;
 static TaskHandle_t s_network_task = NULL;
 static EventGroupHandle_t s_network_events = NULL;
 static bool s_authenticated = false;
 static bool s_was_connected = false;
 static bool s_session_reset_pending = false;
+static int64_t s_hello_response_wait_started_us = 0;
 static char s_pairing_code[7] = "000000";
 static sdk_command_cache_entry_t s_command_cache[SDK_COMMAND_CACHE_SIZE] = {0};
 static size_t s_command_cache_next = 0U;
@@ -80,6 +85,45 @@ static void sdk_control_restore_display_ui(void) {
     s_display_domain = WATCHER_SDK_DOMAIN_NONE;
     if (s_authenticated && s_ui.restore_control_ui != NULL) {
         s_ui.restore_control_ui();
+    }
+}
+
+static const char *sdk_input_action_name(watcher_sdk_input_action_t action) {
+    switch (action) {
+    case WATCHER_SDK_INPUT_ACTION_PRESS:
+        return "press";
+    case WATCHER_SDK_INPUT_ACTION_RELEASE:
+        return "release";
+    case WATCHER_SDK_INPUT_ACTION_LONG_PRESS:
+        return "long";
+    case WATCHER_SDK_INPUT_ACTION_TAP:
+        return "tap";
+    case WATCHER_SDK_INPUT_ACTION_ROTATE:
+        return "rotate";
+    case WATCHER_SDK_INPUT_ACTION_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
+static void sdk_format_input_debug(const watcher_sdk_input_event_t *event, char *line, size_t line_size) {
+    if (event == NULL || line == NULL || line_size == 0U) {
+        return;
+    }
+    switch (event->source) {
+    case WATCHER_SDK_INPUT_BACK_TOUCH:
+        (void)snprintf(line, line_size, "Back: %s #%u", sdk_input_action_name(event->action),
+                       (unsigned)event->touch_id);
+        break;
+    case WATCHER_SDK_INPUT_SCREEN_TOUCH:
+        (void)snprintf(line, line_size, "Screen: x=%d y=%d", (int)event->x, (int)event->y);
+        break;
+    case WATCHER_SDK_INPUT_ROLLER:
+        (void)snprintf(line, line_size, "Roller: %ld", (long)event->delta);
+        break;
+    default:
+        (void)snprintf(line, line_size, "Input: %s", sdk_input_action_name(event->action));
+        break;
     }
 }
 
@@ -150,6 +194,74 @@ static void sdk_handler_end(void) {
     portEXIT_CRITICAL(&s_handler_lock);
 }
 
+static bool sdk_input_handler_begin(QueueHandle_t *out_input_queue) {
+    bool accepted = false;
+
+    if (out_input_queue == NULL) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_handler_lock);
+    if (s_handler_accepting && s_authenticated && s_input_queue != NULL) {
+        s_handler_active++;
+        *out_input_queue = s_input_queue;
+        accepted = true;
+    }
+    portEXIT_CRITICAL(&s_handler_lock);
+    return accepted;
+}
+
+static void sdk_session_set_authenticated(bool authenticated) {
+    portENTER_CRITICAL(&s_handler_lock);
+    s_authenticated = authenticated;
+    portEXIT_CRITICAL(&s_handler_lock);
+}
+
+static bool queue_input_event(const watcher_sdk_input_event_t *event) {
+    QueueHandle_t input_queue = NULL;
+    watcher_sdk_input_event_t discarded;
+
+    if (event == NULL || !sdk_input_handler_begin(&input_queue)) {
+        return false;
+    }
+    if (xQueueSend(input_queue, event, 0) != pdTRUE) {
+        const bool dropped_oldest = xQueueReceive(input_queue, &discarded, 0) == pdTRUE;
+        const bool queued_after_drop = xQueueSend(input_queue, event, 0) == pdTRUE;
+        if (dropped_oldest) {
+            ESP_LOGW(TAG, "SDK input queue full; oldest event dropped");
+        }
+        if (!queued_after_drop) {
+            ESP_LOGW(TAG, "SDK input event dropped during producer contention");
+        }
+    }
+    sdk_handler_end();
+    return true;
+}
+
+bool sdk_control_app_publish_back_touch(uint8_t touch_id, uint8_t event_code, uint32_t timestamp_ms) {
+    watcher_sdk_input_action_t action = WATCHER_SDK_INPUT_ACTION_UNKNOWN;
+    watcher_sdk_input_event_t event = {
+        .source = WATCHER_SDK_INPUT_BACK_TOUCH,
+        .timestamp_ms = timestamp_ms,
+        .touch_id = touch_id,
+    };
+
+    switch (event_code) {
+    case 1U:
+        action = WATCHER_SDK_INPUT_ACTION_PRESS;
+        break;
+    case 2U:
+        action = WATCHER_SDK_INPUT_ACTION_RELEASE;
+        break;
+    case 3U:
+        action = WATCHER_SDK_INPUT_ACTION_LONG_PRESS;
+        break;
+    default:
+        return false;
+    }
+    event.action = action;
+    return queue_input_event(&event);
+}
+
 static void sdk_handler_start_accepting(void) {
     portENTER_CRITICAL(&s_handler_lock);
     s_handler_accepting = true;
@@ -197,6 +309,7 @@ static bool discovery_cancelled(void *context) {
 static void network_cleanup(void) {
     ws_client_stop_for_resource_release();
     (void)ws_client_deinit();
+    ws_client_set_session_pairing_code(NULL);
 }
 
 static void sdk_network_task(void *argument) {
@@ -220,7 +333,8 @@ static void sdk_network_task(void *argument) {
                                       pdMS_TO_TICKS(100));
             continue;
         }
-        if (watcher_sdk_discovery_start(&gateway, SDK_DISCOVERY_TIMEOUT_MS, discovery_cancelled, events) != 0) {
+        if (watcher_sdk_discovery_start(&gateway, s_pairing_code, SDK_DISCOVERY_TIMEOUT_MS, discovery_cancelled,
+                                        events) != 0) {
             (void)xEventGroupWaitBits(events, SDK_NET_STOP_REQUESTED | SDK_NET_RESET_REQUESTED, pdFALSE, pdFALSE,
                                       pdMS_TO_TICKS(250));
             continue;
@@ -232,6 +346,7 @@ static void sdk_network_task(void *argument) {
         if (url == NULL) {
             continue;
         }
+        ws_client_set_session_pairing_code(s_pairing_code);
         if (ws_client_set_server_url(url) != 0 || ws_client_init() != 0 || ws_client_start() != 0) {
             ESP_LOGW(TAG, "SDK gateway connection failed url=%s", url);
             network_cleanup();
@@ -519,31 +634,21 @@ static watcher_sdk_result_t execute_command(const watcher_sdk_protocol_command_t
     }
 }
 
-static void handle_authenticate(const watcher_sdk_protocol_command_t *command) {
-    char response[SDK_RESPONSE_MAX];
+static void sdk_session_activate_after_hello(void) {
     char ready[SDK_RESPONSE_MAX];
     char device_id[32];
     char mac[18];
 
-    if (strcmp(command->data.authenticate.protocol_version, WATCHER_SDK_PROTOCOL_VERSION) != 0) {
-        (void)watcher_sdk_protocol_build_nack(command->message_type, command->command_id, "protocol_version_mismatch",
-                                              response, sizeof(response));
-        send_and_cache(command->command_id, response);
+    if (s_authenticated || s_sdk == NULL || ws_client_is_session_ready() == 0) {
         return;
     }
-    if (strcmp(command->data.authenticate.pairing_code, s_pairing_code) != 0) {
-        (void)watcher_sdk_protocol_build_nack(command->message_type, command->command_id, "authentication_failed",
-                                              response, sizeof(response));
-        send_and_cache(command->command_id, response);
-        return;
-    }
-    s_authenticated = true;
-    (void)watcher_sdk_protocol_build_ack(command->message_type, command->command_id, WATCHER_SDK_JOB_INVALID, response,
-                                         sizeof(response));
-    send_and_cache(command->command_id, response);
     watcher_sdk_device_identity(device_id, sizeof(device_id), mac, sizeof(mac));
-    (void)watcher_sdk_protocol_build_ready(device_id, ota_service_get_fw_version(), ready, sizeof(ready));
-    (void)ws_client_send_text(ready);
+    if (watcher_sdk_protocol_build_ready(device_id, ota_service_get_fw_version(), ready, sizeof(ready)) !=
+            WATCHER_SDK_PROTOCOL_OK ||
+        ws_client_send_text(ready) < 0) {
+        return;
+    }
+    sdk_session_set_authenticated(true);
     if (s_ui.show_connected != NULL) {
         s_ui.show_connected();
     }
@@ -574,7 +679,7 @@ static void process_message(const sdk_text_message_t *message) {
         return;
     }
     if (command.type == WATCHER_SDK_PROTOCOL_AUTHENTICATE) {
-        handle_authenticate(&command);
+        send_protocol_nack(command.message_type, command.command_id, "unsupported_command");
         return;
     }
     if (!s_authenticated) {
@@ -609,7 +714,7 @@ static bool reset_control_session(void) {
         watcher_sdk_close(s_sdk);
         s_sdk = NULL;
     }
-    s_authenticated = false;
+    sdk_session_set_authenticated(false);
     s_display_job_id = WATCHER_SDK_JOB_INVALID;
     s_display_domain = WATCHER_SDK_DOMAIN_NONE;
     clear_audio_stream_authorization();
@@ -620,6 +725,9 @@ static bool reset_control_session(void) {
     }
     if (s_nack_queue != NULL) {
         (void)xQueueReset(s_nack_queue);
+    }
+    if (s_input_queue != NULL) {
+        (void)xQueueReset(s_input_queue);
     }
     if (watcher_sdk_open(&config, &s_sdk) != WATCHER_SDK_RESULT_OK) {
         ESP_LOGE(TAG, "SDK context reset failed");
@@ -633,39 +741,44 @@ static bool reset_control_session(void) {
     return true;
 }
 
-static void sdk_control_on_open(void) {
+static bool sdk_hello_response_timed_out(void) {
+    int64_t now_us;
+
+    if (ws_client_is_connected() == 0 || ws_client_is_session_ready() != 0) {
+        s_hello_response_wait_started_us = 0;
+        return false;
+    }
+    now_us = esp_timer_get_time();
+    if (s_hello_response_wait_started_us <= 0) {
+        s_hello_response_wait_started_us = now_us;
+        return false;
+    }
+    return (now_us - s_hello_response_wait_started_us) >= ((int64_t)SDK_HELLO_RESPONSE_TIMEOUT_MS * 1000LL);
+}
+
+static bool sdk_request_gateway_reset(const char *reason) {
+    EventBits_t bits;
+
+    if (s_network_events == NULL) {
+        return false;
+    }
+    bits = xEventGroupGetBits(s_network_events);
+    if ((bits & SDK_NET_RESET_REQUESTED) != 0U) {
+        return true;
+    }
+    ESP_LOGW(TAG, "SDK gateway reset requested: %s", reason != NULL ? reason : "unknown");
+    (void)xEventGroupSetBits(s_network_events, SDK_NET_RESET_REQUESTED);
+    s_session_reset_pending = true;
+    s_hello_response_wait_started_us = 0;
+    s_was_connected = false;
+    return true;
+}
+
+static void sdk_control_start_session(void) {
     watcher_sdk_config_t config = {.app_id = SDK_CONTROL_APP_ID};
     bool handler_idle;
 
-    sdk_handler_stop_accepting();
-    if ((s_text_queue != NULL || s_nack_queue != NULL) && !sdk_handler_wait_idle(0U)) {
-        ESP_LOGE(TAG, "Previous SDK text handler has not exited");
-        if (s_ui.show_error != NULL) {
-            s_ui.show_error(SDK_CONTROL_APP_UI_ERROR_STOPPING);
-        }
-        return;
-    }
-    if (s_text_queue != NULL) {
-        vQueueDelete(s_text_queue);
-        s_text_queue = NULL;
-    }
-    if (s_nack_queue != NULL) {
-        vQueueDelete(s_nack_queue);
-        s_nack_queue = NULL;
-    }
-    if (s_network_events != NULL && s_network_task == NULL &&
-        (xEventGroupGetBits(s_network_events) & SDK_NET_EXITED) != 0U) {
-        vEventGroupDelete(s_network_events);
-        s_network_events = NULL;
-    }
-    if (s_network_task != NULL || s_network_events != NULL) {
-        ESP_LOGE(TAG, "Previous SDK gateway task has not exited");
-        if (s_ui.show_error != NULL) {
-            s_ui.show_error(SDK_CONTROL_APP_UI_ERROR_STOPPING);
-        }
-        return;
-    }
-    s_authenticated = false;
+    sdk_session_set_authenticated(false);
     s_display_job_id = WATCHER_SDK_JOB_INVALID;
     s_display_domain = WATCHER_SDK_DOMAIN_NONE;
     clear_audio_stream_authorization();
@@ -676,8 +789,9 @@ static void sdk_control_on_open(void) {
     generate_pairing_code();
     s_text_queue = xQueueCreate(SDK_TEXT_QUEUE_DEPTH, sizeof(sdk_text_message_t));
     s_nack_queue = xQueueCreate(SDK_NACK_QUEUE_DEPTH, sizeof(sdk_nack_message_t));
+    s_input_queue = xQueueCreate(SDK_INPUT_QUEUE_DEPTH, sizeof(watcher_sdk_input_event_t));
     s_network_events = xEventGroupCreate();
-    if (s_text_queue == NULL || s_nack_queue == NULL || s_network_events == NULL ||
+    if (s_text_queue == NULL || s_nack_queue == NULL || s_input_queue == NULL || s_network_events == NULL ||
         watcher_sdk_open(&config, &s_sdk) != WATCHER_SDK_RESULT_OK) {
         ESP_LOGE(TAG, "SDK Control initialization failed");
         goto fail;
@@ -720,6 +834,10 @@ fail:
         vQueueDelete(s_nack_queue);
         s_nack_queue = NULL;
     }
+    if (s_input_queue != NULL && handler_idle) {
+        vQueueDelete(s_input_queue);
+        s_input_queue = NULL;
+    }
     if (s_network_events != NULL) {
         vEventGroupDelete(s_network_events);
         s_network_events = NULL;
@@ -729,27 +847,81 @@ fail:
     }
 }
 
+static void sdk_control_on_open(void) {
+    sdk_handler_stop_accepting();
+    if ((s_text_queue != NULL || s_nack_queue != NULL || s_input_queue != NULL) && !sdk_handler_wait_idle(0U)) {
+        ESP_LOGE(TAG, "Previous SDK text handler has not exited");
+        if (s_ui.show_error != NULL) {
+            s_ui.show_error(SDK_CONTROL_APP_UI_ERROR_STOPPING);
+        }
+        return;
+    }
+    if (s_text_queue != NULL) {
+        vQueueDelete(s_text_queue);
+        s_text_queue = NULL;
+    }
+    if (s_nack_queue != NULL) {
+        vQueueDelete(s_nack_queue);
+        s_nack_queue = NULL;
+    }
+    if (s_input_queue != NULL) {
+        vQueueDelete(s_input_queue);
+        s_input_queue = NULL;
+    }
+    if (s_network_events != NULL && s_network_task == NULL &&
+        (xEventGroupGetBits(s_network_events) & SDK_NET_EXITED) != 0U) {
+        vEventGroupDelete(s_network_events);
+        s_network_events = NULL;
+    }
+    if (s_network_task != NULL || s_network_events != NULL) {
+        ESP_LOGE(TAG, "Previous SDK gateway task has not exited");
+        if (s_ui.show_error != NULL) {
+            s_ui.show_error(SDK_CONTROL_APP_UI_ERROR_STOPPING);
+        }
+        return;
+    }
+
+    sdk_control_start_session();
+}
+
 static void sdk_control_on_tick(void) {
     sdk_text_message_t message;
     sdk_nack_message_t nack;
+    watcher_sdk_input_event_t input_event;
     watcher_sdk_event_t event;
     bool connected = ws_client_is_connected() != 0;
+    bool reset_in_progress = false;
 
-    if (s_was_connected && !connected) {
-        if (s_network_events != NULL) {
-            (void)xEventGroupSetBits(s_network_events, SDK_NET_RESET_REQUESTED);
-        }
-        s_session_reset_pending = true;
+    if (ws_client_has_hello_rejected()) {
+        reset_in_progress = sdk_request_gateway_reset("hello rejected");
+    } else if (sdk_hello_response_timed_out()) {
+        reset_in_progress = sdk_request_gateway_reset("hello response timeout");
+    } else if (s_was_connected && !connected) {
+        reset_in_progress = sdk_request_gateway_reset("connection closed");
     }
-    s_was_connected = connected;
+    if (!reset_in_progress) {
+        s_was_connected = connected;
+    }
     if (s_session_reset_pending && reset_control_session()) {
         s_session_reset_pending = false;
     }
+    sdk_session_activate_after_hello();
     while (s_nack_queue != NULL && xQueueReceive(s_nack_queue, &nack, 0) == pdTRUE) {
         send_protocol_nack(nack.message_type, nack.command_id, nack.reason);
     }
     while (s_text_queue != NULL && xQueueReceive(s_text_queue, &message, 0) == pdTRUE) {
         process_message(&message);
+    }
+    while (s_input_queue != NULL && xQueueReceive(s_input_queue, &input_event, 0) == pdTRUE) {
+        char json[SDK_RESPONSE_MAX];
+        if (s_ui.show_input_debug != NULL) {
+            char line[64];
+            sdk_format_input_debug(&input_event, line, sizeof(line));
+            s_ui.show_input_debug(line);
+        }
+        if (watcher_sdk_protocol_build_input_event(&input_event, json, sizeof(json)) == WATCHER_SDK_PROTOCOL_OK) {
+            (void)ws_client_send_text(json);
+        }
     }
     while (s_sdk != NULL && watcher_sdk_poll_event(s_sdk, &event)) {
         char json[SDK_RESPONSE_MAX];
@@ -800,11 +972,15 @@ static void sdk_control_on_close(void) {
         vQueueDelete(s_nack_queue);
         s_nack_queue = NULL;
     }
+    if (s_input_queue != NULL && handler_idle) {
+        vQueueDelete(s_input_queue);
+        s_input_queue = NULL;
+    }
     if (s_network_events != NULL && network_exited) {
         vEventGroupDelete(s_network_events);
         s_network_events = NULL;
     }
-    s_authenticated = false;
+    sdk_session_set_authenticated(false);
     s_display_job_id = WATCHER_SDK_JOB_INVALID;
     s_display_domain = WATCHER_SDK_DOMAIN_NONE;
     clear_audio_stream_authorization();
@@ -821,6 +997,27 @@ static void sdk_control_on_button(void) {
     }
 }
 
+static void sdk_control_on_touch(int16_t x, int16_t y) {
+    watcher_sdk_input_event_t event = {
+        .source = WATCHER_SDK_INPUT_SCREEN_TOUCH,
+        .action = WATCHER_SDK_INPUT_ACTION_TAP,
+        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000LL),
+        .x = x,
+        .y = y,
+    };
+    (void)queue_input_event(&event);
+}
+
+static void sdk_control_on_rotate(int32_t diff) {
+    watcher_sdk_input_event_t event = {
+        .source = WATCHER_SDK_INPUT_ROLLER,
+        .action = WATCHER_SDK_INPUT_ACTION_ROTATE,
+        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000LL),
+        .delta = diff,
+    };
+    (void)queue_input_event(&event);
+}
+
 static const watcher_app_t s_app = {
     .id = SDK_CONTROL_APP_ID,
     .name = "Python SDK",
@@ -830,11 +1027,13 @@ static const watcher_app_t s_app = {
     .resources =
         WATCHER_APP_RESOURCE_SET_WIFI_STA | WATCHER_APP_RESOURCE_SET_AUDIO | WATCHER_APP_RESOURCE_SET_MCU_RUNTIME,
     .lifecycle = WATCHER_APP_LIFECYCLE_PERSISTENT,
-    .input_context = WATCHER_INPUT_CONTEXT_APP_ACTION,
+    .input_context = WATCHER_INPUT_CONTEXT_APP_EVENT,
     .on_open = sdk_control_on_open,
     .on_tick = sdk_control_on_tick,
     .on_close = sdk_control_on_close,
     .on_button = sdk_control_on_button,
+    .on_touch = sdk_control_on_touch,
+    .on_rotate = sdk_control_on_rotate,
 };
 
 void sdk_control_app_configure(const sdk_control_app_ui_t *ui) {

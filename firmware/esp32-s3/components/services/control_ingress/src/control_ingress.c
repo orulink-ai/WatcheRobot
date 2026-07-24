@@ -45,9 +45,9 @@ static size_t s_state_stack_min_free = CONTROL_STATE_TASK_STACK;
 static int64_t s_manual_touch_suppressed_until_us = 0;
 static int64_t s_manual_jog_stream_until_us = 0;
 static control_motion_source_t s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
-static portMUX_TYPE s_deferred_ai_status_lock = portMUX_INITIALIZER_UNLOCKED;
-static control_ai_status_request_t s_deferred_ai_status;
-static bool s_deferred_ai_status_pending = false;
+static bool s_ai_task_flow_active = false;
+static bool s_ai_foreground_flow_active = false;
+static char s_tts_completion_state[32] = "happy";
 
 static hal_servo_motion_source_t control_source_to_hal(control_motion_source_t source) {
     switch (source) {
@@ -74,25 +74,25 @@ static esp_err_t control_default_interrupt_action(const char *source) {
 }
 
 static esp_err_t control_default_move_sync(int x_deg, int y_deg, int duration_ms, control_motion_source_t source,
-                                          uint32_t *out_seq) {
+                                           uint32_t *out_seq) {
     return hal_servo_move_sync_with_source_and_seq(x_deg, y_deg, duration_ms, control_source_to_hal(source), out_seq);
 }
 
 static esp_err_t control_default_move_axis(bool is_x_axis, int angle_deg, int duration_ms,
-                                          control_motion_source_t source, uint32_t *out_seq) {
+                                           control_motion_source_t source, uint32_t *out_seq) {
     return hal_servo_move_smooth_with_source_and_seq(is_x_axis ? SERVO_AXIS_X : SERVO_AXIS_Y, angle_deg, duration_ms,
                                                      control_source_to_hal(source), out_seq);
 }
 
 static esp_err_t control_default_move_sync_direct(int x_deg, int y_deg, control_motion_source_t source,
-                                                 uint32_t *out_seq) {
+                                                  uint32_t *out_seq) {
     return hal_servo_set_direct_sync_with_source_and_seq(x_deg, y_deg, control_source_to_hal(source), out_seq);
 }
 
 static esp_err_t control_default_move_axis_direct(bool is_x_axis, int angle_deg, control_motion_source_t source,
-                                                 uint32_t *out_seq) {
+                                                  uint32_t *out_seq) {
     return hal_servo_set_direct_with_source_and_seq(is_x_axis ? SERVO_AXIS_X : SERVO_AXIS_Y, angle_deg,
-                                                   control_source_to_hal(source), out_seq);
+                                                    control_source_to_hal(source), out_seq);
 }
 
 static esp_err_t control_default_jog_axis(bool is_x_axis, int velocity_deg_per_sec, int timeout_ms,
@@ -157,6 +157,7 @@ static const control_ingress_ops_t s_default_ops = {
 };
 
 static const control_ingress_ops_t *s_ops = &s_default_ops;
+static bool control_is_voice_flow_state(const char *state_id);
 
 #if defined(CONTROL_INGRESS_ENABLE_TEST_API)
 void control_ingress_set_ops_for_test(const control_ingress_ops_t *ops) {
@@ -173,34 +174,8 @@ void control_ingress_reset_ops_for_test(void) {
     s_manual_jog_stream_source = CONTROL_MOTION_SOURCE_UNKNOWN;
 }
 
-void control_ingress_reset_deferred_ai_status_for_test(void) {
-    portENTER_CRITICAL(&s_deferred_ai_status_lock);
-    memset(&s_deferred_ai_status, 0, sizeof(s_deferred_ai_status));
-    s_deferred_ai_status_pending = false;
-    portEXIT_CRITICAL(&s_deferred_ai_status_lock);
-}
-
-void control_ingress_reset_state_queue_for_test(void) {
-    control_state_msg_t discarded;
-
-    if (s_state_queue == NULL) {
-        return;
-    }
-    while (xQueueReceive(s_state_queue, &discarded, 0) == pdTRUE) {
-    }
-}
-
-bool control_ingress_has_deferred_ai_status_for_test(void) {
-    bool pending;
-
-    portENTER_CRITICAL(&s_deferred_ai_status_lock);
-    pending = s_deferred_ai_status_pending;
-    portEXIT_CRITICAL(&s_deferred_ai_status_lock);
-    return pending;
-}
-
-const char *control_ingress_deferred_ai_status_for_test(void) {
-    return s_deferred_ai_status.status;
+void control_ingress_reset_ai_task_state_for_test(void) {
+    control_ingress_clear_active_ai_tasks();
 }
 #endif
 
@@ -220,6 +195,114 @@ static bool control_contains_nocase(const char *haystack, const char *needle) {
     }
 
     return false;
+}
+
+static void control_set_tts_completion_state(const char *state_id) {
+    if (state_id == NULL || state_id[0] == '\0') {
+        return;
+    }
+
+    snprintf(s_tts_completion_state, sizeof(s_tts_completion_state), "%s", state_id);
+}
+
+static bool control_is_ai_task_working_status(const char *status) {
+    return control_contains_nocase(status, "custom2") || control_contains_nocase(status, "working") ||
+           control_contains_nocase(status, "running") || control_contains_nocase(status, "queued") ||
+           control_contains_nocase(status, "created") || control_contains_nocase(status, "executing") ||
+           control_contains_nocase(status, "custom3") || control_contains_nocase(status, "tool_calling") ||
+           control_contains_nocase(status, "tool calling") || control_contains_nocase(status, "observing");
+}
+
+static bool control_is_ai_processing_status(const char *status, const control_ai_status_request_t *req) {
+    return control_contains_nocase(status, "processing") || control_contains_nocase(status, "analyzing") ||
+           control_contains_nocase(status, "dialogue_pending") ||
+           (req != NULL && (control_contains_nocase(req->message, "processing") ||
+                            control_contains_nocase(req->message, "analyzing") ||
+                            control_contains_nocase(req->state_domain, "dialogue_pending")));
+}
+
+static const char *control_ai_working_completion_state(const char *status, const control_ai_status_request_t *req) {
+    if (control_contains_nocase(status, "custom3") || control_contains_nocase(status, "tool_calling") ||
+        control_contains_nocase(status, "tool calling") || control_contains_nocase(status, "observing") ||
+        (req != NULL &&
+         (control_contains_nocase(req->message, "custom3") || control_contains_nocase(req->message, "tool_calling") ||
+          control_contains_nocase(req->message, "tool calling") ||
+          control_contains_nocase(req->message, "observing")))) {
+        return "custom3";
+    }
+    if (control_is_ai_processing_status(status, req)) {
+        return "processing";
+    }
+    return "custom2";
+}
+
+static bool control_is_ai_task_success_status(const char *status) {
+    return control_contains_nocase(status, "happy") || control_contains_nocase(status, "done") ||
+           control_contains_nocase(status, "completed") || control_contains_nocase(status, "success") ||
+           control_contains_nocase(status, "succeeded");
+}
+
+static bool control_is_ai_task_error_status(const char *status) {
+    return control_contains_nocase(status, "error") || control_contains_nocase(status, "fail") ||
+           control_contains_nocase(status, "cancelled") || control_contains_nocase(status, "canceled") ||
+           control_contains_nocase(status, "cancelling");
+}
+
+static void control_note_ai_task_status(const char *status, const control_ai_status_request_t *req) {
+    const bool task_domain = req != NULL && strcasecmp(req->state_domain, "task") == 0;
+    const bool task_working =
+        control_is_ai_task_working_status(status) ||
+        (req != NULL &&
+         (control_contains_nocase(req->message, "custom3") || control_contains_nocase(req->message, "tool_calling") ||
+          control_contains_nocase(req->message, "tool calling") || control_contains_nocase(req->message, "observing")));
+    const bool processing = control_is_ai_processing_status(status, req);
+    const bool success =
+        control_is_ai_task_success_status(status) ||
+        (req != NULL &&
+         (control_contains_nocase(req->message, "done") || control_contains_nocase(req->message, "completed") ||
+          control_contains_nocase(req->message, "success") || control_contains_nocase(req->message, "succeeded")));
+    const bool error =
+        control_is_ai_task_error_status(status) || (req != NULL && (control_contains_nocase(req->message, "error") ||
+                                                                    control_contains_nocase(req->message, "fail")));
+
+    if (status == NULL || status[0] == '\0') {
+        return;
+    }
+
+    if (req != NULL && req->has_active_task_count) {
+        s_ai_task_flow_active = req->active_task_count > 0;
+    }
+    if (req != NULL && req->has_foreground_active) {
+        s_ai_foreground_flow_active = req->foreground_active;
+    }
+    if (task_domain && (req == NULL || !req->has_active_task_count) && task_working) {
+        s_ai_task_flow_active = true;
+    }
+    if ((req == NULL || !req->has_foreground_active) && (task_working || processing)) {
+        s_ai_foreground_flow_active = true;
+    }
+
+    if (task_working || processing) {
+        control_set_tts_completion_state(control_ai_working_completion_state(status, req));
+        return;
+    }
+
+    if (success || error) {
+        if (task_domain && (req == NULL || !req->has_active_task_count)) {
+            s_ai_task_flow_active = false;
+        }
+        if ((req == NULL || !req->has_foreground_active) && !s_ai_task_flow_active) {
+            s_ai_foreground_flow_active = false;
+        }
+        if (!s_ai_task_flow_active && !s_ai_foreground_flow_active) {
+            control_set_tts_completion_state(error ? "error" : "happy");
+        }
+        return;
+    }
+
+    if (!s_ai_task_flow_active && !s_ai_foreground_flow_active && control_is_voice_flow_state(status)) {
+        control_set_tts_completion_state("happy");
+    }
 }
 
 static void control_normalize_resource_name(const char *raw, char *out, size_t out_size) {
@@ -305,18 +388,6 @@ static bool control_append_state_candidate(const char **candidates, size_t *coun
     return true;
 }
 
-static bool control_is_terminal_success_status(const char *status) {
-    return control_contains_nocase(status, "happy") || control_contains_nocase(status, "done") ||
-           control_contains_nocase(status, "completed") || control_contains_nocase(status, "success") ||
-           control_contains_nocase(status, "succeeded");
-}
-
-static bool control_is_terminal_error_status(const char *status) {
-    return control_contains_nocase(status, "error") || control_contains_nocase(status, "fail") ||
-           control_contains_nocase(status, "cancelled") || control_contains_nocase(status, "canceled") ||
-           control_contains_nocase(status, "cancelling");
-}
-
 static const char *control_ai_status_to_fallback(const char *status, const char *message) {
     if (control_contains_nocase(status, "bluetooth") || control_contains_nocase(message, "bluetooth") ||
         control_contains_nocase(status, "blue tooth") || control_contains_nocase(message, "blue tooth") ||
@@ -324,7 +395,10 @@ static const char *control_ai_status_to_fallback(const char *status, const char 
         control_contains_nocase(status, "paired") || control_contains_nocase(message, "paired")) {
         return "bluetooth";
     }
-    if (control_contains_nocase(status, "observing") || control_contains_nocase(message, "observing")) {
+    if (control_contains_nocase(status, "observing") || control_contains_nocase(message, "observing") ||
+        control_contains_nocase(status, "custom3") || control_contains_nocase(message, "custom3") ||
+        control_contains_nocase(status, "tool_calling") || control_contains_nocase(message, "tool_calling") ||
+        control_contains_nocase(status, "tool calling") || control_contains_nocase(message, "tool calling")) {
         return "custom3";
     }
     if (control_contains_nocase(status, "listening") || control_contains_nocase(message, "listening")) {
@@ -334,8 +408,9 @@ static const char *control_ai_status_to_fallback(const char *status, const char 
         return "thinking";
     }
     if (control_contains_nocase(status, "processing") || control_contains_nocase(status, "analyzing") ||
-        control_contains_nocase(message, "processing") || control_contains_nocase(message, "analyzing")) {
-        return "thinking";
+        control_contains_nocase(status, "dialogue_pending") || control_contains_nocase(message, "processing") ||
+        control_contains_nocase(message, "analyzing") || control_contains_nocase(message, "dialogue_pending")) {
+        return "processing";
     }
     if (control_contains_nocase(status, "speaking") || control_contains_nocase(message, "speaking")) {
         return "speaking";
@@ -343,24 +418,35 @@ static const char *control_ai_status_to_fallback(const char *status, const char 
     if (control_contains_nocase(status, "idle") || control_contains_nocase(message, "idle")) {
         return "standby";
     }
-    if (control_is_terminal_success_status(status) || control_contains_nocase(message, "done") ||
+    if (control_is_ai_task_success_status(status) || control_contains_nocase(message, "done") ||
         control_contains_nocase(message, "completed") || control_contains_nocase(message, "success") ||
         control_contains_nocase(message, "succeeded")) {
         return "happy";
     }
-    if (control_is_terminal_error_status(status) ||
-        control_contains_nocase(message, "error") || control_contains_nocase(message, "fail")) {
+    if (control_is_ai_task_error_status(status) || control_contains_nocase(message, "error") ||
+        control_contains_nocase(message, "fail")) {
         return "error";
     }
 
     return NULL;
 }
 
+static bool control_is_voice_flow_state(const char *state_id) {
+    if (state_id == NULL || state_id[0] == '\0') {
+        return false;
+    }
+    return strcasecmp(state_id, "listening") == 0 || strcasecmp(state_id, "thinking") == 0 ||
+           strcasecmp(state_id, "processing") == 0 || strcasecmp(state_id, "speaking") == 0;
+}
+
 static const char *control_ai_status_display_text(const control_ai_status_request_t *req) {
     static const char clear_text[] = "";
 
-    /* Remote AI state updates drive expressions only; never render their text on screen. */
-    (void)req;
+    if (req == NULL) {
+        return NULL;
+    }
+    /* Desktop Link is expression-only on the embedded display. ASR text, AI
+     * replies, progress diagnostics and terminal summaries remain on Desktop. */
     return clear_text;
 }
 
@@ -376,11 +462,10 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
     char fallback_state_id[sizeof(req->status)];
     char image_name[sizeof(req->image_name)];
     char sound_id[sizeof(req->sound_file)];
-    const char *status_sound_id = "";
+    const char *status_sound_id = NULL;
     const char *state_candidates[3] = {0};
     const char *action_candidates[3] = {0};
     const char *selected_action_id = NULL;
-    const char *selected_state_id = NULL;
     const char *text;
     esp_err_t ret = ESP_ERR_NOT_FOUND;
     size_t state_candidate_count = 0;
@@ -394,9 +479,11 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
     control_normalize_resource_name(control_ai_status_to_fallback(req->status, req->message), fallback_state_id,
                                     sizeof(fallback_state_id));
 
+    control_note_ai_task_status(req->status, req);
+
     text = control_ai_status_display_text(req);
-    /* Preserve explicit panel/protocol SFX while still suppressing implicit state-default
-     * sounds for cloud AI statuses that do not provide a sound_file. */
+    /* All evt.ai.status sources inherit the mapped state's default SFX unless an
+     * explicit sound_file override is supplied. */
     if (sound_id[0] != '\0') {
         status_sound_id = sound_id;
     }
@@ -404,9 +491,15 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
     control_append_state_candidate(state_candidates, &state_candidate_count, 3, action_state_id);
     control_append_state_candidate(state_candidates, &state_candidate_count, 3, status_state_id);
     control_append_state_candidate(state_candidates, &state_candidate_count, 3, fallback_state_id);
-    control_append_state_candidate(action_candidates, &action_candidate_count, 3, action_state_id);
-    control_append_state_candidate(action_candidates, &action_candidate_count, 3, status_state_id);
-    control_append_state_candidate(action_candidates, &action_candidate_count, 3, fallback_state_id);
+    if (req->has_action_file) {
+        /* An explicitly present empty action_file means "no body action". Only
+         * legacy payloads that omit the field may infer an action from status. */
+        control_append_state_candidate(action_candidates, &action_candidate_count, 3, action_state_id);
+    } else {
+        control_append_state_candidate(action_candidates, &action_candidate_count, 3, action_state_id);
+        control_append_state_candidate(action_candidates, &action_candidate_count, 3, status_state_id);
+        control_append_state_candidate(action_candidates, &action_candidate_count, 3, fallback_state_id);
+    }
 
     for (i = 0; i < action_candidate_count; ++i) {
         if (behavior_state_has_action(action_candidates[i])) {
@@ -420,13 +513,11 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
                                                            image_name[0] != '\0' ? image_name : NULL, status_sound_id,
                                                            selected_action_id);
         if (ret != ESP_ERR_NOT_FOUND) {
-            selected_state_id = state_candidates[i];
             break;
         }
     }
 
     if (ret == ESP_ERR_NOT_FOUND) {
-        selected_state_id = "standby";
         ret = behavior_state_set_with_resources_and_action(
             "standby", text, 0, image_name[0] != '\0' ? image_name : NULL, status_sound_id, selected_action_id);
         if (ret == ESP_ERR_NOT_FOUND) {
@@ -445,12 +536,17 @@ static esp_err_t control_apply_ai_status(const control_ai_status_request_t *req)
         ESP_LOGW(TAG, "AI status apply failed: %s", esp_err_to_name(ret));
     }
 
-    ESP_LOGI(TAG, "AI status resolved: requested=%s selected=%s action=%s result=%s", req->status,
-             selected_state_id != NULL ? selected_state_id : "<none>",
-             selected_action_id != NULL ? selected_action_id : "<none>", esp_err_to_name(ret));
-
     return ret;
 }
+
+#if defined(CONTROL_INGRESS_ENABLE_TEST_API)
+esp_err_t control_ingress_apply_ai_status_for_test(const control_ai_status_request_t *req) {
+    if (req == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return control_apply_ai_status(req);
+}
+#endif
 
 static const char *control_state_msg_type_name(control_state_msg_type_t type) {
     switch (type) {
@@ -505,8 +601,7 @@ static void control_state_task(void *arg) {
         case CONTROL_STATE_MSG_STATE_SET: {
             esp_err_t ret = behavior_state_set(msg->data.state_set.state_id);
             if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "State set failed: state=%s err=%s", msg->data.state_set.state_id,
-                         esp_err_to_name(ret));
+                ESP_LOGW(TAG, "State set failed: state=%s err=%s", msg->data.state_set.state_id, esp_err_to_name(ret));
             }
             break;
         }
@@ -711,8 +806,8 @@ esp_err_t control_ingress_submit_jog_vector_with_seq(const control_jog_vector_re
     if (s_ops->jog_vector == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    return s_ops->jog_vector(req->has_x ? req->x_velocity_deg_per_sec : 0,
-                             req->has_y ? req->y_velocity_deg_per_sec : 0, req->timeout_ms, req->source, out_seq);
+    return s_ops->jog_vector(req->has_x ? req->x_velocity_deg_per_sec : 0, req->has_y ? req->y_velocity_deg_per_sec : 0,
+                             req->timeout_ms, req->source, out_seq);
 }
 
 esp_err_t control_ingress_stop_manual(control_motion_source_t source) {
@@ -761,45 +856,22 @@ esp_err_t control_ingress_submit_ai_status(const control_ai_status_request_t *re
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (req->defer_ui_until_tts_complete) {
-        portENTER_CRITICAL(&s_deferred_ai_status_lock);
-        s_deferred_ai_status = *req;
-        s_deferred_ai_status.defer_ui_until_tts_complete = false;
-        s_deferred_ai_status_pending = true;
-        portEXIT_CRITICAL(&s_deferred_ai_status_lock);
-        ESP_LOGI(TAG, "Deferred AI status cached until TTS playout completes: status=%s", req->status);
+    control_note_ai_task_status(req->status, req);
+
+    if (req->suppress_ui) {
+        ESP_LOGI(TAG, "Suppressed AI status UI while preserving lifecycle: status=%s", req->status);
         return ESP_OK;
     }
 
-    portENTER_CRITICAL(&s_deferred_ai_status_lock);
-    s_deferred_ai_status_pending = false;
-    portEXIT_CRITICAL(&s_deferred_ai_status_lock);
+    if (req->defer_ui_until_tts_complete) {
+        ESP_LOGI(TAG, "Deferred AI status UI until TTS playout completes: status=%s completion=%s", req->status,
+                 control_ingress_tts_completion_state());
+        return ESP_OK;
+    }
 
     msg.type = CONTROL_STATE_MSG_AI_STATUS;
     msg.data.ai_status = *req;
     return control_submit_state_msg(&msg);
-}
-
-esp_err_t control_ingress_flush_deferred_ai_status_after_tts(void) {
-    control_ai_status_request_t req = {0};
-    bool pending = false;
-
-    portENTER_CRITICAL(&s_deferred_ai_status_lock);
-    if (s_deferred_ai_status_pending) {
-        req = s_deferred_ai_status;
-        memset(&s_deferred_ai_status, 0, sizeof(s_deferred_ai_status));
-        s_deferred_ai_status_pending = false;
-        pending = true;
-    }
-    portEXIT_CRITICAL(&s_deferred_ai_status_lock);
-
-    if (!pending) {
-        return ESP_OK;
-    }
-
-    req.defer_ui_until_tts_complete = false;
-    ESP_LOGI(TAG, "Applying deferred AI status after TTS playout: status=%s", req.status);
-    return control_ingress_submit_ai_status(&req);
 }
 
 esp_err_t control_ingress_submit_state_set(const control_state_set_request_t *req) {
@@ -824,6 +896,24 @@ esp_err_t control_ingress_submit_state_text(const control_state_text_request_t *
     msg.type = CONTROL_STATE_MSG_STATE_TEXT;
     msg.data.state_text = *req;
     return control_submit_state_msg(&msg);
+}
+
+const char *control_ingress_tts_completion_state(void) {
+    return s_tts_completion_state[0] != '\0' ? s_tts_completion_state : "happy";
+}
+
+bool control_ingress_has_active_ai_task(void) {
+    return s_ai_task_flow_active;
+}
+
+bool control_ingress_has_foreground_ai_lease(void) {
+    return s_ai_task_flow_active || s_ai_foreground_flow_active;
+}
+
+void control_ingress_clear_active_ai_tasks(void) {
+    s_ai_task_flow_active = false;
+    s_ai_foreground_flow_active = false;
+    control_set_tts_completion_state("happy");
 }
 
 size_t control_ingress_state_stack_high_watermark(void) {

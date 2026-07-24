@@ -51,6 +51,32 @@ typedef enum {
     WATCHER_SDK_PROTOCOL_CAMERA_CAPTURE,
 } watcher_sdk_protocol_command_type_t;
 
+typedef enum {
+    WATCHER_SDK_INPUT_UNKNOWN = 0,
+    WATCHER_SDK_INPUT_BACK_TOUCH,
+    WATCHER_SDK_INPUT_SCREEN_TOUCH,
+    WATCHER_SDK_INPUT_ROLLER,
+} watcher_sdk_input_source_t;
+
+typedef enum {
+    WATCHER_SDK_INPUT_ACTION_UNKNOWN = 0,
+    WATCHER_SDK_INPUT_ACTION_PRESS,
+    WATCHER_SDK_INPUT_ACTION_RELEASE,
+    WATCHER_SDK_INPUT_ACTION_LONG_PRESS,
+    WATCHER_SDK_INPUT_ACTION_TAP,
+    WATCHER_SDK_INPUT_ACTION_ROTATE,
+} watcher_sdk_input_action_t;
+
+typedef struct {
+    watcher_sdk_input_source_t source;
+    watcher_sdk_input_action_t action;
+    uint32_t timestamp_ms;
+    uint8_t touch_id;
+    int16_t x;
+    int16_t y;
+    int32_t delta;
+} watcher_sdk_input_event_t;
+
 typedef struct {
     watcher_sdk_protocol_command_type_t type;
     char message_type[WATCHER_SDK_PROTOCOL_RESOURCE_ID_MAX];
@@ -116,13 +142,15 @@ watcher_sdk_protocol_result_t watcher_sdk_protocol_build_ack(const char *message
                                                              size_t out_size);
 watcher_sdk_protocol_result_t watcher_sdk_protocol_build_nack(const char *message_type, const char *command_id,
                                                               const char *reason, char *out_json, size_t out_size);
-watcher_sdk_protocol_result_t watcher_sdk_protocol_build_session_ack(const char *message_type,
-                                                                     const char *command_id, uint32_t session_id,
-                                                                     char *out_json, size_t out_size);
+watcher_sdk_protocol_result_t watcher_sdk_protocol_build_session_ack(const char *message_type, const char *command_id,
+                                                                     uint32_t session_id, char *out_json,
+                                                                     size_t out_size);
 watcher_sdk_protocol_result_t watcher_sdk_protocol_build_ready(const char *device_id, const char *firmware_version,
                                                                char *out_json, size_t out_size);
 watcher_sdk_protocol_result_t watcher_sdk_protocol_build_operation_event(const watcher_sdk_event_t *event,
                                                                          char *out_json, size_t out_size);
+watcher_sdk_protocol_result_t watcher_sdk_protocol_build_input_event(const watcher_sdk_input_event_t *event,
+                                                                     char *out_json, size_t out_size);
 
 #ifdef __cplusplus
 }

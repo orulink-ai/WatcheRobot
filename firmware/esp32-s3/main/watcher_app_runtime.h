@@ -12,6 +12,7 @@ typedef void (*watcher_app_cb_t)(void);
 typedef esp_err_t (*watcher_app_destroy_cb_t)(void);
 typedef void (*watcher_app_button_cb_t)(void);
 typedef void (*watcher_app_touch_cb_t)(int16_t x, int16_t y);
+typedef void (*watcher_app_rotate_cb_t)(int32_t diff);
 typedef watcher_input_context_t (*watcher_app_input_context_cb_t)(void);
 
 typedef enum {
@@ -59,6 +60,7 @@ struct watcher_app {
     watcher_app_input_context_cb_t get_input_context;
     watcher_app_button_cb_t on_button;
     watcher_app_touch_cb_t on_touch;
+    watcher_app_rotate_cb_t on_rotate;
 };
 
 esp_err_t watcher_app_register(const watcher_app_t *app);

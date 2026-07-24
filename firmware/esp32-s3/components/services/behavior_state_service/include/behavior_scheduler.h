@@ -64,7 +64,10 @@ typedef struct {
 } behavior_scheduler_tick_result_t;
 
 bool behavior_scheduler_state_motion_overridden(const behavior_action_def_t *action);
-bool behavior_scheduler_action_should_loop(const behavior_state_def_t *state, const behavior_action_def_t *action);
+bool behavior_scheduler_action_should_loop(const behavior_state_def_t *state, const behavior_action_def_t *action,
+                                           bool loop_enabled);
+animation_playback_mode_t behavior_scheduler_effective_animation_playback(animation_playback_mode_t state_mode,
+                                                                          bool resources_one_shot);
 bool behavior_scheduler_all_state_events_dispatched(const behavior_scheduler_snapshot_t *snapshot);
 bool behavior_scheduler_all_action_events_dispatched(const behavior_action_def_t *action, int next_action_motion_index);
 uint32_t behavior_scheduler_non_loop_done_at_ms(const behavior_state_def_t *state, const behavior_action_def_t *action,

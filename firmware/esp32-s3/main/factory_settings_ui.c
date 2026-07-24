@@ -1322,7 +1322,7 @@ static void update_network_page(void) {
     if (ui_wifissid != NULL) {
         lv_obj_set_width(ui_wifissid, 340);
         lv_label_set_long_mode(ui_wifissid, LV_LABEL_LONG_DOT);
-        lv_obj_set_style_text_font(ui_wifissid, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(ui_wifissid, &watcher_font_wifi_cjk16, LV_PART_MAIN | LV_STATE_DEFAULT);
     }
     if (ui_wifimqtt != NULL) {
         lv_obj_set_width(ui_wifimqtt, 340);

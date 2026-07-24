@@ -140,7 +140,8 @@ esp_err_t mcu_motion_submit_direct_target_with_seq(const mcu_motion_direct_targe
 esp_err_t mcu_motion_submit_direct_target(const mcu_motion_direct_target_t *request);
 esp_err_t mcu_motion_submit_sequence_with_seq(const mcu_motion_sequence_t *sequence, uint32_t *out_seq);
 esp_err_t mcu_motion_submit_sequence(const mcu_motion_sequence_t *sequence);
-esp_err_t mcu_motion_submit_chunked_sequence_with_seq(const mcu_motion_chunked_sequence_t *sequence, uint32_t *out_end_seq);
+esp_err_t mcu_motion_submit_chunked_sequence_with_seq(const mcu_motion_chunked_sequence_t *sequence,
+                                                      uint32_t *out_end_seq);
 esp_err_t mcu_motion_submit_chunked_sequence(const mcu_motion_chunked_sequence_t *sequence);
 esp_err_t mcu_motion_pwm_unlock(const mcu_motion_pwm_unlock_request_t *request);
 esp_err_t mcu_motion_pwm_lock(const mcu_motion_pwm_lock_request_t *request);

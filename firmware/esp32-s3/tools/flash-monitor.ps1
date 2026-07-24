@@ -19,6 +19,12 @@ param(
     [switch]$NoBuild,
 
     [Parameter()]
+    [switch]$MonitorOnly,
+
+    [Parameter()]
+    [switch]$AppOnly,
+
+    [Parameter()]
     [switch]$NoWake,
 
     [Parameter()]
@@ -51,6 +57,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:RunningOnWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 
 $codexDeviceMapHelper = Join-Path $PSScriptRoot "..\..\..\tools\codex-device-map.ps1"
 if (Test-Path $codexDeviceMapHelper) {
@@ -122,8 +129,15 @@ function Resolve-IdfPath {
 }
 
 function Resolve-IdfPythonEnvPath {
-    if ($env:IDF_PYTHON_ENV_PATH -and (Test-Path (Join-Path $env:IDF_PYTHON_ENV_PATH "Scripts\python.exe"))) {
-        return $env:IDF_PYTHON_ENV_PATH
+    if ($env:IDF_PYTHON_ENV_PATH) {
+        $pythonRelativePath = if ($script:RunningOnWindows) { "Scripts\python.exe" } else { "bin/python" }
+        if (Test-Path (Join-Path $env:IDF_PYTHON_ENV_PATH $pythonRelativePath)) {
+            return $env:IDF_PYTHON_ENV_PATH
+        }
+    }
+
+    if (-not $script:RunningOnWindows) {
+        return $null
     }
 
     $preferred = "C:\Espressif\python_env\idf5.2_py3.11_env"
@@ -151,7 +165,7 @@ function Resolve-IdfBootstrapScript {
         [string]$ResolvedIdfPath
     )
 
-    $exportScript = Join-Path $ResolvedIdfPath "export.ps1"
+    $exportScript = Join-Path $ResolvedIdfPath $(if ($script:RunningOnWindows) { "export.ps1" } else { "export.sh" })
     if (Test-Path $exportScript) {
         return $exportScript
     }
@@ -264,6 +278,12 @@ function Stop-ProcessTree {
         [int]$RootProcessId
     )
 
+    if (-not $script:RunningOnWindows) {
+        & /usr/bin/pkill -TERM -P $RootProcessId 2>$null
+        Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
+        return
+    }
+
     $processTable = @{}
     foreach ($process in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) {
         $parentKey = [string][int]$process.ParentProcessId
@@ -345,33 +365,63 @@ function Invoke-BoundedMonitor {
         $null = New-Item -ItemType Directory -Path $stderrDir -Force
     }
 
-    $quotedArgs = ($MonitorIdfArgs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ", "
-    $monitorRunner = Join-Path ([System.IO.Path]::GetTempPath()) "codex-idf-monitor-$([guid]::NewGuid().ToString('N')).ps1"
-    $monitorScript = @"
+    if ($script:RunningOnWindows) {
+        $quotedArgs = ($MonitorIdfArgs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ", "
+        $monitorRunner = Join-Path ([System.IO.Path]::GetTempPath()) "codex-idf-monitor-$([guid]::NewGuid().ToString('N')).ps1"
+        $monitorScript = @"
 `$ErrorActionPreference = 'Stop'
-if (-not (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue)) {
-    `$IsWindows = `$true
-}
 `$env:IDF_PATH = '$($ResolvedIdfPath -replace "'", "''")'
 if ('$($script:idfPythonEnvPath -replace "'", "''")') {
     `$env:IDF_PYTHON_ENV_PATH = '$($script:idfPythonEnvPath -replace "'", "''")'
 }
-. '$($IdfBootstrapScript -replace "'", "''")' | Out-Null
 if (-not (Get-Command 'idf.py' -ErrorAction SilentlyContinue)) {
-    throw 'ESP-IDF environment loaded, but idf.py was not found.'
+    . '$($IdfBootstrapScript -replace "'", "''")' | Out-Null
+    if (-not (Get-Command 'idf.py' -ErrorAction SilentlyContinue)) {
+        throw 'ESP-IDF environment loaded, but idf.py was not found.'
+    }
 }
 `$monitorArgs = @($quotedArgs)
 & idf.py @monitorArgs
 exit `$LASTEXITCODE
 "@
-    Set-Content -Path $monitorRunner -Value $monitorScript -Encoding UTF8
+        Set-Content -Path $monitorRunner -Value $monitorScript -Encoding UTF8
+        $monitorExecutable = "powershell.exe"
+        $monitorProcessArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $monitorRunner)
+    }
+    else {
+        $monitorRunner = Join-Path ([System.IO.Path]::GetTempPath()) "codex-idf-monitor-$([guid]::NewGuid().ToString('N')).sh"
+        if ($ResolvedIdfPath.Contains("'") -or
+            ($script:idfPythonEnvPath -and $script:idfPythonEnvPath.Contains("'")) -or
+            ($MonitorIdfArgs | Where-Object { $_.Contains("'") })) {
+            throw "macOS monitor paths and arguments must not contain single quotes."
+        }
+        $shellArgs = ($MonitorIdfArgs | ForEach-Object { "'$_'" }) -join " "
+        $pythonEnvExport = if ($script:idfPythonEnvPath) {
+            "export IDF_PYTHON_ENV_PATH='$script:idfPythonEnvPath'"
+        } else {
+            ""
+        }
+        $monitorScript = @"
+#!/bin/zsh
+export IDF_PATH='$ResolvedIdfPath'
+$pythonEnvExport
+. "`$IDF_PATH/export.sh" >/dev/null
+exec idf.py $shellArgs
+"@
+        Set-Content -Path $monitorRunner -Value $monitorScript -Encoding UTF8
+        & /bin/chmod +x $monitorRunner
+        # idf_monitor refuses redirected stdin unless it sees a TTY. macOS
+        # script(1) supplies a pseudo-terminal while preserving bounded logs.
+        $monitorExecutable = "/usr/bin/script"
+        $monitorProcessArgs = @("-q", "/dev/null", "/bin/zsh", $monitorRunner)
+    }
 
     $process = $null
     try {
         $null = New-Item -ItemType File -Path $stdoutLog -Force
         $null = New-Item -ItemType File -Path $stderrLog -Force
-        $process = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $monitorRunner) `
+        $process = Start-Process -FilePath $monitorExecutable `
+            -ArgumentList $monitorProcessArgs `
             -WorkingDirectory $ResolvedProjectPath `
             -PassThru `
             -RedirectStandardOutput $stdoutLog `
@@ -540,11 +590,13 @@ if ($useNoWake -or $HeapTaskTracking) {
 $flashArgs += "-p"
 $flashArgs += $resolvedPort
 
-if (-not $NoBuild) {
-    $flashArgs += "build"
-}
+if (-not $MonitorOnly) {
+    if (-not $NoBuild) {
+        $flashArgs += "build"
+    }
 
-$flashArgs += "flash"
+    $flashArgs += $(if ($AppOnly) { "app-flash" } else { "flash" })
+}
 
 $monitorArgs = @()
 if ($resolvedBuildPath) {
@@ -583,7 +635,11 @@ if ($idfPythonEnvPath) {
     Write-Host "IDF Py  : $idfPythonEnvPath"
 }
 Write-Host "Port    : $resolvedPort"
-Write-Host "Flash   : idf.py $($flashArgs -join ' ')"
+if ($MonitorOnly) {
+    Write-Host "Flash   : skipped (monitor-only)"
+} else {
+    Write-Host "Flash   : idf.py $($flashArgs -join ' ')$(if ($AppOnly) { ' (application only)' } else { '' })"
+}
 if ($NoMonitor) {
     Write-Host "Monitor : disabled"
 } elseif ($MonitorSeconds -gt 0 -or $MonitorMaxLines -gt 0) {
@@ -614,22 +670,26 @@ if ($HeapTaskTracking) {
 
 Push-Location $resolvedProjectPath
 try {
-    # ESP-IDF's export.ps1 probes $IsWindows before defining it in some shells.
-    if (-not (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue)) {
-        $IsWindows = $true
-    }
     $env:IDF_PATH = $idfPath
     if ($idfPythonEnvPath) {
         $env:IDF_PYTHON_ENV_PATH = $idfPythonEnvPath
     }
-    . $idfBootstrapScript | Out-Null
-    if (-not (Get-Command "idf.py" -ErrorAction SilentlyContinue)) {
-        throw "ESP-IDF environment loaded, but idf.py was not found."
-    }
-
-    & idf.py @flashArgs
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+    if (-not $MonitorOnly) {
+        if ($script:RunningOnWindows) {
+            if (-not (Get-Command "idf.py" -ErrorAction SilentlyContinue)) {
+                . $idfBootstrapScript | Out-Null
+                if (-not (Get-Command "idf.py" -ErrorAction SilentlyContinue)) {
+                    throw "ESP-IDF environment loaded, but idf.py was not found."
+                }
+            }
+            & idf.py @flashArgs
+        }
+        else {
+            & /bin/zsh -lc '. "$IDF_PATH/export.sh" >/dev/null && exec idf.py "$@"' idf-flash @flashArgs
+        }
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
     }
 
     if ($NoMonitor) {
@@ -654,7 +714,12 @@ try {
         exit 0
     }
 
-    & idf.py @monitorArgs
+    if ($script:RunningOnWindows) {
+        & idf.py @monitorArgs
+    }
+    else {
+        & /bin/zsh -lc '. "$IDF_PATH/export.sh" >/dev/null && exec idf.py "$@"' idf-monitor @monitorArgs
+    }
     exit $LASTEXITCODE
 }
 finally {

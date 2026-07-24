@@ -5,10 +5,9 @@
 
 #include "../ui.h"
 
-void ui_Page_Network_screen_init(void)
-{
+void ui_Page_Network_screen_init(void) {
     ui_Page_Network = lv_obj_create(NULL);
-    lv_obj_clear_flag(ui_Page_Network, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_clear_flag(ui_Page_Network, LV_OBJ_FLAG_SCROLLABLE); /// Flags
     lv_obj_set_style_bg_color(ui_Page_Network, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_Page_Network, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
@@ -18,7 +17,7 @@ void ui_Page_Network_screen_init(void)
     lv_obj_set_x(ui_wifip1, 0);
     lv_obj_set_y(ui_wifip1, -50);
     lv_obj_set_align(ui_wifip1, LV_ALIGN_CENTER);
-    lv_obj_clear_flag(ui_wifip1, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_clear_flag(ui_wifip1, LV_OBJ_FLAG_SCROLLABLE); /// Flags
     lv_obj_set_style_bg_color(ui_wifip1, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_wifip1, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_color(ui_wifip1, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -26,13 +25,13 @@ void ui_Page_Network_screen_init(void)
 
     ui_wifiicon = lv_img_create(ui_wifip1);
     lv_img_set_src(ui_wifiicon, &ui_img_wifi_3_png);
-    lv_obj_set_width(ui_wifiicon, LV_SIZE_CONTENT);   /// 18
-    lv_obj_set_height(ui_wifiicon, LV_SIZE_CONTENT);    /// 18
+    lv_obj_set_width(ui_wifiicon, LV_SIZE_CONTENT);  /// 18
+    lv_obj_set_height(ui_wifiicon, LV_SIZE_CONTENT); /// 18
     lv_obj_set_x(ui_wifiicon, 0);
     lv_obj_set_y(ui_wifiicon, -100);
     lv_obj_set_align(ui_wifiicon, LV_ALIGN_CENTER);
-    lv_obj_add_flag(ui_wifiicon, LV_OBJ_FLAG_ADV_HITTEST);     /// Flags
-    lv_obj_clear_flag(ui_wifiicon, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_add_flag(ui_wifiicon, LV_OBJ_FLAG_ADV_HITTEST);  /// Flags
+    lv_obj_clear_flag(ui_wifiicon, LV_OBJ_FLAG_SCROLLABLE); /// Flags
     lv_img_set_zoom(ui_wifiicon, 300);
 
     ui_wifissid = lv_label_create(ui_wifip1);
@@ -46,11 +45,11 @@ void ui_Page_Network_screen_init(void)
     lv_obj_set_style_text_color(ui_wifissid, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_wifissid, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_align(ui_wifissid, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(ui_wifissid, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_wifissid, &lv_font_simsun_16_cjk, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_wifibtnt = lv_label_create(ui_wifip1);
-    lv_obj_set_width(ui_wifibtnt, LV_SIZE_CONTENT);   /// 1
-    lv_obj_set_height(ui_wifibtnt, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_width(ui_wifibtnt, LV_SIZE_CONTENT);  /// 1
+    lv_obj_set_height(ui_wifibtnt, LV_SIZE_CONTENT); /// 1
     lv_obj_set_x(ui_wifibtnt, 0);
     lv_obj_set_y(ui_wifibtnt, 110);
     lv_obj_set_align(ui_wifibtnt, LV_ALIGN_CENTER);
@@ -78,8 +77,8 @@ void ui_Page_Network_screen_init(void)
     lv_obj_set_x(ui_wifip3, 0);
     lv_obj_set_y(ui_wifip3, -50);
     lv_obj_set_align(ui_wifip3, LV_ALIGN_CENTER);
-    lv_obj_add_flag(ui_wifip3, LV_OBJ_FLAG_HIDDEN);     /// Flags
-    lv_obj_clear_flag(ui_wifip3, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_add_flag(ui_wifip3, LV_OBJ_FLAG_HIDDEN);       /// Flags
+    lv_obj_clear_flag(ui_wifip3, LV_OBJ_FLAG_SCROLLABLE); /// Flags
     lv_obj_set_style_bg_color(ui_wifip3, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_wifip3, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_color(ui_wifip3, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -99,20 +98,20 @@ void ui_Page_Network_screen_init(void)
 
     ui_wifilogo = lv_img_create(ui_wifip3);
     lv_img_set_src(ui_wifilogo, &ui_img_wifi_3_png);
-    lv_obj_set_width(ui_wifilogo, LV_SIZE_CONTENT);   /// 18
-    lv_obj_set_height(ui_wifilogo, LV_SIZE_CONTENT);    /// 18
+    lv_obj_set_width(ui_wifilogo, LV_SIZE_CONTENT);  /// 18
+    lv_obj_set_height(ui_wifilogo, LV_SIZE_CONTENT); /// 18
     lv_obj_set_x(ui_wifilogo, 0);
     lv_obj_set_y(ui_wifilogo, -50);
     lv_obj_set_align(ui_wifilogo, LV_ALIGN_CENTER);
-    lv_obj_add_flag(ui_wifilogo, LV_OBJ_FLAG_ADV_HITTEST);     /// Flags
-    lv_obj_clear_flag(ui_wifilogo, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_add_flag(ui_wifilogo, LV_OBJ_FLAG_ADV_HITTEST);  /// Flags
+    lv_obj_clear_flag(ui_wifilogo, LV_OBJ_FLAG_SCROLLABLE); /// Flags
 
     ui_wifitext2 = lv_label_create(ui_wifip3);
-    lv_obj_set_width(ui_wifitext2, LV_SIZE_CONTENT);   /// 1
-    lv_obj_set_height(ui_wifitext2, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_width(ui_wifitext2, LV_SIZE_CONTENT);  /// 1
+    lv_obj_set_height(ui_wifitext2, LV_SIZE_CONTENT); /// 1
     lv_obj_set_align(ui_wifitext2, LV_ALIGN_CENTER);
     lv_label_set_text(ui_wifitext2, "Wi-Fi Connected");
-    lv_obj_add_flag(ui_wifitext2, LV_OBJ_FLAG_HIDDEN);     /// Flags
+    lv_obj_add_flag(ui_wifitext2, LV_OBJ_FLAG_HIDDEN); /// Flags
     lv_obj_set_style_text_color(ui_wifitext2, lv_color_hex(0x808080), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_wifitext2, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_wifitext2, &ui_font_fontbold26, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -123,8 +122,8 @@ void ui_Page_Network_screen_init(void)
     lv_obj_set_x(ui_wificancel, 0);
     lv_obj_set_y(ui_wificancel, 146);
     lv_obj_set_align(ui_wificancel, LV_ALIGN_CENTER);
-    lv_obj_add_flag(ui_wificancel, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
-    lv_obj_clear_flag(ui_wificancel, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_add_flag(ui_wificancel, LV_OBJ_FLAG_SCROLL_ON_FOCUS); /// Flags
+    lv_obj_clear_flag(ui_wificancel, LV_OBJ_FLAG_SCROLLABLE);    /// Flags
     lv_obj_set_style_radius(ui_wificancel, 50, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(ui_wificancel, lv_color_hex(0x808080), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_wificancel, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -133,5 +132,4 @@ void ui_Page_Network_screen_init(void)
     lv_obj_set_style_shadow_opa(ui_wificancel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     lv_obj_add_event_cb(ui_wificancel, ui_event_wificancel, LV_EVENT_ALL, NULL);
-
 }

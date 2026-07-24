@@ -99,7 +99,6 @@ void agent_runtime_on_realtime_assistant_text(const char *text);
 void agent_runtime_on_realtime_audio(const uint8_t *pcm, size_t len);
 void agent_runtime_on_realtime_audio_done(void);
 void agent_runtime_on_realtime_response_done(void);
-void agent_runtime_on_audio_playback_started(void);
 void agent_runtime_on_realtime_speech_started(void);
 void agent_runtime_on_realtime_speech_stopped(void);
 void agent_runtime_on_realtime_error(const char *message);

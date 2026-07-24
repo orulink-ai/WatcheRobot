@@ -2,9 +2,9 @@
 
 #include <string.h>
 
-ws_audio_codec_negotiation_result_t ws_audio_codec_negotiate(
-    const char *codec, int sample_rate, int channels, int frame_duration_ms,
-    const char *packetization, int version, bool opus_available) {
+ws_audio_codec_negotiation_result_t ws_audio_codec_negotiate(const char *codec, int sample_rate, int channels,
+                                                             int frame_duration_ms, const char *packetization,
+                                                             int version, bool opus_available) {
     ws_audio_codec_negotiation_result_t result = {
         .codec = WS_AUDIO_CODEC_SELECTION_PCM_S16LE,
         .explicit_selection = false,

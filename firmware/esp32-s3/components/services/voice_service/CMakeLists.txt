@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "src/voice_fsm.c"
+        "src/voice_listening_ui_policy.c"
         "src/hal_wake_word.c"
         "src/voice_remote_control_core.c"
         "src/voice_upload_guard.c"

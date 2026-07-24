@@ -130,8 +130,19 @@
 #define LAUNCHER_TIME_RETRY_MS 5000
 #define STARTUP_LED_RETRY_MS 1000
 #define READY_IDLE_VARIANT_COUNT 4
-#define READY_IDLE_STANDBY_TIMEOUT_MS 6000
+#define READY_IDLE_AMBIENT_ACCENT_COUNT 5
+#define READY_IDLE_AMBIENT_COUNT (READY_IDLE_VARIANT_COUNT + READY_IDLE_AMBIENT_ACCENT_COUNT)
+#define READY_IDLE_AMBIENT_ACCENT_PERCENT 25
+#define READY_IDLE_BASE_MIN_MS 9000U
+#define READY_IDLE_BASE_JITTER_MS 5000U
+#define READY_IDLE_ACCENT_MIN_MS 2500U
+#define READY_IDLE_ACCENT_JITTER_MS 1500U
+#define READY_IDLE_COMPLETION_GUARD_MS 250U
+#define READY_IDLE_COMPLETION_FALLBACK_MS 1500U
+#define READY_IDLE_MIN_PASSIVE_REST_MS 1000U
+#define READY_IDLE_STANDBY_TIMEOUT_MS 60000
 #define READY_IDLE_FALLBACK_RETRY_MS 10000
+#define READY_IDLE_SLEEP_RETRY_MS 10000
 #define READY_IDLE_MEMORY_RETRY_MS 3000
 #define READY_IDLE_STANDBY_HANDOFF_TIMEOUT_MS 1000
 #define READY_IDLE_MIN_INTERNAL_LARGEST_BYTES (12U * 1024U)
@@ -163,6 +174,7 @@
 #define CLOUD_RUNTIME_MIN_INTERNAL_LARGEST_BYTES (12U * 1024U)
 #define VOICE_RUNTIME_START_DEFER_MS 250U
 #define VOICE_CONNECT_UI_WS_TIMEOUT_MS 15000U
+#define VOICE_TTS_COMPLETION_READY_IDLE_GRACE_MS 5000U
 #define LAUNCHER_RETURN_TOUCH_SETTLE_MS 700U
 #define MCU_HANDSHAKE_UI_TIMEOUT_MS 5000U
 #define BLE_CONNECTED_FEEDBACK_STATE_ID "bluetooth"
@@ -174,11 +186,17 @@
 #define PROVISIONING_FEEDBACK_SOUND_ID_WIFI_CONNECTED "happy"
 #define PROVISIONING_FEEDBACK_SOUND_ID_WIFI_FAILED "error"
 #define PROVISIONING_FEEDBACK_SOUND_ID_BLE_DISCONNECTED "disconnect"
-#define TOUCH_FONDLE_STATE_ID "fondle_love"
-#define TOUCH_FONDLE_ANIM_ID "fondle_love"
-#define TOUCH_FONDLE_ACTION_ID "fondle_love"
 #define TOUCH_FONDLE_INVALID_ID 0xFFu
+
+typedef enum {
+    READY_IDLE_PHASE_INACTIVE = 0,
+    READY_IDLE_PHASE_PERFORMING,
+    READY_IDLE_PHASE_RESTING,
+} ready_idle_phase_t;
+
 #define LOCAL_EXIT_AUTO_HIDE_MS 5000
+#define LOCAL_EXIT_SWIPE_MIN_DISTANCE_PX 64
+#define LOCAL_EXIT_SWIPE_MAX_HORIZONTAL_DRIFT_PX 48
 #define PHONE_CONTROL_APP_ID "phone.control.app"
 #define CLIENT_APP_ID "client.app"
 #define VOICE_APP_ID "voice.app"
@@ -349,13 +367,26 @@ static int64_t s_cached_ws_connect_started_us = 0;
 static int64_t s_ws_connect_started_us = 0;
 static int64_t s_wifi_recovery_started_us = 0;
 static int64_t s_voice_runtime_open_us = 0;
+static bool s_voice_tts_was_playing = false;
+static int64_t s_voice_tts_completion_until_us = 0;
+static bool s_voice_ai_foreground_was_active = false;
 static QueueHandle_t s_discovery_result_queue = NULL;
 static char s_cached_ws_url[CACHED_WS_URL_MAX_LEN] = {0};
 static int s_ready_idle_variant_index = -1;
-static int s_ready_idle_last_variant_index = -1;
+static int s_ready_idle_last_base_variant_index = -1;
+static int s_ready_idle_last_accent_index = -1;
+static bool s_ready_idle_action_owned = false;
 static int64_t s_ready_idle_next_switch_us = 0;
+static int64_t s_ready_idle_behavior_complete_us = 0;
+static int64_t s_ready_idle_sleep_deadline_us = 0;
+static int64_t s_ready_idle_sleep_retry_us = 0;
 static bool s_ready_idle_sleeping = false;
+static ready_idle_phase_t s_ready_idle_phase = READY_IDLE_PHASE_INACTIVE;
+static emoji_anim_type_t s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+static animation_ticket_t s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+static bool s_ready_idle_animation_terminal_observed = false;
 static bool s_ready_idle_variant_unavailable_logged[READY_IDLE_VARIANT_COUNT] = {0};
+static bool s_ready_idle_accent_unavailable_logged[READY_IDLE_AMBIENT_ACCENT_COUNT] = {0};
 static bool s_ready_idle_all_unavailable_logged = false;
 static bool s_ready_idle_standby_transition_pending = false;
 static int64_t s_ready_idle_standby_transition_deadline_us = 0;
@@ -607,8 +638,16 @@ static const char *transport_state_to_string(transport_state_t state) {
 static void reset_ready_idle_handoff(transport_state_t state) {
     if (state == TRANSPORT_BLE_IDLE_CLOUD_READY) {
         s_ready_idle_variant_index = -1;
+        s_ready_idle_action_owned = false;
         s_ready_idle_next_switch_us = 0;
+        s_ready_idle_behavior_complete_us = 0;
+        s_ready_idle_sleep_deadline_us = 0;
+        s_ready_idle_sleep_retry_us = 0;
         s_ready_idle_sleeping = false;
+        s_ready_idle_phase = READY_IDLE_PHASE_INACTIVE;
+        s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+        s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+        s_ready_idle_animation_terminal_observed = false;
         s_ready_idle_standby_transition_pending = false;
         s_ready_idle_standby_transition_deadline_us = 0;
         ESP_LOGI(TAG, "Ready idle handoff armed; happy completion is driven by its animation ticket");
@@ -616,8 +655,16 @@ static void reset_ready_idle_handoff(transport_state_t state) {
     }
 
     s_ready_idle_variant_index = -1;
+    s_ready_idle_action_owned = false;
     s_ready_idle_next_switch_us = 0;
+    s_ready_idle_behavior_complete_us = 0;
+    s_ready_idle_sleep_deadline_us = 0;
+    s_ready_idle_sleep_retry_us = 0;
     s_ready_idle_sleeping = false;
+    s_ready_idle_phase = READY_IDLE_PHASE_INACTIVE;
+    s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+    s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+    s_ready_idle_animation_terminal_observed = false;
     s_ready_idle_standby_transition_pending = false;
     s_ready_idle_standby_transition_deadline_us = 0;
 }
@@ -871,6 +918,9 @@ static void ensure_cloud_runtime_started(void);
 static void voice_app_update_connect_ui_if_needed(void);
 static void voice_app_retry_connect(const char *reason);
 static void app_connect_process_action_click(void);
+static void voice_app_track_tts_lifecycle(bool voice_app_active);
+static bool voice_app_tts_completion_recent(void);
+static bool voice_ready_idle_can_replace_busy_state(void);
 static void transport_begin_wifi_resume(const char *reason);
 static void boot_resume_saved_wifi_if_needed(void);
 static void launcher_request_status_refresh(void);
@@ -929,6 +979,26 @@ static void arm_firmware_app_return_to_launcher_on_next_boot(const char *app_lab
 #endif
 static bool s_touch_fondle_press_latched = false;
 static uint8_t s_touch_fondle_latched_id = TOUCH_FONDLE_INVALID_ID;
+
+typedef struct {
+    const char *state_id;
+    const char *anim_id;
+    const char *action_id;
+    emoji_anim_type_t anim_type;
+} touch_fondle_variant_t;
+
+static const touch_fondle_variant_t s_touch_fondle_variants[] = {
+    {.state_id = "fondle_love",
+     .anim_id = "fondle_love",
+     .action_id = "fondle_love",
+     .anim_type = EMOJI_ANIM_FONDLE_LOVE},
+    {.state_id = "fondle_anger",
+     .anim_id = "fondle_anger",
+     .action_id = "fondle_anger",
+     .anim_type = EMOJI_ANIM_FONDLE_ANGER},
+};
+
+#define TOUCH_FONDLE_VARIANT_COUNT (sizeof(s_touch_fondle_variants) / sizeof(s_touch_fondle_variants[0]))
 #if defined(WATCHER_STRESS_BUILD) || defined(CONFIG_WATCHER_STRESS_BUILD)
 static void ensure_mcu_link_runtime_task_started(void);
 #endif
@@ -1425,6 +1495,13 @@ static void on_button_single_click_dispatch(void) {
         active_app->on_button();
     } else {
         ESP_LOGI(TAG, "Button single-click ignored; no active app handler");
+    }
+}
+
+static void on_roller_rotate_dispatch(int32_t diff) {
+    const watcher_app_t *active_app = watcher_app_get_active();
+    if (diff != 0 && active_app != NULL && active_app->on_rotate != NULL) {
+        active_app->on_rotate(diff);
     }
 }
 
@@ -2032,6 +2109,8 @@ static void maybe_complete_mcu_link_baseline_restore(const mcu_link_event_t *eve
 
 static void maybe_handle_touch_behavior_event(const mcu_link_event_t *event, esp_err_t sensor_ret) {
     mcu_touch_state_t touch = {0};
+    const touch_fondle_variant_t *variant = NULL;
+    size_t start_index;
     esp_err_t ret;
 
     if (event == NULL || event->type != MCU_LINK_RX_EVENT_TOUCH_EVENT) {
@@ -2046,6 +2125,14 @@ static void maybe_handle_touch_behavior_event(const mcu_link_event_t *event, esp
     ret = mcu_sensor_service_get_latest_touch(&touch);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Touch behavior skipped; latest touch unavailable: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    if (sdk_control_app_publish_back_touch(touch.touch_id, touch.event_code, touch.timestamp_ms)) {
+        if (touch.event_code == MCU_TOUCH_EVENT_RELEASE) {
+            s_touch_fondle_press_latched = false;
+            s_touch_fondle_latched_id = TOUCH_FONDLE_INVALID_ID;
+        }
         return;
     }
 
@@ -2097,19 +2184,26 @@ static void maybe_handle_touch_behavior_event(const mcu_link_event_t *event, esp
     s_touch_fondle_press_latched = true;
     s_touch_fondle_latched_id = touch.touch_id;
 
-    if (!anim_catalog_has_type(EMOJI_ANIM_FONDLE_LOVE)) {
-        ESP_LOGW(TAG, "Touch press ignored; %s animation is unavailable in SD manifest", TOUCH_FONDLE_ANIM_ID);
-        return;
+    start_index = esp_random() % TOUCH_FONDLE_VARIANT_COUNT;
+    ret = ESP_ERR_NOT_FOUND;
+    for (size_t attempt = 0; attempt < TOUCH_FONDLE_VARIANT_COUNT; ++attempt) {
+        variant = &s_touch_fondle_variants[(start_index + attempt) % TOUCH_FONDLE_VARIANT_COUNT];
+        if (!anim_catalog_has_type(variant->anim_type)) {
+            ESP_LOGW(TAG, "Touch fondle variant unavailable in SD manifest: %s", variant->anim_id);
+            continue;
+        }
+
+        ret = behavior_state_set_with_resources_and_action(variant->state_id, "", 0, variant->anim_id, "",
+                                                           variant->action_id);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Touch press triggered %s touch_id=%u ts=%lu", variant->state_id, (unsigned)touch.touch_id,
+                     (unsigned long)touch.timestamp_ms);
+            return;
+        }
+        ESP_LOGW(TAG, "Touch press failed to trigger %s: %s", variant->state_id, esp_err_to_name(ret));
     }
 
-    ret = behavior_state_set_with_resources_and_action(TOUCH_FONDLE_STATE_ID, "", 0, TOUCH_FONDLE_ANIM_ID, "",
-                                                       TOUCH_FONDLE_ACTION_ID);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Touch press triggered %s touch_id=%u ts=%lu", TOUCH_FONDLE_STATE_ID, (unsigned)touch.touch_id,
-                 (unsigned long)touch.timestamp_ms);
-    } else {
-        ESP_LOGW(TAG, "Touch press failed to trigger %s: %s", TOUCH_FONDLE_STATE_ID, esp_err_to_name(ret));
-    }
+    ESP_LOGW(TAG, "Touch press had no available fondle variant touch_id=%u", (unsigned)touch.touch_id);
 }
 
 static void dispatch_mcu_link_runtime_event(const mcu_link_event_t *event) {
@@ -2629,7 +2723,18 @@ static bool handoff_completed_recharge_to_idle(const idle_hint_view_t *view) {
 
 static bool idle_hint_is_blocked(idle_hint_mode_t desired_hint) {
     if (behavior_state_is_action_active()) {
-        return true;
+        const char *current_state = behavior_state_get_current();
+        const bool ready_idle_owns_action = desired_hint == IDLE_HINT_READY && s_ready_idle_action_owned &&
+                                            s_ready_idle_variant_index >= 0 && current_state != NULL &&
+                                            strcmp(current_state, "standby") == 0;
+        if (!ready_idle_owns_action) {
+            return true;
+        }
+    }
+
+    if (desired_hint == IDLE_HINT_READY && voice_ready_idle_can_replace_busy_state()) {
+        ESP_LOGI(TAG, "Voice ready idle replacing completed speaking state");
+        return false;
     }
 
     if (!behavior_state_is_busy()) {
@@ -2641,16 +2746,31 @@ static bool idle_hint_is_blocked(idle_hint_mode_t desired_hint) {
 
 static void reset_ready_idle_rotation(void) {
     s_ready_idle_variant_index = -1;
+    s_ready_idle_action_owned = false;
     s_ready_idle_next_switch_us = 0;
+    s_ready_idle_behavior_complete_us = 0;
+    s_ready_idle_sleep_deadline_us = 0;
+    s_ready_idle_sleep_retry_us = 0;
     s_ready_idle_sleeping = false;
+    s_ready_idle_phase = READY_IDLE_PHASE_INACTIVE;
+    s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+    s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+    s_ready_idle_animation_terminal_observed = false;
     s_ready_idle_standby_transition_pending = false;
     s_ready_idle_standby_transition_deadline_us = 0;
     s_ready_idle_memory_defers = 0;
 }
 
 static void schedule_ready_idle_retry(int64_t now_us) {
+    int64_t sleep_deadline_us = s_ready_idle_sleep_deadline_us;
+    int64_t retry_us = now_us + (int64_t)READY_IDLE_FALLBACK_RETRY_MS * 1000LL;
+
     reset_ready_idle_rotation();
-    s_ready_idle_next_switch_us = now_us + (int64_t)READY_IDLE_FALLBACK_RETRY_MS * 1000LL;
+    s_ready_idle_sleep_deadline_us = sleep_deadline_us;
+    if (sleep_deadline_us > 0 && retry_us > sleep_deadline_us) {
+        retry_us = sleep_deadline_us;
+    }
+    s_ready_idle_next_switch_us = retry_us;
 }
 
 static bool ready_idle_retry_pending(int64_t now_us) {
@@ -2790,7 +2910,7 @@ static int choose_ready_idle_variant(void) {
     }
 
     for (int i = 0; i < available_count; ++i) {
-        if (available_count > 1 && available[i] == s_ready_idle_last_variant_index) {
+        if (available_count > 1 && available[i] == s_ready_idle_last_base_variant_index) {
             continue;
         }
         filtered[filtered_count++] = available[i];
@@ -2801,6 +2921,203 @@ static int choose_ready_idle_variant(void) {
     }
 
     return filtered[esp_random() % (uint32_t)filtered_count];
+}
+
+static const char *ready_idle_accent_name(int accent_index) {
+    static const char *names[READY_IDLE_AMBIENT_ACCENT_COUNT] = {
+        "blink", "sunglasses", "speechless", "concentration", "sad",
+    };
+
+    if (accent_index < 0 || accent_index >= READY_IDLE_AMBIENT_ACCENT_COUNT) {
+        return NULL;
+    }
+    return names[accent_index];
+}
+
+static emoji_anim_type_t ready_idle_accent_type(int accent_index) {
+    static const emoji_anim_type_t types[READY_IDLE_AMBIENT_ACCENT_COUNT] = {
+        EMOJI_ANIM_BLINK, EMOJI_ANIM_SUNGLASSES, EMOJI_ANIM_SPEECHLESS, EMOJI_ANIM_CONCENTRATION, EMOJI_ANIM_SAD,
+    };
+
+    if (accent_index < 0 || accent_index >= READY_IDLE_AMBIENT_ACCENT_COUNT) {
+        return EMOJI_ANIM_COUNT;
+    }
+    return types[accent_index];
+}
+
+static int choose_ready_idle_accent(void) {
+    int available[READY_IDLE_AMBIENT_ACCENT_COUNT] = {0};
+    int available_count = 0;
+    int filtered[READY_IDLE_AMBIENT_ACCENT_COUNT] = {0};
+    int filtered_count = 0;
+
+    for (int index = 0; index < READY_IDLE_AMBIENT_ACCENT_COUNT; ++index) {
+        emoji_anim_type_t type = ready_idle_accent_type(index);
+        if (type != EMOJI_ANIM_COUNT && anim_catalog_has_type(type)) {
+            available[available_count++] = index;
+            continue;
+        }
+        if (!s_ready_idle_accent_unavailable_logged[index]) {
+            ESP_LOGW(TAG, "Ready idle accent unavailable in SD manifest: %s", ready_idle_accent_name(index));
+            s_ready_idle_accent_unavailable_logged[index] = true;
+        }
+    }
+
+    if (available_count <= 0) {
+        return -1;
+    }
+
+    for (int i = 0; i < available_count; ++i) {
+        if (available_count > 1 && available[i] == s_ready_idle_last_accent_index) {
+            continue;
+        }
+        filtered[filtered_count++] = available[i];
+    }
+
+    if (filtered_count <= 0) {
+        return available[esp_random() % (uint32_t)available_count];
+    }
+    return filtered[esp_random() % (uint32_t)filtered_count];
+}
+
+static int choose_ready_idle_ambient(bool initial_entry) {
+    const bool previous_was_accent = s_ready_idle_variant_index >= READY_IDLE_VARIANT_COUNT;
+
+    if (!initial_entry && !previous_was_accent && (esp_random() % 100U) < READY_IDLE_AMBIENT_ACCENT_PERCENT) {
+        int accent_index = choose_ready_idle_accent();
+        if (accent_index >= 0) {
+            return READY_IDLE_VARIANT_COUNT + accent_index;
+        }
+    }
+    return choose_ready_idle_variant();
+}
+
+static const char *ready_idle_ambient_name(int index) {
+    if (index < READY_IDLE_VARIANT_COUNT) {
+        return ready_idle_variant_name(index);
+    }
+    return ready_idle_accent_name(index - READY_IDLE_VARIANT_COUNT);
+}
+
+static emoji_anim_type_t ready_idle_ambient_type(int index) {
+    if (index < READY_IDLE_VARIANT_COUNT) {
+        return ready_idle_variant_type(index);
+    }
+    return ready_idle_accent_type(index - READY_IDLE_VARIANT_COUNT);
+}
+
+static uint32_t ready_idle_behavior_duration_ms(emoji_anim_type_t anim_type) {
+    int animation_ms = emoji_get_loop_duration_ms(anim_type);
+
+    if (animation_ms > 0 && (uint32_t)animation_ms <= UINT32_MAX - READY_IDLE_COMPLETION_GUARD_MS) {
+        return (uint32_t)animation_ms + READY_IDLE_COMPLETION_GUARD_MS;
+    }
+    return READY_IDLE_ACCENT_MIN_MS;
+}
+
+static uint32_t ready_idle_ambient_duration_ms(int index, emoji_anim_type_t anim_type) {
+    uint32_t display_ms;
+    uint32_t completion_ms;
+
+    if (index >= READY_IDLE_VARIANT_COUNT) {
+        display_ms = READY_IDLE_ACCENT_MIN_MS + (esp_random() % (READY_IDLE_ACCENT_JITTER_MS + 1U));
+    } else {
+        display_ms = READY_IDLE_BASE_MIN_MS + (esp_random() % (READY_IDLE_BASE_JITTER_MS + 1U));
+    }
+
+    completion_ms = ready_idle_behavior_duration_ms(anim_type);
+    if (display_ms < completion_ms) {
+        display_ms = completion_ms;
+    }
+    return display_ms;
+}
+
+static void ready_idle_discard_animation_observations(void) {
+    behavior_animation_event_t observed;
+
+    while (behavior_state_poll_animation_event(&observed)) {
+    }
+}
+
+static void ready_idle_poll_behavior_completion(void) {
+    behavior_animation_event_t observed;
+
+    while (behavior_state_poll_animation_event(&observed)) {
+        if (s_ready_idle_phase != READY_IDLE_PHASE_PERFORMING || strcmp(observed.state_id, "standby") != 0 ||
+            observed.event.request.type != s_ready_idle_behavior_anim_type) {
+            continue;
+        }
+
+        if (s_ready_idle_behavior_ticket == ANIMATION_TICKET_INVALID &&
+            (observed.event.type == ANIMATION_EVENT_ACCEPTED || observed.event.type == ANIMATION_EVENT_PREPARING ||
+             observed.event.type == ANIMATION_EVENT_COMMITTED)) {
+            s_ready_idle_behavior_ticket = observed.event.ticket;
+        }
+        if (observed.event.ticket != s_ready_idle_behavior_ticket) {
+            continue;
+        }
+
+        if (observed.event.type == ANIMATION_EVENT_COMPLETED || observed.event.type == ANIMATION_EVENT_FAILED) {
+            s_ready_idle_animation_terminal_observed = true;
+            ESP_LOGI(TAG, "Ready idle behavior terminal observed: anim=%s ticket=%lu event=%d",
+                     animation_registry_name(observed.event.request.type), (unsigned long)observed.event.ticket,
+                     (int)observed.event.type);
+        }
+    }
+}
+
+static bool ready_idle_passive_submission_allowed(void) {
+    const char *current_state = behavior_state_get_current();
+
+    return active_app_is_client_voice_host() && s_voice_runtime_stage == VOICE_RUNTIME_STAGE_READY &&
+           voice_recorder_get_state() == VOICE_STATE_IDLE && !ws_client_is_tts_playing() &&
+           !control_ingress_has_foreground_ai_lease() && current_state != NULL && strcmp(current_state, "standby") == 0;
+}
+
+static bool apply_ready_idle_passive_variant(const idle_hint_view_t *view, int64_t now_us) {
+    int passive_index = choose_ready_idle_variant();
+    const char *passive_anim_id;
+    emoji_anim_type_t passive_anim_type;
+    esp_err_t ret;
+
+    if (passive_index < 0) {
+        ESP_LOGW(TAG, "Ready idle passive expression unavailable; retaining the completed frame until next behavior");
+        s_ready_idle_action_owned = false;
+        s_ready_idle_phase = READY_IDLE_PHASE_RESTING;
+        return true;
+    }
+
+    passive_anim_id = ready_idle_variant_name(passive_index);
+    passive_anim_type = ready_idle_variant_type(passive_index);
+    if (passive_anim_id == NULL || passive_anim_type == EMOJI_ANIM_COUNT) {
+        ESP_LOGW(TAG, "Ready idle passive expression selection invalid index=%d", passive_index);
+        return true;
+    }
+
+    if (!ready_idle_passive_submission_allowed()) {
+        ESP_LOGI(TAG, "Ready idle passive expression skipped because foreground ownership changed");
+        return true;
+    }
+
+    (void)animation_prefetch_hint(passive_anim_type);
+    ret = behavior_state_set_with_resources("standby", view->text, view->font_size, passive_anim_id, "");
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to apply motionless ready idle expression %s: %s", passive_anim_id, esp_err_to_name(ret));
+        s_ready_idle_animation_terminal_observed = false;
+        s_ready_idle_behavior_complete_us = now_us + (int64_t)READY_IDLE_FALLBACK_RETRY_MS * 1000LL;
+        return true;
+    }
+
+    s_ready_idle_action_owned = false;
+    s_ready_idle_behavior_complete_us = 0;
+    s_ready_idle_phase = READY_IDLE_PHASE_RESTING;
+    s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+    s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+    s_ready_idle_animation_terminal_observed = false;
+    s_ready_idle_last_base_variant_index = passive_index;
+    ESP_LOGI(TAG, "Ready idle entered motionless rest: expression=%s next_behavior_ms=%lld", passive_anim_id,
+             (long long)((s_ready_idle_next_switch_us - now_us) / 1000LL));
+    return true;
 }
 
 static void voice_app_resume_wake_word_for_sleep_standby(const char *reason) {
@@ -2820,13 +3137,21 @@ static bool apply_ready_idle_sleep(const idle_hint_view_t *view) {
     esp_err_t ret = behavior_state_set_with_resources("standby_start", view->text, view->font_size, NULL, "");
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to apply ready idle sleep transition: %s", esp_err_to_name(ret));
-        s_ready_idle_next_switch_us = esp_timer_get_time() + (int64_t)READY_IDLE_FALLBACK_RETRY_MS * 1000LL;
-        return false;
+        s_ready_idle_sleep_retry_us = esp_timer_get_time() + (int64_t)READY_IDLE_SLEEP_RETRY_MS * 1000LL;
+        return true;
     }
 
     s_ready_idle_variant_index = -1;
+    s_ready_idle_action_owned = false;
     s_ready_idle_next_switch_us = 0;
+    s_ready_idle_behavior_complete_us = 0;
+    s_ready_idle_sleep_deadline_us = 0;
+    s_ready_idle_sleep_retry_us = 0;
     s_ready_idle_sleeping = true;
+    s_ready_idle_phase = READY_IDLE_PHASE_INACTIVE;
+    s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+    s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+    s_ready_idle_animation_terminal_observed = false;
     voice_app_resume_wake_word_for_sleep_standby("ready idle sleep");
     ESP_LOGI(TAG, "Ready idle sleep transition applied after %ums standby timeout",
              (unsigned)READY_IDLE_STANDBY_TIMEOUT_MS);
@@ -2872,8 +3197,16 @@ static bool apply_ready_idle_lightweight_standby(const idle_hint_view_t *view) {
     }
 
     s_ready_idle_variant_index = -1;
+    s_ready_idle_action_owned = false;
     s_ready_idle_next_switch_us = 0;
+    s_ready_idle_behavior_complete_us = 0;
+    s_ready_idle_sleep_deadline_us = 0;
+    s_ready_idle_sleep_retry_us = 0;
     s_ready_idle_sleeping = true;
+    s_ready_idle_phase = READY_IDLE_PHASE_INACTIVE;
+    s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+    s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+    s_ready_idle_animation_terminal_observed = false;
     s_ready_idle_memory_defers = 0;
     mark_ready_idle_standby_transition_pending();
     voice_app_resume_wake_word_for_sleep_standby("ready idle lightweight standby");
@@ -3326,8 +3659,101 @@ static bool voice_app_enter_ready_ui_if_needed(const char *reason) {
     return true;
 }
 
+static bool voice_app_tts_completion_recent(void) {
+    if (s_voice_tts_completion_until_us <= 0) {
+        return false;
+    }
+    if (!active_app_is_client_voice_host() || s_voice_runtime_stage != VOICE_RUNTIME_STAGE_READY ||
+        voice_recorder_get_state() != VOICE_STATE_IDLE || ws_client_is_tts_playing()) {
+        return false;
+    }
+
+    return esp_timer_get_time() < s_voice_tts_completion_until_us;
+}
+
+/*
+ * Voice recording owns the local-SFX guard from microphone start until the
+ * response playout has fully completed.  Keep this release in the app-level
+ * lifecycle owner: both a binary EOS and the server-complete timeout make
+ * ws_client_is_tts_playing() transition to false here.
+ */
+static void voice_app_release_sfx_guard_after_tts(void) {
+    if (!active_app_is_client_voice_host() || s_voice_runtime_stage != VOICE_RUNTIME_STAGE_READY ||
+        voice_recorder_get_state() != VOICE_STATE_IDLE || ws_client_is_tts_playing()) {
+        return;
+    }
+
+    sfx_service_set_voice_audio_busy(false);
+    ESP_LOGI(TAG, "Released voice audio guard after response TTS completion");
+}
+
+static void voice_app_track_tts_lifecycle(bool voice_app_active) {
+    bool completion_owner =
+        voice_app_active && active_app_is_client_voice_host() && s_voice_runtime_stage == VOICE_RUNTIME_STAGE_READY;
+    bool tts_playing = completion_owner && ws_client_is_tts_playing();
+    int64_t now_us = esp_timer_get_time();
+
+    if (!completion_owner) {
+        s_voice_tts_was_playing = false;
+        s_voice_tts_completion_until_us = 0;
+        return;
+    }
+
+    if (s_voice_tts_was_playing && !tts_playing) {
+        if (voice_recorder_get_state() == VOICE_STATE_IDLE) {
+            voice_app_release_sfx_guard_after_tts();
+            s_voice_tts_completion_until_us = now_us + (int64_t)VOICE_TTS_COMPLETION_READY_IDLE_GRACE_MS * 1000LL;
+            s_ready_idle_variant_index = -1;
+            s_ready_idle_action_owned = false;
+            s_ready_idle_next_switch_us = 0;
+            s_ready_idle_behavior_complete_us = 0;
+            s_ready_idle_sleep_deadline_us = 0;
+            s_ready_idle_sleep_retry_us = 0;
+            s_ready_idle_sleeping = false;
+            s_ready_idle_phase = READY_IDLE_PHASE_INACTIVE;
+            s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+            s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+            s_ready_idle_animation_terminal_observed = false;
+            s_ready_idle_standby_transition_pending = false;
+            s_ready_idle_standby_transition_deadline_us = 0;
+            s_ready_idle_memory_defers = 0;
+            ESP_LOGI(TAG, "Voice TTS completion observed; ready idle handoff armed");
+        } else {
+            s_voice_tts_completion_until_us = 0;
+        }
+    } else if (tts_playing) {
+        s_voice_tts_completion_until_us = 0;
+    }
+
+    s_voice_tts_was_playing = tts_playing;
+}
+
+static bool voice_ready_idle_can_replace_busy_state(void) {
+    const char *current_state;
+
+    if (!active_app_is_client_voice_host() || s_voice_runtime_stage != VOICE_RUNTIME_STAGE_READY ||
+        voice_recorder_get_state() != VOICE_STATE_IDLE || ws_client_is_tts_playing()) {
+        return false;
+    }
+
+    current_state = behavior_state_get_current();
+    if (current_state == NULL) {
+        return false;
+    }
+    if (strcmp(current_state, "speaking") == 0) {
+        return true;
+    }
+
+    return strcmp(current_state, "thinking") == 0 && voice_app_tts_completion_recent();
+}
+
 static bool apply_ready_idle_variant_if_due(const idle_hint_view_t *view, bool force) {
     int64_t now_us = esp_timer_get_time();
+    bool initial_entry;
+    int selected;
+    uint32_t behavior_ms;
+    uint32_t display_ms;
+    int64_t next_switch_us;
 
     if (ready_idle_should_use_lightweight_ui()) {
         if (s_ready_idle_sleeping) {
@@ -3340,8 +3766,37 @@ static bool apply_ready_idle_variant_if_due(const idle_hint_view_t *view, bool f
         return true;
     }
 
+    if (s_ready_idle_sleep_deadline_us <= 0) {
+        s_ready_idle_sleep_deadline_us = now_us + (int64_t)READY_IDLE_STANDBY_TIMEOUT_MS * 1000LL;
+    }
+    if (now_us >= s_ready_idle_sleep_deadline_us) {
+        if (s_ready_idle_sleep_retry_us > now_us) {
+            return true;
+        }
+        return apply_ready_idle_sleep(view);
+    }
+
     if (ready_idle_retry_pending(now_us)) {
         return true;
+    }
+
+    if (s_ready_idle_phase == READY_IDLE_PHASE_PERFORMING && s_ready_idle_behavior_complete_us > 0) {
+        ready_idle_poll_behavior_completion();
+        if (!s_ready_idle_animation_terminal_observed && now_us < s_ready_idle_behavior_complete_us) {
+            return true;
+        }
+        if (behavior_state_is_action_active()) {
+            return true;
+        }
+        if (now_us < s_ready_idle_next_switch_us) {
+            return apply_ready_idle_passive_variant(view, now_us);
+        }
+        s_ready_idle_action_owned = false;
+        s_ready_idle_behavior_complete_us = 0;
+        s_ready_idle_phase = READY_IDLE_PHASE_RESTING;
+        s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+        s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+        s_ready_idle_animation_terminal_observed = false;
     }
 
     if (!force && s_ready_idle_variant_index >= 0 && now_us < s_ready_idle_next_switch_us) {
@@ -3349,6 +3804,14 @@ static bool apply_ready_idle_variant_if_due(const idle_hint_view_t *view, bool f
     }
 
     if (!ready_idle_has_animation_headroom(now_us)) {
+        if (voice_app_tts_completion_recent()) {
+            ESP_LOGW(TAG, "Voice TTS completion using text-only standby under memory pressure");
+            if (apply_ready_idle_text_only_standby(view, now_us)) {
+                s_voice_tts_completion_until_us = 0;
+                return true;
+            }
+            return false;
+        }
         s_ready_idle_memory_defers++;
         if (s_ready_idle_memory_defers >= READY_IDLE_MEMORY_FORCE_STANDBY_DEFERS) {
             ESP_LOGW(TAG, "Ready idle memory pressure persisted for %lu retries; forcing text-only standby handoff",
@@ -3361,37 +3824,69 @@ static bool apply_ready_idle_variant_if_due(const idle_hint_view_t *view, bool f
     }
     s_ready_idle_memory_defers = 0;
 
-    if (s_ready_idle_variant_index >= 0) {
-        if (now_us < s_ready_idle_next_switch_us) {
-            return true;
-        }
-        return apply_ready_idle_sleep(view);
-    }
-
-    int selected = choose_ready_idle_variant();
+    initial_entry = s_ready_idle_variant_index < 0;
+    selected = choose_ready_idle_ambient(initial_entry);
     if (selected < 0) {
         return apply_ready_idle_fallback_standby(view, now_us);
     }
 
-    const char *anim_id = ready_idle_variant_name(selected);
-    (void)animation_prefetch_hint(ready_idle_variant_type(selected));
-    esp_err_t ret = behavior_state_set_with_resources("standby", view->text, view->font_size, anim_id, "");
+    const char *anim_id = ready_idle_ambient_name(selected);
+    const char *action_id;
+    emoji_anim_type_t anim_type = ready_idle_ambient_type(selected);
+    if (anim_id == NULL || anim_type == EMOJI_ANIM_COUNT) {
+        return apply_ready_idle_fallback_standby(view, now_us);
+    }
+    behavior_ms = ready_idle_behavior_duration_ms(anim_type);
+    if (!initial_entry &&
+        (s_ready_idle_sleep_deadline_us - now_us) <= (int64_t)(behavior_ms + READY_IDLE_MIN_PASSIVE_REST_MS) * 1000LL) {
+        s_ready_idle_action_owned = false;
+        s_ready_idle_next_switch_us = s_ready_idle_sleep_deadline_us;
+        s_ready_idle_phase = READY_IDLE_PHASE_RESTING;
+        ESP_LOGI(TAG, "Ready idle skipped late behavior %s: sleep_remaining_ms=%lld required_ms=%lu", anim_id,
+                 (long long)((s_ready_idle_sleep_deadline_us - now_us) / 1000LL),
+                 (unsigned long)(behavior_ms + READY_IDLE_MIN_PASSIVE_REST_MS));
+        return true;
+    }
+    (void)animation_prefetch_hint(anim_type);
+    action_id = behavior_state_has_action(anim_id) ? anim_id : NULL;
+    ready_idle_discard_animation_observations();
+    s_ready_idle_behavior_anim_type = anim_type;
+    s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
+    s_ready_idle_animation_terminal_observed = false;
+    esp_err_t ret = behavior_state_set_with_resources_and_action_once("standby", view->text, view->font_size, anim_id,
+                                                                      "", action_id);
     if (ret != ESP_OK) {
+        s_ready_idle_behavior_anim_type = EMOJI_ANIM_NONE;
+        s_ready_idle_behavior_ticket = ANIMATION_TICKET_INVALID;
         ESP_LOGW(TAG, "Failed to apply ready idle variant %s: %s", anim_id, esp_err_to_name(ret));
         schedule_ready_idle_retry(now_us);
         return false;
     }
 
     s_ready_idle_variant_index = selected;
-    s_ready_idle_last_variant_index = selected;
-    s_ready_idle_next_switch_us = now_us + (int64_t)READY_IDLE_STANDBY_TIMEOUT_MS * 1000LL;
+    s_ready_idle_action_owned = action_id != NULL;
+    s_ready_idle_phase = READY_IDLE_PHASE_PERFORMING;
+    if (selected < READY_IDLE_VARIANT_COUNT) {
+        s_ready_idle_last_base_variant_index = selected;
+    } else {
+        s_ready_idle_last_accent_index = selected - READY_IDLE_VARIANT_COUNT;
+    }
+    display_ms = ready_idle_ambient_duration_ms(selected, anim_type);
+    s_ready_idle_behavior_complete_us = now_us + (int64_t)(behavior_ms + READY_IDLE_COMPLETION_FALLBACK_MS) * 1000LL;
+    next_switch_us = now_us + (int64_t)display_ms * 1000LL;
+    s_ready_idle_next_switch_us =
+        next_switch_us < s_ready_idle_sleep_deadline_us ? next_switch_us : s_ready_idle_sleep_deadline_us;
     mark_ready_idle_standby_transition_pending();
-    ESP_LOGI(TAG, "Ready idle variant applied: %s timeout=%ums", anim_id, (unsigned)READY_IDLE_STANDBY_TIMEOUT_MS);
+    s_voice_tts_completion_until_us = 0;
+    ESP_LOGI(TAG, "Ready idle ambient applied: %s action=%s display_ms=%lu sleep_remaining_ms=%lld", anim_id,
+             action_id != NULL ? action_id : "<expression-only>", (unsigned long)display_ms,
+             (long long)((s_ready_idle_sleep_deadline_us - now_us) / 1000LL));
     return true;
 }
 
 static void apply_idle_hint_if_needed(void) {
     bool client_voice_ready = active_app_is_client_voice_host() && s_voice_runtime_stage == VOICE_RUNTIME_STAGE_READY;
+    bool foreground_ai_active;
 
     if (local_exit_is_visible()) {
         return;
@@ -3402,8 +3897,12 @@ static void apply_idle_hint_if_needed(void) {
     }
 
     if (active_app_is_client_voice_host() && !client_voice_ready) {
+        s_voice_ai_foreground_was_active = false;
         voice_app_update_connect_ui_if_needed();
         return;
+    }
+    if (!active_app_is_client_voice_host()) {
+        s_voice_ai_foreground_was_active = false;
     }
 
     static idle_hint_mode_t s_last_applied_hint = IDLE_HINT_READY;
@@ -3418,6 +3917,27 @@ static void apply_idle_hint_if_needed(void) {
 
     if (voice_recorder_get_state() != VOICE_STATE_IDLE) {
         reset_ready_idle_rotation();
+        return;
+    }
+
+    foreground_ai_active = control_ingress_has_foreground_ai_lease();
+    if (foreground_ai_active) {
+        s_voice_ai_foreground_was_active = client_voice_ready;
+        reset_ready_idle_rotation();
+        return;
+    }
+
+    if (client_voice_ready && s_voice_ai_foreground_was_active) {
+        if (ws_client_is_tts_playing()) {
+            return;
+        }
+        reset_ready_idle_rotation();
+        if (apply_ready_idle_variant_if_due(&view, true)) {
+            s_voice_ai_foreground_was_active = false;
+            s_last_applied_hint = IDLE_HINT_READY;
+            s_hint_initialized = true;
+            ESP_LOGI(TAG, "Ready idle foreground task completed; entering ambient wait");
+        }
         return;
     }
 
@@ -3582,12 +4102,15 @@ static void voice_runtime_reset(const char *reason) {
     }
     s_voice_runtime_stage = VOICE_RUNTIME_STAGE_STOPPED;
     s_voice_runtime_open_us = 0;
+    s_voice_tts_was_playing = false;
+    s_voice_tts_completion_until_us = 0;
     s_cloud_runtime_started = false;
     s_voice_ready_ui_shown = false;
     voice_app_reset_connect_ui_state();
 }
 
 static void voice_runtime_start_if_due(void) {
+    esp_err_t audio_guard_release_ret;
     int64_t now_us;
     int64_t start_us;
     int64_t wake_init_ms;
@@ -3627,6 +4150,10 @@ static void voice_runtime_start_if_due(void) {
     }
 
     wake_init_ms = (esp_timer_get_time() - start_us) / 1000LL;
+    audio_guard_release_ret = voice_recorder_request_startup_audio_release();
+    if (audio_guard_release_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Voice startup audio guard release request failed: %s", esp_err_to_name(audio_guard_release_ret));
+    }
     s_cloud_runtime_started = true;
     LOG_HEAP_STATE("after_voice_runtime_start");
     if (ws_client_is_session_ready()) {
@@ -3972,6 +4499,19 @@ static esp_err_t app_resource_resume_wifi_if_needed(const char *app_id) {
     return ESP_OK;
 }
 
+static esp_err_t app_resource_release_wifi_if_unused(const char *app_id) {
+    const esp_err_t ret = wifi_release_station();
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi STA resource release failed for %s: %s", app_id != NULL ? app_id : "(unknown)",
+                 esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Wi-Fi STA resource released for %s", app_id != NULL ? app_id : "(unknown)");
+    return ESP_OK;
+}
+
 static void app_resource_set_owner(watcher_app_resource_mode_t mode, const char *app_id) {
     const char *owner = (mode == WATCHER_APP_RESOURCE_OFF || app_id == NULL || app_id[0] == '\0') ? "none" : app_id;
     (void)snprintf(s_app_resource_owner, sizeof(s_app_resource_owner), "%s", owner);
@@ -4232,12 +4772,12 @@ static esp_err_t app_resource_apply(watcher_app_resource_mode_t mode, watcher_ap
     const char *safe_app_id = (app_id != NULL && app_id[0] != '\0') ? app_id : "unknown";
     char from_resource_text[80];
     char target_resource_text[80];
+    bool requires_wifi;
     bool requires_ble;
     bool requires_cloud;
     bool requires_mcu_runtime;
 
-    /* Wi-Fi is platform infrastructure, not an app-owned disposable resource. */
-    resources |= WATCHER_APP_RESOURCE_SET_WIFI_STA;
+    requires_wifi = (resources & WATCHER_APP_RESOURCE_SET_WIFI_STA) != 0;
     requires_ble = (resources & WATCHER_APP_RESOURCE_SET_BLE) != 0;
     requires_cloud = (resources & WATCHER_APP_RESOURCE_SET_CLOUD) != 0;
     requires_mcu_runtime = (resources & WATCHER_APP_RESOURCE_SET_MCU_RUNTIME) != 0;
@@ -4260,6 +4800,13 @@ static esp_err_t app_resource_apply(watcher_app_resource_mode_t mode, watcher_ap
         s_transport_state = TRANSPORT_BLE_IDLE_CLOUD_SUSPENDED;
     }
 
+    if (!requires_wifi) {
+        ret = app_resource_release_wifi_if_unused(app_id);
+        if (ret != ESP_OK && status == ESP_OK) {
+            status = ret;
+        }
+    }
+
     if (requires_ble) {
         ret = app_resource_start_ble();
         if (ret != ESP_OK && ret != ESP_ERR_NOT_SUPPORTED) {
@@ -4276,9 +4823,11 @@ static esp_err_t app_resource_apply(watcher_app_resource_mode_t mode, watcher_ap
         }
     }
 
-    ret = app_resource_resume_wifi_if_needed(app_id);
-    if (ret != ESP_OK && status == ESP_OK) {
-        status = ret;
+    if (requires_wifi) {
+        ret = app_resource_resume_wifi_if_needed(app_id);
+        if (ret != ESP_OK && status == ESP_OK) {
+            status = ret;
+        }
     }
 
     if (status == ESP_OK && requires_mcu_runtime) {
@@ -4886,6 +5435,8 @@ static lv_obj_t *s_local_focus_pad = NULL;
 static int64_t s_local_exit_hide_at_us = 0;
 static int64_t s_local_exit_show_since_us = 0;
 static bool s_local_exit_visible = false;
+static bool s_local_pointer_swipe_tracking = false;
+static lv_point_t s_local_pointer_swipe_start = {0};
 static bool s_local_overlay_update_pending = false;
 static bool s_local_overlay_region_valid = false;
 static animation_overlay_region_t s_local_overlay_region = {0};
@@ -5713,6 +6264,59 @@ static void local_gesture_event_cb(lv_event_t *event) {
     }
 }
 
+static void local_pointer_swipe_event_cb(lv_event_t *event) {
+    const lv_event_code_t code = lv_event_get_code(event);
+    lv_indev_t *indev = lv_event_get_indev(event);
+    lv_point_t point = {0};
+
+    if (indev == NULL || lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) {
+        return;
+    }
+
+    if (code == LV_EVENT_PRESSED) {
+        if (local_exit_is_visible()) {
+            s_local_pointer_swipe_tracking = false;
+            return;
+        }
+        lv_indev_get_point(indev, &s_local_pointer_swipe_start);
+        s_local_pointer_swipe_tracking = true;
+        return;
+    }
+
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        s_local_pointer_swipe_tracking = false;
+        return;
+    }
+
+    if (code != LV_EVENT_PRESSING || !s_local_pointer_swipe_tracking || local_exit_is_visible()) {
+        return;
+    }
+
+    lv_indev_get_point(indev, &point);
+    if (point.y - s_local_pointer_swipe_start.y <= -LOCAL_EXIT_SWIPE_MIN_DISTANCE_PX &&
+        LV_ABS(point.x - s_local_pointer_swipe_start.x) <= LOCAL_EXIT_SWIPE_MAX_HORIZONTAL_DRIFT_PX) {
+        s_local_pointer_swipe_tracking = false;
+        ESP_LOGW(TAG, "Local pointer swipe up: start=(%d,%d) point=(%d,%d)", (int)s_local_pointer_swipe_start.x,
+                 (int)s_local_pointer_swipe_start.y, (int)point.x, (int)point.y);
+        local_show_exit();
+        lv_indev_wait_release(indev);
+    }
+}
+
+static void local_register_pointer_swipe_handlers(lv_obj_t *obj) {
+    if (obj == NULL) {
+        return;
+    }
+
+    lv_obj_remove_event_cb(obj, local_pointer_swipe_event_cb);
+    lv_obj_add_event_cb(obj, local_pointer_swipe_event_cb, LV_EVENT_ALL, NULL);
+
+    const uint32_t child_count = lv_obj_get_child_cnt(obj);
+    for (uint32_t index = 0; index < child_count; ++index) {
+        local_register_pointer_swipe_handlers(lv_obj_get_child(obj, index));
+    }
+}
+
 static void local_exit_attach_locked(void) {
     lv_obj_t *screen = lv_disp_get_scr_act(NULL);
     lv_obj_t *overlay_parent = lv_layer_top();
@@ -5724,6 +6328,7 @@ static void local_exit_attach_locked(void) {
     s_local_exit_hide_at_us = 0;
     s_local_exit_show_since_us = 0;
     s_local_exit_visible = false;
+    s_local_pointer_swipe_tracking = false;
 
     if (screen == NULL) {
         return;
@@ -5733,6 +6338,7 @@ static void local_exit_attach_locked(void) {
     lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(screen, local_touch_event_cb, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_add_event_cb(screen, local_gesture_event_cb, LV_EVENT_GESTURE, NULL);
+    local_register_pointer_swipe_handlers(screen);
 
     if (overlay_parent == NULL) {
         overlay_parent = screen;
@@ -5787,6 +6393,7 @@ static void local_app_cleanup(void) {
     s_local_exit_show_since_us = 0;
     s_local_exit_hide_at_us = 0;
     s_local_exit_visible = false;
+    s_local_pointer_swipe_tracking = false;
     lvgl_port_unlock();
     local_apply_exit_anim_protection();
 }
@@ -6088,7 +6695,7 @@ static void voice_app_on_open(void) {
     sfx_service_set_voice_audio_busy(true);
     sfx_service_stop();
     voice_recorder_reset_transport();
-    ws_client_set_behavior_feedback_enabled(true);
+    ws_client_set_behavior_feedback_enabled(false);
     voice_recorder_init();
     voice_runtime_request_start(open_reason);
     s_boot_completed = true;
@@ -6497,6 +7104,14 @@ static void sdk_control_restore_control_ui(void) {
     sdk_control_show_connected();
 }
 
+#if CONFIG_WATCHER_DEBUG_CLI_ENABLE
+static void sdk_control_show_input_debug(const char *line) {
+    lvgl_port_lock(0);
+    sdk_control_ui_show_input_debug(&s_sdk_control_ui, line);
+    lvgl_port_unlock();
+}
+#endif
+
 static bool sdk_control_prepare_animation(void) {
     local_app_cleanup();
     display_ui_set_text_suppressed(false);
@@ -6532,6 +7147,9 @@ static void configure_sdk_control_app(void) {
         .close_ui = sdk_control_close_ui,
         .tick_ui = local_app_tick,
         .on_button = local_app_on_button,
+#if CONFIG_WATCHER_DEBUG_CLI_ENABLE
+        .show_input_debug = sdk_control_show_input_debug,
+#endif
     };
     sdk_control_app_configure(&ui);
 }
@@ -6773,7 +7391,7 @@ static void agent_app_stage_changed(agent_runtime_stage_t stage, agent_runtime_e
         break;
     case AGENT_RUNTIME_STAGE_THINKING:
         agent_app_set_local_sfx_suppressed(true, agent_runtime_stage_name(stage));
-        ESP_LOGI(TAG, "Agent waiting for a response; preserving current behavior state");
+        agent_app_show_activity("thinking", "thinking");
         break;
     case AGENT_RUNTIME_STAGE_SPEAKING:
         agent_app_set_local_sfx_suppressed(true, agent_runtime_stage_name(stage));
@@ -6872,14 +7490,6 @@ static void agent_audio_done(void *user_ctx) {
         return;
     }
     agent_runtime_on_audio_playback_done();
-}
-
-static void agent_audio_started(void *user_ctx) {
-    (void)user_ctx;
-    if (!active_app_is("agent.app")) {
-        return;
-    }
-    agent_runtime_on_audio_playback_started();
 }
 
 static void agent_realtime_ready(void *user_ctx) {
@@ -7038,11 +7648,7 @@ static void agent_runtime_recorder_suspend_cloud_audio(void *user_ctx) {
 
 static esp_err_t agent_runtime_audio_player_start(void *user_ctx) {
     (void)user_ctx;
-    esp_err_t ret = agent_audio_player_start(agent_audio_done, NULL);
-    if (ret == ESP_OK) {
-        agent_audio_player_set_playback_started_callback(agent_audio_started, NULL);
-    }
-    return ret;
+    return agent_audio_player_start(agent_audio_done, NULL);
 }
 
 static void agent_runtime_audio_player_stop(void *user_ctx) {
@@ -7260,8 +7866,7 @@ static const watcher_app_t s_phone_control_app = {
     .icon = "phone-control",
     .theme_color = 0x145C65,
     .resource_mode = WATCHER_APP_RESOURCE_BLE_ONLY,
-    .resources =
-        WATCHER_APP_RESOURCE_SET_WIFI_STA | WATCHER_APP_RESOURCE_SET_BLE | WATCHER_APP_RESOURCE_SET_MCU_RUNTIME,
+    .resources = WATCHER_APP_RESOURCE_SET_BLE | WATCHER_APP_RESOURCE_SET_MCU_RUNTIME,
     .input_context = WATCHER_INPUT_CONTEXT_APP_ACTION,
     .get_input_context = phone_control_input_context,
     .on_open = phone_control_app_on_open,
@@ -8561,7 +9166,7 @@ static bool power_monitor_behavior_gate(power_monitor_behavior_t behavior, const
 
 static void client_app_start_transport(void) {
     s_boot_completed = true;
-    ws_client_set_behavior_feedback_enabled(true);
+    ws_client_set_behavior_feedback_enabled(false);
     voice_recorder_suspend_cloud_audio();
     s_cloud_runtime_started = false;
     transport_reset_cached_ws_resume_state();
@@ -8959,6 +9564,10 @@ void app_main(void) {
         if (!s_shutdown_in_progress) {
             provisioning_feedback_tick();
         }
+        int32_t app_rotate_diff = 0;
+        if (!s_shutdown_in_progress && watcher_input_router_global_consume_app_rotation(&app_rotate_diff)) {
+            on_roller_rotate_dispatch(app_rotate_diff);
+        }
         if (!s_shutdown_in_progress && watcher_input_router_global_consume_app_click()) {
             on_button_single_click_dispatch();
         } else if (s_shutdown_in_progress) {
@@ -8988,6 +9597,9 @@ void app_main(void) {
         }
         if (voice_app_active) {
             voice_runtime_tick();
+        }
+        if (voice_app_active) {
+            voice_app_track_tts_lifecycle(voice_app_active);
         }
         (void)power_monitor_service_tick(launcher_app_active);
         if (ble_app_active || phone_control_app_active || provision_app_active) {

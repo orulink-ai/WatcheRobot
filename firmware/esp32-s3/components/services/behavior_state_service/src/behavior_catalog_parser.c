@@ -1,6 +1,6 @@
 #include "behavior_catalog_parser.h"
-#include "behavior_memory.h"
 #include "animation_playback_policy.h"
+#include "behavior_memory.h"
 
 #include "cJSON.h"
 
@@ -41,8 +41,7 @@ static cJSON *parser_get_item_alias(cJSON *obj, const char *primary, const char 
     return item != NULL || legacy == NULL ? item : cJSON_GetObjectItem(obj, legacy);
 }
 
-static int parser_get_non_negative_int_alias(cJSON *obj, const char *primary, const char *legacy,
-                                             int default_value) {
+static int parser_get_non_negative_int_alias(cJSON *obj, const char *primary, const char *legacy, int default_value) {
     cJSON *item = parser_get_item_alias(obj, primary, legacy);
     if (item != NULL && cJSON_IsNumber(item) && item->valuedouble >= 0) {
         return item->valueint;
@@ -245,8 +244,8 @@ static esp_err_t parse_expression_events(cJSON *array, behavior_anim_validator_t
             free(events);
             return ESP_ERR_INVALID_ARG;
         }
-        if (!animation_playback_request_is_valid(
-                playback_mode, repeat_item != NULL ? (uint16_t)repeat_item->valueint : 0U)) {
+        if (!animation_playback_request_is_valid(playback_mode,
+                                                 repeat_item != NULL ? (uint16_t)repeat_item->valueint : 0U)) {
             free(events);
             return ESP_ERR_INVALID_ARG;
         }
@@ -390,8 +389,8 @@ static esp_err_t parse_light_events(cJSON *array, behavior_light_event_t **out_e
         repeat_count = parser_get_non_negative_int_alias(item, "repeat", "repeat_count", 0);
         at_ms = (uint32_t)parser_get_non_negative_int(item, "at_ms", 0);
         event_end_ms = (uint64_t)at_ms + (uint64_t)period_ms * (uint64_t)repeat_count;
-        if (red > UINT8_MAX || green > UINT8_MAX || blue > UINT8_MAX || brightness > 100 ||
-            period_ms > UINT16_MAX || repeat_count > UINT16_MAX || event_end_ms > UINT32_MAX) {
+        if (red > UINT8_MAX || green > UINT8_MAX || blue > UINT8_MAX || brightness > 100 || period_ms > UINT16_MAX ||
+            repeat_count > UINT16_MAX || event_end_ms > UINT32_MAX) {
             free(events);
             return ESP_ERR_INVALID_ARG;
         }
@@ -477,16 +476,15 @@ static esp_err_t parse_state_def(const char *state_id, cJSON *obj, behavior_anim
     }
 
     ret = parse_expression_events(parser_get_item_alias(obj, "animation", "expression"), anim_validator,
-                                  anim_validator_ctx,
-                                  &out_state->expression, &out_state->expression_count, &timeline_end_ms);
+                                  anim_validator_ctx, &out_state->expression, &out_state->expression_count,
+                                  &timeline_end_ms);
     if (ret != ESP_OK) {
         free(out_state->motion);
         memset(out_state, 0, sizeof(*out_state));
         return ret;
     }
 
-    ret = parse_sound_events(parser_get_item_alias(obj, "audio", "sound"), &out_state->sound,
-                             &out_state->sound_count,
+    ret = parse_sound_events(parser_get_item_alias(obj, "audio", "sound"), &out_state->sound, &out_state->sound_count,
                              &timeline_end_ms);
     if (ret != ESP_OK) {
         free(out_state->motion);
@@ -558,8 +556,7 @@ esp_err_t behavior_catalog_parse_json(const char *json, size_t json_len, behavio
     parser_copy_string(catalog.version, sizeof(catalog.version),
                        parser_get_string(root, "schema_version") != NULL
                            ? parser_get_string(root, "schema_version")
-                           : (parser_get_string(root, "version") != NULL ? parser_get_string(root, "version")
-                                                                         : "1.0"));
+                           : (parser_get_string(root, "version") != NULL ? parser_get_string(root, "version") : "1.0"));
     parser_copy_string(catalog.default_state, sizeof(catalog.default_state),
                        parser_get_string(root, "default_behavior") != NULL
                            ? parser_get_string(root, "default_behavior")

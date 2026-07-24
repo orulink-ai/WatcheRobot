@@ -5,10 +5,9 @@
 #include <string.h>
 
 static void test_parse_authenticate(void) {
-    static const char json[] =
-        "{\"type\":\"sys.sdk.authenticate\",\"code\":0,\"data\":{"
-        "\"command_id\":\"auth-1\",\"pairing_code\":\"123456\","
-        "\"protocol_version\":\"1.0\",\"client_name\":\"pytest\"}}";
+    static const char json[] = "{\"type\":\"sys.sdk.authenticate\",\"code\":0,\"data\":{"
+                               "\"command_id\":\"auth-1\",\"pairing_code\":\"123456\","
+                               "\"protocol_version\":\"1.0\",\"client_name\":\"pytest\"}}";
     watcher_sdk_protocol_command_t command = {0};
 
     assert(watcher_sdk_protocol_parse(json, strlen(json), &command) == WATCHER_SDK_PROTOCOL_OK);
@@ -19,9 +18,8 @@ static void test_parse_authenticate(void) {
 }
 
 static void test_parse_behavior_play(void) {
-    static const char json[] =
-        "{\"type\":\"ctrl.behavior.play\",\"code\":0,\"data\":{"
-        "\"command_id\":\"cmd-1\",\"behavior_id\":\"greeting\",\"repeat\":1}}";
+    static const char json[] = "{\"type\":\"ctrl.behavior.play\",\"code\":0,\"data\":{"
+                               "\"command_id\":\"cmd-1\",\"behavior_id\":\"greeting\",\"repeat\":1}}";
     watcher_sdk_protocol_command_t command = {0};
 
     assert(watcher_sdk_protocol_parse(json, strlen(json), &command) == WATCHER_SDK_PROTOCOL_OK);
@@ -31,10 +29,9 @@ static void test_parse_behavior_play(void) {
 }
 
 static void test_parse_motion_move_to(void) {
-    static const char json[] =
-        "{\"type\":\"ctrl.motion.move_to\",\"code\":0,\"data\":{"
-        "\"command_id\":\"cmd-2\",\"pan_deg\":110,\"tilt_deg\":120,"
-        "\"duration_ms\":500,\"profile\":\"ease_in_out\"}}";
+    static const char json[] = "{\"type\":\"ctrl.motion.move_to\",\"code\":0,\"data\":{"
+                               "\"command_id\":\"cmd-2\",\"pan_deg\":110,\"tilt_deg\":120,"
+                               "\"duration_ms\":500,\"profile\":\"ease_in_out\"}}";
     watcher_sdk_protocol_command_t command = {0};
 
     assert(watcher_sdk_protocol_parse(json, strlen(json), &command) == WATCHER_SDK_PROTOCOL_OK);
@@ -46,9 +43,8 @@ static void test_parse_motion_move_to(void) {
 }
 
 static void test_parse_light_color(void) {
-    static const char json[] =
-        "{\"type\":\"ctrl.light.set\",\"code\":0,\"data\":{"
-        "\"command_id\":\"cmd-3\",\"color\":\"#4DA3FF\",\"brightness\":0.7,\"zone\":\"all\"}}";
+    static const char json[] = "{\"type\":\"ctrl.light.set\",\"code\":0,\"data\":{"
+                               "\"command_id\":\"cmd-3\",\"color\":\"#4DA3FF\",\"brightness\":0.7,\"zone\":\"all\"}}";
     watcher_sdk_protocol_command_t command = {0};
 
     assert(watcher_sdk_protocol_parse(json, strlen(json), &command) == WATCHER_SDK_PROTOCOL_OK);
@@ -76,18 +72,16 @@ static void test_parse_audio_stream_begin(void) {
 }
 
 static void test_rejects_missing_command_id(void) {
-    static const char json[] =
-        "{\"type\":\"ctrl.audio.play\",\"code\":0,\"data\":{\"sound_id\":\"confirm\"}}";
+    static const char json[] = "{\"type\":\"ctrl.audio.play\",\"code\":0,\"data\":{\"sound_id\":\"confirm\"}}";
     watcher_sdk_protocol_command_t command = {0};
 
     assert(watcher_sdk_protocol_parse(json, strlen(json), &command) == WATCHER_SDK_PROTOCOL_INVALID_ARGUMENT);
 }
 
 static void test_rejects_truncated_external_identifiers(void) {
-    static const char long_command_id_json[] =
-        "{\"type\":\"ctrl.audio.play\",\"code\":0,\"data\":{"
-        "\"command_id\":\"123456789012345678901234567890123456789012345678\","
-        "\"sound_id\":\"confirm\"}}";
+    static const char long_command_id_json[] = "{\"type\":\"ctrl.audio.play\",\"code\":0,\"data\":{"
+                                               "\"command_id\":\"123456789012345678901234567890123456789012345678\","
+                                               "\"sound_id\":\"confirm\"}}";
     static const char long_resource_id_json[] =
         "{\"type\":\"ctrl.audio.play\",\"code\":0,\"data\":{"
         "\"command_id\":\"cmd-long-resource\","
@@ -101,25 +95,22 @@ static void test_rejects_truncated_external_identifiers(void) {
 }
 
 static void test_rejects_pairing_code_prefix_attack(void) {
-    static const char json[] =
-        "{\"type\":\"sys.sdk.authenticate\",\"code\":0,\"data\":{"
-        "\"command_id\":\"auth-prefix\",\"pairing_code\":\"123456-extra\","
-        "\"protocol_version\":\"1.0\",\"client_name\":\"pytest\"}}";
+    static const char json[] = "{\"type\":\"sys.sdk.authenticate\",\"code\":0,\"data\":{"
+                               "\"command_id\":\"auth-prefix\",\"pairing_code\":\"123456-extra\","
+                               "\"protocol_version\":\"1.0\",\"client_name\":\"pytest\"}}";
     watcher_sdk_protocol_command_t command = {0};
 
     assert(watcher_sdk_protocol_parse(json, strlen(json), &command) == WATCHER_SDK_PROTOCOL_INVALID_ARGUMENT);
 }
 
 static void test_rejects_invalid_optional_values_instead_of_defaulting(void) {
-    static const char invalid_repeat[] =
-        "{\"type\":\"ctrl.behavior.play\",\"code\":0,\"data\":{"
-        "\"command_id\":\"bad-repeat\",\"behavior_id\":\"greeting\",\"repeat\":0}}";
+    static const char invalid_repeat[] = "{\"type\":\"ctrl.behavior.play\",\"code\":0,\"data\":{"
+                                         "\"command_id\":\"bad-repeat\",\"behavior_id\":\"greeting\",\"repeat\":0}}";
     static const char invalid_brightness[] =
         "{\"type\":\"ctrl.light.set\",\"code\":0,\"data\":{"
         "\"command_id\":\"bad-brightness\",\"color\":\"#4DA3FF\",\"brightness\":1.1}}";
-    static const char invalid_sample_rate[] =
-        "{\"type\":\"ctrl.microphone.open\",\"code\":0,\"data\":{"
-        "\"command_id\":\"bad-sample-rate\",\"sample_rate_hz\":8000}}";
+    static const char invalid_sample_rate[] = "{\"type\":\"ctrl.microphone.open\",\"code\":0,\"data\":{"
+                                              "\"command_id\":\"bad-sample-rate\",\"sample_rate_hz\":8000}}";
     watcher_sdk_protocol_command_t command = {0};
 
     assert(watcher_sdk_protocol_parse(invalid_repeat, strlen(invalid_repeat), &command) ==
@@ -156,9 +147,54 @@ static void test_builds_operation_event(void) {
 static void test_ready_advertises_host_audio_streaming(void) {
     char json[768];
 
-    assert(watcher_sdk_protocol_build_ready("watcher-test", "test", json, sizeof(json)) ==
-           WATCHER_SDK_PROTOCOL_OK);
+    assert(watcher_sdk_protocol_build_ready("watcher-test", "test", json, sizeof(json)) == WATCHER_SDK_PROTOCOL_OK);
     assert(strstr(json, "\"audio.stream\"") != NULL);
+}
+
+static void test_ready_advertises_input_events(void) {
+    char json[768];
+
+    assert(watcher_sdk_protocol_build_ready("watcher-test", "test", json, sizeof(json)) == WATCHER_SDK_PROTOCOL_OK);
+    assert(strstr(json, "\"input.back_touch\"") != NULL);
+    assert(strstr(json, "\"input.screen_touch\"") != NULL);
+    assert(strstr(json, "\"input.roller\"") != NULL);
+}
+
+static void test_builds_typed_input_events(void) {
+    char json[256];
+    watcher_sdk_input_event_t event = {
+        .source = WATCHER_SDK_INPUT_SCREEN_TOUCH,
+        .action = WATCHER_SDK_INPUT_ACTION_TAP,
+        .timestamp_ms = 1234U,
+        .x = 120,
+        .y = 220,
+    };
+
+    assert(watcher_sdk_protocol_build_input_event(&event, json, sizeof(json)) == WATCHER_SDK_PROTOCOL_OK);
+    assert(strstr(json, "\"type\":\"evt.sdk.input\"") != NULL);
+    assert(strstr(json, "\"source\":\"screen_touch\"") != NULL);
+    assert(strstr(json, "\"action\":\"tap\"") != NULL);
+    assert(strstr(json, "\"timestamp_ms\":1234") != NULL);
+    assert(strstr(json, "\"x\":120") != NULL);
+    assert(strstr(json, "\"y\":220") != NULL);
+
+    event.source = WATCHER_SDK_INPUT_BACK_TOUCH;
+    event.action = WATCHER_SDK_INPUT_ACTION_RELEASE;
+    event.touch_id = 0U;
+    assert(watcher_sdk_protocol_build_input_event(&event, json, sizeof(json)) == WATCHER_SDK_PROTOCOL_OK);
+    assert(strstr(json, "\"source\":\"back_touch\"") != NULL);
+    assert(strstr(json, "\"action\":\"release\"") != NULL);
+    assert(strstr(json, "\"touch_id\":0") != NULL);
+
+    event.source = WATCHER_SDK_INPUT_ROLLER;
+    event.action = WATCHER_SDK_INPUT_ACTION_ROTATE;
+    event.delta = -1;
+    assert(watcher_sdk_protocol_build_input_event(&event, json, sizeof(json)) == WATCHER_SDK_PROTOCOL_OK);
+    assert(strstr(json, "\"source\":\"roller\"") != NULL);
+    assert(strstr(json, "\"delta\":-1") != NULL);
+
+    event.delta = 0;
+    assert(watcher_sdk_protocol_build_input_event(&event, json, sizeof(json)) == WATCHER_SDK_PROTOCOL_INVALID_ARGUMENT);
 }
 
 int main(void) {
@@ -174,6 +210,8 @@ int main(void) {
     test_type_filter_does_not_capture_legacy_control_routes();
     test_builds_operation_event();
     test_ready_advertises_host_audio_streaming();
+    test_ready_advertises_input_events();
+    test_builds_typed_input_events();
     puts("watcher_sdk_protocol_host_tests: PASS");
     return 0;
 }

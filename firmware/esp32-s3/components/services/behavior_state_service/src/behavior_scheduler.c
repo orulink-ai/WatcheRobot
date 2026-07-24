@@ -9,12 +9,18 @@ bool behavior_scheduler_state_motion_overridden(const behavior_action_def_t *act
     return action != NULL;
 }
 
-bool behavior_scheduler_action_should_loop(const behavior_state_def_t *state, const behavior_action_def_t *action) {
-    if (state == NULL || action == NULL) {
+bool behavior_scheduler_action_should_loop(const behavior_state_def_t *state, const behavior_action_def_t *action,
+                                           bool loop_enabled) {
+    if (!loop_enabled || state == NULL || action == NULL) {
         return false;
     }
 
     return state->loop || state->hold_until_replaced;
+}
+
+animation_playback_mode_t behavior_scheduler_effective_animation_playback(animation_playback_mode_t state_mode,
+                                                                          bool resources_one_shot) {
+    return resources_one_shot ? ANIM_PLAYBACK_ONCE : state_mode;
 }
 
 bool behavior_scheduler_all_action_events_dispatched(const behavior_action_def_t *action,

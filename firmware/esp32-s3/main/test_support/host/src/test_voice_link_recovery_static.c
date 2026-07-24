@@ -151,14 +151,13 @@ static int expect_recorder_has_bounded_upload_abort(const char *root) {
             fprintf(stderr, "FAIL: recorder abort must not submit partial audio as a normal LAST frame\n");
             failures++;
         }
-        if (strstr(abort_begin, "behavior_state_set_with_text(\"error\"") != NULL ||
-            strstr(abort_begin, "schedule_upload_error_recovery();") != NULL) {
-            fprintf(stderr, "FAIL: recorder abort must not change the local voice state\n");
+        if (strstr(abort_begin, "schedule_upload_error_recovery();") == NULL) {
+            fprintf(stderr, "FAIL: recorder abort must schedule recovery from the transient error UI\n");
             failures++;
         }
     }
-    if (strstr(text, "schedule_upload_error_recovery") != NULL || strstr(text, "behavior_state_cancel();") != NULL) {
-        fprintf(stderr, "FAIL: upload error recovery UI must not remain in the voice recorder\n");
+    if (strstr(text, "behavior_state_cancel();") == NULL) {
+        fprintf(stderr, "FAIL: upload error recovery must return behavior UI to its default state\n");
         failures++;
     }
     free(text);
@@ -225,6 +224,20 @@ static int expect_tts_downlink_is_buffered_without_callback_lock_reentry(const c
         fprintf(stderr, "FAIL: TTS completion must wait for worker ownership and hardware DMA drain\n");
         failures++;
     }
+    begin = strstr(text, "static void ws_tts_worker_task(void *arg)");
+    end = begin != NULL ? strstr(begin, "static void ws_write_u32_le(") : NULL;
+    if (begin == NULL || end == NULL) {
+        fprintf(stderr, "FAIL: could not locate TTS playback worker section\n");
+        failures++;
+    } else {
+        char saved = *end;
+        *end = '\0';
+        if (strstr(begin, "ws_maybe_send_tts_buffer_status(\"buffering\")") == NULL) {
+            fprintf(stderr, "FAIL: TTS worker must report credit while waiting for the start buffer\n");
+            failures++;
+        }
+        *end = saved;
+    }
     begin = strstr(text, "void ws_handle_tts_binary(");
     end = begin != NULL ? strstr(begin, "void ws_tts_complete(") : NULL;
     if (begin == NULL || end == NULL) {
@@ -281,24 +294,42 @@ static int expect_ai_status_cannot_preempt_active_speaking(const char *root) {
         failures++;
     } else {
         *end = '\0';
-        if (strstr(begin, "s_tts_end_pending = true") == NULL ||
-            strstr(begin, "ws_finish_tts_playback(") != NULL) {
+        if (strstr(begin, "s_tts_end_pending = true") == NULL || strstr(begin, "ws_finish_tts_playback(") != NULL) {
             fprintf(stderr, "FAIL: network EOS must only arm worker-owned completion\n");
             failures++;
         }
     }
     free(text);
 
-    snprintf(path, sizeof(path), "%s/../components/protocols/ws_client/src/ws_handlers.c", root);
+    snprintf(path, sizeof(path), "%s/../components/protocols/ws_client/src/ws_client.c", root);
     text = read_text(path);
-    if (text == NULL || strstr(text, "req.defer_ui_until_tts_complete = apply_after_tts") == NULL ||
-        strstr(text, "ws_client_is_tts_playing()") == NULL ||
-        strstr(text, "control_ingress_submit_ai_status(&req)") == NULL) {
-        fprintf(stderr, "FAIL: remote AI statuses must defer only while TTS is playing\n");
+    if (text == NULL || strstr(text, "ws_event_ui_should_apply_tts_completion(completion_state") == NULL ||
+        strstr(text, "foreground_lease_active") == NULL ||
+        strstr(text, "Skipping TTS completion presentation") == NULL ||
+        strstr(text, "TTS playout event=speaking_released") == NULL) {
+        fprintf(stderr,
+                "FAIL: TTS completion must preserve foreground handoff and skip unowned success presentation\n");
         failures++;
     }
     free(text);
 
+    snprintf(path, sizeof(path), "%s/../components/protocols/ws_client/src/ws_handlers.c", root);
+    text = read_text(path);
+    if (text == NULL || strstr(text, "req.defer_ui_until_tts_complete") == NULL ||
+        strstr(text, "ws_client_is_tts_playing()") == NULL) {
+        fprintf(stderr, "FAIL: AI statuses must defer visual replacement while TTS is playing\n");
+        failures++;
+    }
+    free(text);
+
+    snprintf(path, sizeof(path), "%s/../components/services/control_ingress/src/control_ingress.c", root);
+    text = read_text(path);
+    if (text == NULL || strstr(text, "if (req->defer_ui_until_tts_complete)") == NULL ||
+        strstr(text, "Deferred AI status UI until TTS playout completes") == NULL) {
+        fprintf(stderr, "FAIL: deferred AI status must update completion state without replacing speaking\n");
+        failures++;
+    }
+    free(text);
     return failures;
 }
 

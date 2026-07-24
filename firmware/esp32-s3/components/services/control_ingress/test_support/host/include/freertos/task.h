@@ -7,8 +7,8 @@ typedef void *TaskHandle_t;
 
 extern unsigned control_ingress_host_last_task_stack_depth;
 
-static inline BaseType_t xTaskCreate(void (*task_fn)(void *), const char *name, unsigned stack_depth,
-                                     void *arg, unsigned priority, TaskHandle_t *out_handle) {
+static inline BaseType_t xTaskCreate(void (*task_fn)(void *), const char *name, unsigned stack_depth, void *arg,
+                                     unsigned priority, TaskHandle_t *out_handle) {
     (void)task_fn;
     (void)name;
     control_ingress_host_last_task_stack_depth = stack_depth;

@@ -95,8 +95,7 @@ static void test_direct_operations_on_different_domains_can_run_together(void) {
 
     assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_MOTION, 0U, 100U, &motion_id) ==
            WATCHER_SDK_RESULT_OK);
-    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_AUDIO, 0U, 0U, &audio_id) ==
-           WATCHER_SDK_RESULT_OK);
+    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_AUDIO, 0U, 0U, &audio_id) == WATCHER_SDK_RESULT_OK);
 
     assert(motion_id != audio_id);
     assert(watcher_sdk_core_get_state(&core, motion_id) == WATCHER_SDK_JOB_RUNNING);
@@ -110,10 +109,8 @@ static void test_replacing_same_domain_cancels_previous_job(void) {
     watcher_sdk_job_id_t first_id = WATCHER_SDK_JOB_INVALID;
     watcher_sdk_job_id_t second_id = WATCHER_SDK_JOB_INVALID;
 
-    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_AUDIO, 0U, 0U, &first_id) ==
-           WATCHER_SDK_RESULT_OK);
-    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_AUDIO, 1U, 0U, &second_id) ==
-           WATCHER_SDK_RESULT_OK);
+    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_AUDIO, 0U, 0U, &first_id) == WATCHER_SDK_RESULT_OK);
+    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_AUDIO, 1U, 0U, &second_id) == WATCHER_SDK_RESULT_OK);
 
     assert(watcher_sdk_core_get_state(&core, first_id) == WATCHER_SDK_JOB_CANCELLED);
     assert(watcher_sdk_core_get_state(&core, second_id) == WATCHER_SDK_JOB_RUNNING);
@@ -126,8 +123,7 @@ static void test_cancel_is_idempotent(void) {
     watcher_sdk_core_t core = make_core(&executor);
     watcher_sdk_job_id_t job_id = WATCHER_SDK_JOB_INVALID;
 
-    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_MOTION, 0U, 100U, &job_id) ==
-           WATCHER_SDK_RESULT_OK);
+    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_MOTION, 0U, 100U, &job_id) == WATCHER_SDK_RESULT_OK);
     assert(watcher_sdk_core_cancel(&core, job_id) == WATCHER_SDK_RESULT_OK);
     assert(watcher_sdk_core_cancel(&core, job_id) == WATCHER_SDK_RESULT_OK);
     assert(executor.cancelled_count == 1U);
@@ -138,8 +134,7 @@ static void test_observed_cancel_does_not_stop_executor_again(void) {
     watcher_sdk_core_t core = make_core(&executor);
     watcher_sdk_job_id_t job_id = WATCHER_SDK_JOB_INVALID;
 
-    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_MOTION, 0U, 0U, &job_id) ==
-           WATCHER_SDK_RESULT_OK);
+    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_MOTION, 0U, 0U, &job_id) == WATCHER_SDK_RESULT_OK);
     assert(watcher_sdk_core_cancel_observed(&core, job_id) == WATCHER_SDK_RESULT_OK);
     assert(watcher_sdk_core_get_state(&core, job_id) == WATCHER_SDK_JOB_CANCELLED);
     assert(executor.cancelled_count == 0U);
@@ -150,8 +145,7 @@ static void test_timed_job_completes_on_tick(void) {
     watcher_sdk_core_t core = make_core(&executor);
     watcher_sdk_job_id_t job_id = WATCHER_SDK_JOB_INVALID;
 
-    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_MOTION, 10U, 50U, &job_id) ==
-           WATCHER_SDK_RESULT_OK);
+    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_MOTION, 10U, 50U, &job_id) == WATCHER_SDK_RESULT_OK);
     watcher_sdk_core_tick(&core, 59U);
     assert(watcher_sdk_core_get_state(&core, job_id) == WATCHER_SDK_JOB_RUNNING);
     watcher_sdk_core_tick(&core, 60U);
@@ -166,8 +160,7 @@ static void test_disconnect_cancels_every_running_job(void) {
 
     assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_MOTION, 0U, 0U, &motion_id) ==
            WATCHER_SDK_RESULT_OK);
-    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_AUDIO, 0U, 0U, &audio_id) ==
-           WATCHER_SDK_RESULT_OK);
+    assert(watcher_sdk_core_start_direct(&core, WATCHER_SDK_DOMAIN_AUDIO, 0U, 0U, &audio_id) == WATCHER_SDK_RESULT_OK);
 
     watcher_sdk_core_cancel_all(&core);
 

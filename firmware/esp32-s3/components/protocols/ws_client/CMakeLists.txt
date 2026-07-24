@@ -1,9 +1,11 @@
 idf_component_register(
     SRCS
         "src/ws_client.c"
+        "src/ws_event_ui_policy.c"
         "src/ws_audio_uplink_policy.c"
         "src/ws_audio_codec_negotiation.c"
         "src/ws_tts_buffer_policy.c"
+        "src/ws_tts_stream_policy.c"
         "src/ws_router.c"
         "src/ws_handlers.c"
     INCLUDE_DIRS "include"

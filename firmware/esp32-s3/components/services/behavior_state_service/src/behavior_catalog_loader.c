@@ -45,9 +45,9 @@ static esp_err_t read_candidate(const char *path, size_t max_bytes, char **out_j
 }
 
 esp_err_t behavior_catalog_load_first_valid(const behavior_catalog_candidate_t *candidates, size_t candidate_count,
-                                             size_t max_bytes, behavior_anim_validator_t anim_validator,
-                                             void *anim_validator_ctx, behavior_catalog_t *out_catalog,
-                                             size_t *out_selected_index) {
+                                            size_t max_bytes, behavior_anim_validator_t anim_validator,
+                                            void *anim_validator_ctx, behavior_catalog_t *out_catalog,
+                                            size_t *out_selected_index) {
     esp_err_t last_error = ESP_ERR_NOT_FOUND;
     size_t index;
 

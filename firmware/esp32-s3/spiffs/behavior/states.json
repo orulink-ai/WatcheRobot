@@ -317,10 +317,10 @@
       "sound": []
     },
     "fondle_anger": {
-      "loop": true,
+      "loop": false,
       "motion": [],
       "expression": [
-        { "at_ms": 0, "anim": "fondle_anger", "playback_mode": "loop_until_replaced", "text": "", "font_size": 24 }
+        { "at_ms": 0, "anim": "fondle_anger", "playback_mode": "once", "text": "", "font_size": 24 }
       ],
       "sound": []
     },

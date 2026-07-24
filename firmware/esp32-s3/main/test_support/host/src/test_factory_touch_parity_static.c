@@ -339,12 +339,59 @@ static int patterns_in_order(const char *root, const char *relative, const char 
     return failures;
 }
 
+static int function_patterns_in_order(const char *root, const char *relative, const char *function_marker,
+                                      const char *const *patterns, size_t count) {
+    int failures = 0;
+    char *path = join_path(root, relative);
+    char *text = path != NULL ? read_file(path) : NULL;
+    char *normalized_function = NULL;
+    const char *start;
+    const char *end;
+    const char *cursor;
+
+    failures += expect_true(text != NULL, relative);
+    if (text == NULL) {
+        free(path);
+        return failures;
+    }
+
+    start = strstr(text, function_marker);
+    failures += expect_true(start != NULL, function_marker);
+    if (start != NULL) {
+        end = strstr(start + strlen(function_marker), "\nstatic ");
+        if (end == NULL) {
+            end = text + strlen(text);
+        }
+        normalized_function = remove_whitespace(start, (size_t)(end - start));
+        failures += expect_true(normalized_function != NULL, "normalize ordered function source");
+    }
+
+    cursor = normalized_function;
+    for (size_t i = 0; i < count; ++i) {
+        char *normalized_pattern = remove_whitespace(patterns[i], strlen(patterns[i]));
+        const char *found = cursor != NULL && normalized_pattern != NULL ? strstr(cursor, normalized_pattern) : NULL;
+        failures += expect_true(found != NULL, patterns[i]);
+        if (found != NULL) {
+            cursor = found + strlen(normalized_pattern);
+        }
+        free(normalized_pattern);
+    }
+
+    free(normalized_function);
+    free(text);
+    free(path);
+    return failures;
+}
+
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] : "../..";
     int failures = 0;
     const char *const touch_required[] = {
         "static void lvgl_port_touchpad_read",
-        "esp_lcd_touch_read_data(touch_ctx->handle);",
+        "esp_err_t read_result = esp_lcd_touch_read_data(touch_ctx->handle);",
+        "if (read_result != ESP_OK)",
+        "data->state = LV_INDEV_STATE_RELEASED;",
+        "debug screen touch read failed",
         "esp_lcd_touch_get_coordinates(touch_ctx->handle",
         "touchpad_strength[0] > touch_ctx->sensitivity",
     };
@@ -407,6 +454,7 @@ int main(int argc, char **argv) {
         "lv_indev_wait_release(lv_indev_get_act())",
         "lv_group_focus_next(s_group)",
         "lv_group_focus_prev(s_group)",
+        "lv_obj_clear_flag(s_page_home, LV_OBJ_FLAG_GESTURE_BUBBLE);",
         "if (code == LV_EVENT_CLICKED)",
         "launcher_factory_home_click_focused();",
     };
@@ -795,7 +843,9 @@ int main(int argc, char **argv) {
         "{.title = \"App\\nCenter\"",
     };
     const char *const phone_control_runtime_required[] = {
-        ".resources = WATCHER_APP_RESOURCE_SET_WIFI_STA | WATCHER_APP_RESOURCE_SET_BLE |",
+        ".resources = WATCHER_APP_RESOURCE_SET_BLE | WATCHER_APP_RESOURCE_SET_MCU_RUNTIME,",
+        "requires_wifi = (resources & WATCHER_APP_RESOURCE_SET_WIFI_STA) != 0;",
+        "app_resource_release_wifi_if_unused(app_id);",
         "requires_mcu_runtime = (resources & WATCHER_APP_RESOURCE_SET_MCU_RUNTIME) != 0;",
     };
     const char *const phone_control_firmware_exit_required[] = {
@@ -1505,7 +1555,7 @@ int main(int argc, char **argv) {
         "const char *open_reason = active_app_is(CLIENT_APP_ID) ? \"client.app open\" : \"voice.app open\";",
         "s_voice_ready_ui_shown = false;",
         "voice_app_reset_connect_ui_state();",
-        "ws_client_set_behavior_feedback_enabled(true);",
+        "ws_client_set_behavior_feedback_enabled(false);",
         "voice_runtime_request_start(open_reason)",
         "local_behavior_ui_open_ex(\"standby\", \"\", \"\", \"\", false)",
         "voice_app_update_connect_ui_if_needed();",
@@ -1696,6 +1746,10 @@ int main(int argc, char **argv) {
         "if (!g_behavior_feedback_enabled)",
         "return;",
     };
+    const char *const voice_waiting_ui_without_animation_required[] = {
+        "behavior_state_set_with_resources(\"thinking\", \"\", 0, \"thinking\", \"\")",
+        "Thinking expression shown without body action, sound, or text",
+    };
     const char *const voice_connect_retry_restart_required[] = {
         "transport_abort_discovery_request(\"voice connect retry\");",
         "transport_deinit_ws_stack(\"voice connect retry\")",
@@ -1784,9 +1838,8 @@ int main(int argc, char **argv) {
         "agent_runtime_complete_wake(agent_app_now_ms())",
         "agent_runtime_fail_wake(\"Agent animation transition failed\")",
         "agent_app_show_activity(\"listening\", \"listening\")",
+        "agent_app_show_activity(\"thinking\", \"thinking\")",
         "agent_app_show_activity(\"speaking\", \"speaking\")",
-        "Agent waiting for a response; preserving current behavior state",
-        "agent_runtime_on_audio_playback_started();",
         "behavior_state_set_with_resources(state_id, \"\", 0, anim_id, \"\")",
         "s_agent_activity_seen = true;",
         "s_agent_ready_ui_shown = false;",
@@ -1862,26 +1915,65 @@ int main(int argc, char **argv) {
         "return is_basic_app_active() && s_voice_runtime_stage == VOICE_RUNTIME_STAGE_READY;",
     };
     const char *const voice_ready_idle_flow_required[] = {
-        "#define READY_IDLE_STANDBY_TIMEOUT_MS 6000",
+        "#define READY_IDLE_STANDBY_TIMEOUT_MS 60000",
+        "#define READY_IDLE_AMBIENT_ACCENT_COUNT 5",
+        "#define READY_IDLE_AMBIENT_ACCENT_PERCENT 25",
         "client_voice_ready",
+        "voice_ready_idle_can_replace_busy_state",
         "behavior_state_set_with_resources(\"standby_start\", view->text, view->font_size, NULL, \"\")",
         "esp_random() % (uint32_t)available_count",
-        "s_ready_idle_last_variant_index",
-        "available_count > 1 && available[i] == s_ready_idle_last_variant_index",
+        "s_ready_idle_last_base_variant_index",
+        "s_ready_idle_last_accent_index",
+        "available_count > 1 && available[i] == s_ready_idle_last_base_variant_index",
+        "available_count > 1 && available[i] == s_ready_idle_last_accent_index",
         "filtered[esp_random() % (uint32_t)filtered_count]",
         "animation_prefetch_hint(ready_idle_variant_type(selected))",
-        "s_ready_idle_last_variant_index = selected;",
+        "behavior_state_set_with_resources_and_action_once(\"standby\", view->text, view->font_size, anim_id, \"\", "
+        "action_id)",
+        "static bool apply_ready_idle_passive_variant(const idle_hint_view_t *view, int64_t now_us)",
+        "behavior_state_set_with_resources(\"standby\", view->text, view->font_size, passive_anim_id, \"\")",
+        "s_ready_idle_phase = READY_IDLE_PHASE_PERFORMING;",
+        "s_ready_idle_phase = READY_IDLE_PHASE_RESTING;",
+        "s_ready_idle_behavior_complete_us",
+        "behavior_state_poll_animation_event(&observed)",
+        "ANIMATION_EVENT_COMPLETED",
+        "behavior_state_is_action_active()",
+        "READY_IDLE_MIN_PASSIVE_REST_MS",
+        "s_ready_idle_sleep_retry_us",
+        "behavior_state_has_action(anim_id) ? anim_id : NULL",
+        "emoji_get_loop_duration_ms(anim_type)",
+        "READY_IDLE_COMPLETION_GUARD_MS",
+        "s_ready_idle_action_owned = action_id != NULL;",
+        "s_ready_idle_last_base_variant_index = selected;",
+        "s_ready_idle_last_accent_index = selected - READY_IDLE_VARIANT_COUNT;",
+        "desired_hint == IDLE_HINT_READY && s_ready_idle_action_owned",
         "view.text = \"\";",
-        "s_ready_idle_next_switch_us = now_us + (int64_t)READY_IDLE_STANDBY_TIMEOUT_MS * 1000LL;",
+        "s_ready_idle_sleep_deadline_us = now_us + (int64_t)READY_IDLE_STANDBY_TIMEOUT_MS * 1000LL;",
+        "s_ready_idle_next_switch_us",
+        "\"blink\"",
+        "\"sunglasses\"",
+        "\"speechless\"",
+        "\"concentration\"",
+        "\"sad\"",
+        "Ready idle foreground task completed; entering ambient wait",
         "ready_idle_state_is_sleep_state",
+        "control_ingress_has_foreground_ai_lease()",
         "standby_entry",
         "standby_loop",
     };
-    const char *const voice_tts_completion_ready_idle_forbidden[] = {
+    const char *const random_touch_fondle_required[] = {
+        "static const touch_fondle_variant_t s_touch_fondle_variants[]",
+        "\"fondle_love\"",
+        "\"fondle_anger\"",
+        "esp_random() % TOUCH_FONDLE_VARIANT_COUNT",
+        "Touch press triggered %s",
+    };
+    const char *const voice_tts_completion_ready_idle_required[] = {
         "#define VOICE_TTS_COMPLETION_READY_IDLE_GRACE_MS 5000U",
         "static void voice_app_track_tts_lifecycle(bool voice_app_active)",
         "static bool voice_app_tts_completion_recent(void)",
         "s_voice_tts_completion_until_us",
+        "ws_client_is_tts_playing()",
         "Voice TTS completion observed; ready idle handoff armed",
         "strcmp(current_state, \"thinking\") == 0 && voice_app_tts_completion_recent()",
         "Voice TTS completion using text-only standby under memory pressure",
@@ -1895,6 +1987,7 @@ int main(int argc, char **argv) {
         "Ready idle lightweight standby applied for app runtime",
     };
     const char *const voice_on_open_forbidden[] = {
+        "ws_client_set_behavior_feedback_enabled(true);",
         "voice_recorder_start();",
         "local_behavior_ui_open_ex(\"processing\", \"Connecting cloud...\", \"processing\", \"\", true)",
         "emoji_anim_request_fade_in(VOICE_OPEN_ANIM_FADE_IN_MS);",
@@ -1998,6 +2091,18 @@ int main(int argc, char **argv) {
         "lv_obj_set_ext_click_area(s_local_exit, 16)",
         "lv_obj_add_event_cb(s_local_exit, local_exit_event_cb, LV_EVENT_PRESSED, NULL)",
     };
+    const char *const local_exit_pointer_swipe_required[] = {
+        "#define LOCAL_EXIT_SWIPE_MIN_DISTANCE_PX 64",
+        "static void local_pointer_swipe_event_cb",
+        "code == LV_EVENT_PRESSED",
+        "code != LV_EVENT_PRESSING",
+        "point.y - s_local_pointer_swipe_start.y <= -LOCAL_EXIT_SWIPE_MIN_DISTANCE_PX",
+        "lv_indev_wait_release(indev);",
+        "static void local_register_pointer_swipe_handlers",
+        "lv_obj_remove_event_cb(obj, local_pointer_swipe_event_cb);",
+        "lv_obj_add_event_cb(obj, local_pointer_swipe_event_cb, LV_EVENT_ALL, NULL);",
+        "local_register_pointer_swipe_handlers(screen);",
+    };
     const char *const local_exit_animation_live_required[] = {
         "static void local_update_exit_anim_protection_locked(void)",
         "static void local_apply_exit_anim_protection(void)",
@@ -2087,6 +2192,22 @@ int main(int argc, char **argv) {
         "SDK_CONTROL_UI_GREEN",   "SDK_CONTROL_UI_AMBER", "PYTHON SDK",      "PAIR CODE",     "Waiting for desktop",
         "Desktop control active", "Ready for commands",   "Connection lost", "NEW PAIR CODE", "Waiting to reconnect",
     };
+    const char *const sdk_control_ui_input_debug_required[] = {
+        "static void enable_event_bubble",
+        "lv_obj_add_flag(object, LV_OBJ_FLAG_EVENT_BUBBLE);",
+        "sdk_control_ui_show_input_debug",
+        "lv_label_set_text(ui->detail, safe_line);",
+    };
+    const char *const sdk_control_app_input_debug_required[] = {
+        "show_input_debug",
+        "sdk_format_input_debug",
+        "s_ui.show_input_debug(line);",
+    };
+    const char *const sdk_control_main_input_debug_required[] = {
+        "static void sdk_control_show_input_debug",
+        "sdk_control_ui_show_input_debug(&s_sdk_control_ui, line);",
+        ".show_input_debug = sdk_control_show_input_debug",
+    };
     const char *const sdk_control_ui_vector_emblem_required[] = {
         "SDK_CONTROL_EMBLEM_CHECK",
         "SDK_CONTROL_EMBLEM_CLOSE",
@@ -2152,6 +2273,41 @@ int main(int argc, char **argv) {
         "SDK_NET_RESET_REQUESTED",
         "SDK_NET_EXITED",
         "xEventGroupWaitBits",
+    };
+    const char *const sdk_control_hello_recovery_required[] = {
+        "#define SDK_HELLO_RESPONSE_TIMEOUT_MS 5000U",
+        "static bool sdk_hello_response_timed_out(void)",
+        "static bool sdk_request_gateway_reset(const char *reason)",
+        "SDK_NET_RESET_REQUESTED",
+        "s_session_reset_pending = true;",
+        "s_was_connected = false;",
+    };
+    const char *const sdk_control_hello_recovery_tick_required[] = {
+        "ws_client_has_hello_rejected()",
+        "sdk_request_gateway_reset(\"hello rejected\")",
+        "sdk_request_gateway_reset(\"hello response timeout\")",
+    };
+    const char *const sdk_discovery_pairing_required[] = {
+        "#include \"esp_system.h\"",
+        "#define SDK_DISCOVERY_REQUEST_ID_LENGTH 16U",
+        "static bool pairing_code_is_valid",
+        "cJSON_AddStringToObject(root, \"pairing_code\", pairing_code);",
+        "cJSON_AddStringToObject(root, \"request_id\", request_id);",
+        "strcmp(cmd->valuestring, \"ANNOUNCE\") != 0",
+        "strcmp(response_pairing_code->valuestring, pairing_code) != 0",
+        "strcmp(response_request_id->valuestring, request_id) != 0",
+        "destination.sin_addr.s_addr = htonl(INADDR_BROADCAST);",
+    };
+    const char *const sdk_discovery_pairing_forbidden[] = {
+        "#include \"esp_log.h\"",
+        "#include <errno.h>",
+        "SDK_ADVERTISE",
+        "bind(socket_handle",
+        "#include \"esp_netif.h\"",
+        "configure_discovery_destination",
+        "esp_netif_get_handle_from_ifkey",
+        "esp_netif_get_ip_info",
+        "Discovery using directed broadcast",
     };
     const char *const sdk_control_network_exit_order_required[] = {
         "s_network_task = NULL;",
@@ -2262,7 +2418,6 @@ int main(int argc, char **argv) {
         "error = camera_service_capture_once();",
         "vTaskDelay(pdMS_TO_TICKS(WATCHER_SDK_CAMERA_WARM_UP_SETTLE_MS));",
         "error = camera_service_register_frame_callback(sdk_camera_frame, context);",
-        "context->camera_initialized = true;",
     };
     const char *const hal_camera_official_capture_semantics_required[] = {
         "static esp_err_t hal_camera_request_frame(bool from_stream)",
@@ -2495,7 +2650,7 @@ int main(int argc, char **argv) {
         "emoji_anim_type_t current_emoji = EMOJI_ANIM_NONE;",
         "strcmp(current_behavior_state, \"listening_wake\") == 0",
         "const bool skip_wake_intro = current_display_is_awake_idle_variant(&current_emoji);",
-        "wake_transition_in_progress || current_display_is_sleep_standby(current_emoji)",
+        "voice_listening_ui_should_use_wake_intro(",
         "const char *listening_state = use_wake_intro ? \"listening_wake\" : \"listening\";",
         "Listening UI will skip wake intro from non-sleep state",
     };
@@ -2560,7 +2715,7 @@ int main(int argc, char **argv) {
         "if (g_state == VOICE_STATE_RECORDING)",
         "show_listening_ui();",
         "g_recording_triggered_by_wake_word = false;",
-        "log_cloud_not_ready();",
+        "show_cloud_not_ready_state();",
     };
     const char *const voice_sleep_wake_resume_required[] = {
         "static void voice_app_resume_wake_word_for_sleep_standby(const char *reason)",
@@ -2588,17 +2743,19 @@ int main(int argc, char **argv) {
     const char *const behavior_expression_event_dispatch_forbidden[] = {
         "behavior_capture_display_request_locked(request);",
     };
-    const char *const voice_stop_recording_local_state_forbidden[] = {
-        "behavior_state_set_with_resources(\"thinking\"",
+    const char *const voice_stop_recording_wait_required[] = {
+        "show_thinking_expression_without_body_action();",
+    };
+    const char *const voice_stop_recording_animation_forbidden[] = {
+        "show_thinking_ui_without_local_sfx();",
         "behavior_state_set_with_text(\"thinking\", \"\", 0);",
         "behavior_state_set_with_text(\"processing\", \"\", 0);",
     };
-    const char *const ws_asr_result_local_state_forbidden[] = {
-        "snprintf(req.state_id, sizeof(req.state_id), \"%s\", \"thinking\");",
-        "control_ingress_submit_state_text(&req)",
-        "snprintf(req.state_id, sizeof(req.state_id), \"%s\", \"processing\");",
+    const char *const ws_asr_result_log_only_required[] = {
+        "!ws_event_ui_should_apply_asr_result()",
+        "ASR result ignored for UI; recorder owns the thinking presentation",
     };
-    const char *const ai_status_processing_return_forbidden[] = {
+    const char *const ai_status_processing_mapping_required[] = {
         "return \"processing\";",
     };
     const char *const ws_tts_worker_internal_stack_required[] = {
@@ -2649,6 +2806,31 @@ int main(int argc, char **argv) {
     const char *const voice_app_sfx_guard_required[] = {
         "sfx_service_set_voice_audio_busy(true);",
         "sfx_service_stop();",
+    };
+    const char *const voice_runtime_idle_sfx_release_order_required[] = {
+        "if (voice_recorder_start() != 0)",
+        "voice_recorder_request_startup_audio_release()",
+        "s_cloud_runtime_started = true",
+    };
+    const char *const voice_runtime_direct_sfx_release_forbidden[] = {
+        "sfx_service_set_voice_audio_busy(false);",
+    };
+    const char *const voice_task_startup_audio_release_order_required[] = {
+        "handle_remote_control_snapshot();",
+        "voice_release_startup_audio_guard_if_idle();",
+        "xQueueReceive(g_event_queue, &event, 0)",
+        "handle_remote_control_snapshot();",
+    };
+    const char *const voice_startup_audio_release_guard_order_required[] = {
+        "if (g_state != VOICE_STATE_IDLE)",
+        "if (g_startup_audio_release_pending)",
+        "g_startup_audio_release_pending = false;",
+        "sfx_service_set_voice_audio_busy(false);",
+    };
+    const char *const voice_startup_audio_release_request_required[] = {
+        "esp_err_t voice_recorder_request_startup_audio_release(void)",
+        "if (!g_task_running || g_voice_task_handle == NULL)",
+        "g_startup_audio_release_pending = true;",
     };
     const char *const voice_app_sfx_release_required[] = {
         "voice_recorder_close();",
@@ -3075,7 +3257,7 @@ int main(int argc, char **argv) {
         "CONFIG_LVGL_PORT_TASK_PRIORITY=11",
         "CONFIG_LVGL_PORT_TASK_AFFINITY_CPU1=y",
         "# CONFIG_LVGL_PORT_TASK_STACK_ALLOC_EXTERNAL is not set",
-        "CONFIG_LVGL_INPUT_DEVICE_SENSITIVITY=20",
+        "CONFIG_LVGL_INPUT_DEVICE_SENSITIVITY=-1",
         "CONFIG_LVGL_PORT_TASK_MAX_SLEEP_MS=5",
         "CONFIG_LVGL_PORT_TIMER_PERIOD_MS=5",
         "CONFIG_LV_DISP_DEF_REFR_PERIOD=30",
@@ -3338,6 +3520,15 @@ int main(int argc, char **argv) {
     failures += file_contains_all(root, "sdk_control_ui.c", sdk_control_ui_visual_contract_required,
                                   sizeof(sdk_control_ui_visual_contract_required) /
                                       sizeof(sdk_control_ui_visual_contract_required[0]));
+    failures +=
+        file_contains_all(root, "sdk_control_ui.c", sdk_control_ui_input_debug_required,
+                          sizeof(sdk_control_ui_input_debug_required) / sizeof(sdk_control_ui_input_debug_required[0]));
+    failures += file_contains_all(root, "sdk_control_app.c", sdk_control_app_input_debug_required,
+                                  sizeof(sdk_control_app_input_debug_required) /
+                                      sizeof(sdk_control_app_input_debug_required[0]));
+    failures += file_contains_all(root, "app_main.c", sdk_control_main_input_debug_required,
+                                  sizeof(sdk_control_main_input_debug_required) /
+                                      sizeof(sdk_control_main_input_debug_required[0]));
     failures += file_contains_all(root, "sdk_control_ui.c", sdk_control_ui_vector_emblem_required,
                                   sizeof(sdk_control_ui_vector_emblem_required) /
                                       sizeof(sdk_control_ui_vector_emblem_required[0]));
@@ -3360,6 +3551,18 @@ int main(int argc, char **argv) {
     failures += file_contains_all(root, "sdk_control_app.c", sdk_control_network_lifecycle_required,
                                   sizeof(sdk_control_network_lifecycle_required) /
                                       sizeof(sdk_control_network_lifecycle_required[0]));
+    failures +=
+        file_contains_all(root, "sdk_control_app.c", sdk_control_hello_recovery_required,
+                          sizeof(sdk_control_hello_recovery_required) / sizeof(sdk_control_hello_recovery_required[0]));
+    failures += function_contains_all(
+        root, "sdk_control_app.c", "static void sdk_control_on_tick(void)", sdk_control_hello_recovery_tick_required,
+        sizeof(sdk_control_hello_recovery_tick_required) / sizeof(sdk_control_hello_recovery_tick_required[0]));
+    failures += file_contains_all(root, "../components/sdk/watcher_sdk/src/watcher_sdk_discovery.c",
+                                  sdk_discovery_pairing_required,
+                                  sizeof(sdk_discovery_pairing_required) / sizeof(sdk_discovery_pairing_required[0]));
+    failures += file_contains_none(
+        root, "../components/sdk/watcher_sdk/src/watcher_sdk_discovery.c", sdk_discovery_pairing_forbidden,
+        sizeof(sdk_discovery_pairing_forbidden) / sizeof(sdk_discovery_pairing_forbidden[0]));
     failures += patterns_in_order(root, "sdk_control_app.c", sdk_control_network_exit_order_required,
                                   sizeof(sdk_control_network_exit_order_required) /
                                       sizeof(sdk_control_network_exit_order_required[0]));
@@ -3788,10 +3991,19 @@ int main(int argc, char **argv) {
     failures += file_contains_all(
         root, "../components/services/voice_service/src/voice_fsm.c", voice_recorder_behavior_feedback_required,
         sizeof(voice_recorder_behavior_feedback_required) / sizeof(voice_recorder_behavior_feedback_required[0]));
+    failures +=
+        function_contains_all(root, "../components/services/voice_service/src/voice_fsm.c",
+                              "static void show_cloud_not_ready_state", voice_recorder_behavior_feedback_guard_required,
+                              sizeof(voice_recorder_behavior_feedback_guard_required) /
+                                  sizeof(voice_recorder_behavior_feedback_guard_required[0]));
     failures += function_contains_all(root, "../components/services/voice_service/src/voice_fsm.c",
                                       "static void show_listening_ui", voice_recorder_behavior_feedback_guard_required,
                                       sizeof(voice_recorder_behavior_feedback_guard_required) /
                                           sizeof(voice_recorder_behavior_feedback_guard_required[0]));
+    failures += function_contains_all(
+        root, "../components/services/voice_service/src/voice_fsm.c",
+        "static void show_thinking_expression_without_body_action", voice_waiting_ui_without_animation_required,
+        sizeof(voice_waiting_ui_without_animation_required) / sizeof(voice_waiting_ui_without_animation_required[0]));
     failures += file_contains_all(root, "app_main.c", voice_connect_retry_restart_required,
                                   sizeof(voice_connect_retry_restart_required) /
                                       sizeof(voice_connect_retry_restart_required[0]));
@@ -3843,9 +4055,11 @@ int main(int argc, char **argv) {
                                       sizeof(voice_ready_idle_lightweight_required[0]));
     failures += file_contains_all(root, "app_main.c", voice_ready_idle_flow_required,
                                   sizeof(voice_ready_idle_flow_required) / sizeof(voice_ready_idle_flow_required[0]));
-    failures += file_contains_none(root, "app_main.c", voice_tts_completion_ready_idle_forbidden,
-                                   sizeof(voice_tts_completion_ready_idle_forbidden) /
-                                       sizeof(voice_tts_completion_ready_idle_forbidden[0]));
+    failures += file_contains_all(root, "app_main.c", random_touch_fondle_required,
+                                  sizeof(random_touch_fondle_required) / sizeof(random_touch_fondle_required[0]));
+    failures += file_contains_all(root, "app_main.c", voice_tts_completion_ready_idle_required,
+                                  sizeof(voice_tts_completion_ready_idle_required) /
+                                      sizeof(voice_tts_completion_ready_idle_required[0]));
     failures += file_contains_all(root, "app_main.c", basic_ready_idle_lightweight_required,
                                   sizeof(basic_ready_idle_lightweight_required) /
                                       sizeof(basic_ready_idle_lightweight_required[0]));
@@ -3893,6 +4107,9 @@ int main(int argc, char **argv) {
     failures +=
         file_contains_all(root, "app_main.c", local_exit_touch_target_required,
                           sizeof(local_exit_touch_target_required) / sizeof(local_exit_touch_target_required[0]));
+    failures +=
+        file_contains_all(root, "app_main.c", local_exit_pointer_swipe_required,
+                          sizeof(local_exit_pointer_swipe_required) / sizeof(local_exit_pointer_swipe_required[0]));
     failures += file_contains_all(root, "app_main.c", local_touch_dispatch_required,
                                   sizeof(local_touch_dispatch_required) / sizeof(local_touch_dispatch_required[0]));
     failures += file_contains_all(root, "app_main.c", voice_touch_double_tap_required,
@@ -4032,34 +4249,44 @@ int main(int argc, char **argv) {
         sizeof(behavior_expression_event_dispatch_forbidden) / sizeof(behavior_expression_event_dispatch_forbidden[0]));
     failures += function_contains_none(
         root, "../components/services/voice_service/src/voice_fsm.c", "static void handle_short_press_toggle(void)",
-        voice_stop_recording_local_state_forbidden,
-        sizeof(voice_stop_recording_local_state_forbidden) / sizeof(voice_stop_recording_local_state_forbidden[0]));
+        voice_stop_recording_wait_required,
+        sizeof(voice_stop_recording_wait_required) / sizeof(voice_stop_recording_wait_required[0]));
+    failures += function_contains_none(
+        root, "../components/services/voice_service/src/voice_fsm.c", "static void handle_short_press_toggle(void)",
+        voice_stop_recording_animation_forbidden,
+        sizeof(voice_stop_recording_animation_forbidden) / sizeof(voice_stop_recording_animation_forbidden[0]));
     failures += function_contains_none(
         root, "../components/services/voice_service/src/voice_fsm.c",
-        "static void handle_remote_control_snapshot(void)", voice_stop_recording_local_state_forbidden,
-        sizeof(voice_stop_recording_local_state_forbidden) / sizeof(voice_stop_recording_local_state_forbidden[0]));
-    failures += function_contains_none(root, "../components/services/voice_service/src/voice_fsm.c",
-                                       "int voice_recorder_tick(void)", voice_stop_recording_local_state_forbidden,
-                                       sizeof(voice_stop_recording_local_state_forbidden) /
-                                           sizeof(voice_stop_recording_local_state_forbidden[0]));
-    failures +=
-        function_contains_none(root, "../components/protocols/ws_client/src/ws_handlers.c", "void on_asr_result_handler",
-                               ws_asr_result_local_state_forbidden,
-                               sizeof(ws_asr_result_local_state_forbidden) /
-                                   sizeof(ws_asr_result_local_state_forbidden[0]));
-    failures +=
-        function_contains_none(root, "../components/protocols/ws_client/src/ws_handlers.c", "void on_ai_thinking_handler",
-                               ws_asr_result_local_state_forbidden,
-                               sizeof(ws_asr_result_local_state_forbidden) /
-                                   sizeof(ws_asr_result_local_state_forbidden[0]));
-    failures += function_contains_none(root, "../components/protocols/ws_client/src/ws_handlers.c",
-                                       "const char *ws_ai_status_to_emoji", ai_status_processing_return_forbidden,
-                                       sizeof(ai_status_processing_return_forbidden) /
-                                           sizeof(ai_status_processing_return_forbidden[0]));
+        "static void handle_remote_control_snapshot(void)", voice_stop_recording_wait_required,
+        sizeof(voice_stop_recording_wait_required) / sizeof(voice_stop_recording_wait_required[0]));
     failures += function_contains_none(
+        root, "../components/services/voice_service/src/voice_fsm.c",
+        "static void handle_remote_control_snapshot(void)", voice_stop_recording_animation_forbidden,
+        sizeof(voice_stop_recording_animation_forbidden) / sizeof(voice_stop_recording_animation_forbidden[0]));
+    failures += function_contains_none(root, "../components/services/voice_service/src/voice_fsm.c",
+                                       "int voice_recorder_tick(void)", voice_stop_recording_wait_required,
+                                       sizeof(voice_stop_recording_wait_required) /
+                                           sizeof(voice_stop_recording_wait_required[0]));
+    failures += function_contains_all(root, "../components/services/voice_service/src/voice_fsm.c",
+                                      "static int stop_recording(void)", voice_stop_recording_wait_required,
+                                      sizeof(voice_stop_recording_wait_required) /
+                                          sizeof(voice_stop_recording_wait_required[0]));
+    failures += function_contains_none(root, "../components/services/voice_service/src/voice_fsm.c",
+                                       "int voice_recorder_tick(void)", voice_stop_recording_animation_forbidden,
+                                       sizeof(voice_stop_recording_animation_forbidden) /
+                                           sizeof(voice_stop_recording_animation_forbidden[0]));
+    failures +=
+        function_contains_all(root, "../components/protocols/ws_client/src/ws_handlers.c", "void on_asr_result_handler",
+                              ws_asr_result_log_only_required,
+                              sizeof(ws_asr_result_log_only_required) / sizeof(ws_asr_result_log_only_required[0]));
+    failures += function_contains_all(root, "../components/protocols/ws_client/src/ws_handlers.c",
+                                      "const char *ws_ai_status_to_emoji", ai_status_processing_mapping_required,
+                                      sizeof(ai_status_processing_mapping_required) /
+                                          sizeof(ai_status_processing_mapping_required[0]));
+    failures += function_contains_all(
         root, "../components/services/control_ingress/src/control_ingress.c",
-        "static const char *control_ai_status_to_fallback", ai_status_processing_return_forbidden,
-        sizeof(ai_status_processing_return_forbidden) / sizeof(ai_status_processing_return_forbidden[0]));
+        "static const char *control_ai_status_to_fallback", ai_status_processing_mapping_required,
+        sizeof(ai_status_processing_mapping_required) / sizeof(ai_status_processing_mapping_required[0]));
     failures += function_contains_all(
         root, "../components/protocols/ws_client/src/ws_client.c", "static esp_err_t ws_tts_runtime_init(void) {",
         ws_tts_worker_internal_stack_required,
@@ -4093,6 +4320,26 @@ int main(int argc, char **argv) {
     failures +=
         function_contains_all(root, "app_main.c", "static void voice_app_on_open(void)", voice_app_sfx_guard_required,
                               sizeof(voice_app_sfx_guard_required) / sizeof(voice_app_sfx_guard_required[0]));
+    failures += function_patterns_in_order(root, "app_main.c", "static void voice_runtime_start_if_due(void)",
+                                           voice_runtime_idle_sfx_release_order_required,
+                                           sizeof(voice_runtime_idle_sfx_release_order_required) /
+                                               sizeof(voice_runtime_idle_sfx_release_order_required[0]));
+    failures += function_contains_none(
+        root, "app_main.c", "static void voice_runtime_start_if_due(void)", voice_runtime_direct_sfx_release_forbidden,
+        sizeof(voice_runtime_direct_sfx_release_forbidden) / sizeof(voice_runtime_direct_sfx_release_forbidden[0]));
+    failures += function_patterns_in_order(root, "../components/services/voice_service/src/voice_fsm.c",
+                                           "static void voice_process_pending_events(void)",
+                                           voice_task_startup_audio_release_order_required,
+                                           sizeof(voice_task_startup_audio_release_order_required) /
+                                               sizeof(voice_task_startup_audio_release_order_required[0]));
+    failures += function_patterns_in_order(root, "../components/services/voice_service/src/voice_fsm.c",
+                                           "static void voice_release_startup_audio_guard_if_idle(void)",
+                                           voice_startup_audio_release_guard_order_required,
+                                           sizeof(voice_startup_audio_release_guard_order_required) /
+                                               sizeof(voice_startup_audio_release_guard_order_required[0]));
+    failures += file_contains_all(
+        root, "../components/services/voice_service/src/voice_fsm.c", voice_startup_audio_release_request_required,
+        sizeof(voice_startup_audio_release_request_required) / sizeof(voice_startup_audio_release_request_required[0]));
     failures += function_contains_all(
         root, "app_main.c", "static void voice_app_on_close(void)", voice_app_sfx_release_required,
         sizeof(voice_app_sfx_release_required) / sizeof(voice_app_sfx_release_required[0]));

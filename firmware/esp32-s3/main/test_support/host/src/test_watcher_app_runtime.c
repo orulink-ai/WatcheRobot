@@ -93,13 +93,20 @@ static int test_register_requires_explicit_input_context(void) {
     static const watcher_app_t invalid_app = {
         .id = "runtime.test.input.invalid",
         .name = "Invalid Input",
-        .input_context = (watcher_input_context_t)(WATCHER_INPUT_CONTEXT_SYSTEM_ONLY + 1),
+        .input_context = (watcher_input_context_t)(WATCHER_INPUT_CONTEXT_APP_EVENT + 1),
+    };
+    static const watcher_app_t event_app = {
+        .id = "runtime.test.input.event",
+        .name = "Event Input",
+        .input_context = WATCHER_INPUT_CONTEXT_APP_EVENT,
     };
 
     failures += expect_true(watcher_app_register(&unspecified_app) == ESP_ERR_INVALID_ARG,
                             "registration rejects an unspecified input context");
     failures += expect_true(watcher_app_register(&invalid_app) == ESP_ERR_INVALID_ARG,
                             "registration rejects an invalid input context");
+    failures +=
+        expect_true(watcher_app_register(&event_app) == ESP_OK, "registration accepts the app event input context");
     return failures;
 }
 
@@ -236,8 +243,7 @@ static int test_switch_to_phone_control_requests_ble_resource(void) {
         .id = "phone.control.app",
         .name = "Phone Control",
         .resource_mode = WATCHER_APP_RESOURCE_BLE_ONLY,
-        .resources =
-            WATCHER_APP_RESOURCE_SET_WIFI_STA | WATCHER_APP_RESOURCE_SET_BLE | WATCHER_APP_RESOURCE_SET_MCU_RUNTIME,
+        .resources = WATCHER_APP_RESOURCE_SET_BLE | WATCHER_APP_RESOURCE_SET_MCU_RUNTIME,
         .input_context = WATCHER_INPUT_CONTEXT_SYSTEM_ONLY,
         .on_open = on_open,
         .on_close = on_close,
@@ -253,9 +259,8 @@ static int test_switch_to_phone_control_requests_ble_resource(void) {
     failures += expect_true(g_resource_count == 2, "phone control switch reconciles directly");
     failures += expect_true(g_resource_modes[0] == WATCHER_APP_RESOURCE_WIFI_ONLY, "previous wifi resource requested");
     failures += expect_true(g_resource_modes[1] == WATCHER_APP_RESOURCE_BLE_ONLY, "phone control requests BLE mode");
-    failures += expect_true(g_resource_sets[1] == (WATCHER_APP_RESOURCE_SET_WIFI_STA | WATCHER_APP_RESOURCE_SET_BLE |
-                                                   WATCHER_APP_RESOURCE_SET_MCU_RUNTIME),
-                            "phone control keeps global wifi while adding BLE and MCU");
+    failures += expect_true(g_resource_sets[1] == (WATCHER_APP_RESOURCE_SET_BLE | WATCHER_APP_RESOURCE_SET_MCU_RUNTIME),
+                            "phone control requests only BLE and MCU resources");
     failures += expect_true(strcmp(g_resource_apps[1], phone_control_app.id) == 0, "phone control resource tagged");
     failures += expect_true(watcher_app_get_active() == &phone_control_app, "phone control active after switch");
 

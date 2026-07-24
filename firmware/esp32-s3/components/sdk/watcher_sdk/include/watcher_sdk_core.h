@@ -90,8 +90,7 @@ watcher_sdk_result_t watcher_sdk_core_start_direct(watcher_sdk_core_t *core, wat
 watcher_sdk_result_t watcher_sdk_core_complete(watcher_sdk_core_t *core, watcher_sdk_job_id_t job_id);
 watcher_sdk_result_t watcher_sdk_core_fail(watcher_sdk_core_t *core, watcher_sdk_job_id_t job_id, int error_code);
 watcher_sdk_result_t watcher_sdk_core_cancel(watcher_sdk_core_t *core, watcher_sdk_job_id_t job_id);
-watcher_sdk_result_t watcher_sdk_core_cancel_observed(watcher_sdk_core_t *core,
-                                                      watcher_sdk_job_id_t job_id);
+watcher_sdk_result_t watcher_sdk_core_cancel_observed(watcher_sdk_core_t *core, watcher_sdk_job_id_t job_id);
 watcher_sdk_result_t watcher_sdk_core_cancel_domain(watcher_sdk_core_t *core, watcher_sdk_domain_t domain);
 watcher_sdk_result_t watcher_sdk_core_preempt_direct(watcher_sdk_core_t *core, watcher_sdk_domain_t domain);
 void watcher_sdk_core_cancel_all(watcher_sdk_core_t *core);

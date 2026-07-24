@@ -68,12 +68,24 @@ static int find_app_index(const char *id) {
     return -1;
 }
 
+static bool input_context_is_valid(watcher_input_context_t context) {
+    switch (context) {
+    case WATCHER_INPUT_CONTEXT_LVGL_NAV:
+    case WATCHER_INPUT_CONTEXT_APP_ACTION:
+    case WATCHER_INPUT_CONTEXT_SYSTEM_ONLY:
+    case WATCHER_INPUT_CONTEXT_APP_EVENT:
+        return true;
+    case WATCHER_INPUT_CONTEXT_UNSPECIFIED:
+    default:
+        return false;
+    }
+}
+
 esp_err_t watcher_app_register(const watcher_app_t *app) {
     if (app == NULL || app->id == NULL || app->id[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
-    if (app->input_context <= WATCHER_INPUT_CONTEXT_UNSPECIFIED ||
-        app->input_context > WATCHER_INPUT_CONTEXT_SYSTEM_ONLY) {
+    if (!input_context_is_valid(app->input_context)) {
         ESP_LOGE(TAG, "App %s must declare a valid input context", app->id);
         return ESP_ERR_INVALID_ARG;
     }

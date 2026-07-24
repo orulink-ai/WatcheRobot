@@ -50,8 +50,7 @@ static void test_old_audio_increases_batch_size_before_queue_is_full(void) {
     ws_audio_uplink_policy_t policy;
     ws_audio_uplink_policy_reset(&policy);
     assert(ws_audio_uplink_batch_frames(&policy, WS_AUDIO_UPLINK_MAX_BATCH_FRAMES, false,
-                                        WS_AUDIO_UPLINK_PRESSURE_AGE_US) ==
-           WS_AUDIO_UPLINK_MAX_BATCH_FRAMES);
+                                        WS_AUDIO_UPLINK_PRESSURE_AGE_US) == WS_AUDIO_UPLINK_MAX_BATCH_FRAMES);
 }
 
 static void test_slow_send_enters_pressure_and_flushes_three_frames(void) {

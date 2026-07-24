@@ -34,6 +34,7 @@ static watcher_input_owner_t short_click_owner(watcher_input_context_t context) 
     case WATCHER_INPUT_CONTEXT_LVGL_NAV:
         return WATCHER_INPUT_OWNER_LVGL;
     case WATCHER_INPUT_CONTEXT_APP_ACTION:
+    case WATCHER_INPUT_CONTEXT_APP_EVENT:
         return WATCHER_INPUT_OWNER_APP;
     case WATCHER_INPUT_CONTEXT_SYSTEM_ONLY:
     default:
@@ -62,6 +63,30 @@ watcher_input_router_config_t watcher_input_router_default_config(void) {
     return config;
 }
 
+int32_t watcher_input_encoder_count_delta(int32_t previous_count, int32_t current_count, bool wrapped_high,
+                                          bool wrapped_low) {
+    int64_t delta;
+
+    if (previous_count == current_count) {
+        return 0;
+    }
+    if (wrapped_high && !wrapped_low) {
+        return 1;
+    }
+    if (wrapped_low && !wrapped_high) {
+        return -1;
+    }
+
+    delta = (int64_t)current_count - (int64_t)previous_count;
+    if (delta > INT32_MAX) {
+        return INT32_MAX;
+    }
+    if (delta < INT32_MIN) {
+        return INT32_MIN;
+    }
+    return (int32_t)delta;
+}
+
 void watcher_input_router_init(watcher_input_router_t *router, const watcher_input_router_config_t *config,
                                watcher_input_scope_t initial_scope) {
     if (router == NULL) {
@@ -87,6 +112,8 @@ void watcher_input_router_set_scope(watcher_input_router_t *router, watcher_inpu
     router->pending_app_clicks = 0;
     memset(&router->press_scope, 0, sizeof(router->press_scope));
     memset(&router->pending_app_scope, 0, sizeof(router->pending_app_scope));
+    memset(&router->pending_app_rotation_scope, 0, sizeof(router->pending_app_rotation_scope));
+    router->pending_app_rotation_diff = 0;
 }
 
 watcher_input_result_t watcher_input_router_on_rotate(watcher_input_router_t *router, watcher_input_scope_t scope,
@@ -97,10 +124,24 @@ watcher_input_result_t watcher_input_router_on_rotate(watcher_input_router_t *ro
     }
 
     watcher_input_router_set_scope(router, scope);
-    const watcher_input_owner_t owner =
-        scope.context == WATCHER_INPUT_CONTEXT_LVGL_NAV || scope.context == WATCHER_INPUT_CONTEXT_APP_ACTION
-            ? WATCHER_INPUT_OWNER_LVGL
-            : WATCHER_INPUT_OWNER_NONE;
+    watcher_input_owner_t owner = WATCHER_INPUT_OWNER_NONE;
+    if (scope.context == WATCHER_INPUT_CONTEXT_APP_EVENT) {
+        int64_t total;
+        if (!scope_is_equal(router->pending_app_rotation_scope, scope)) {
+            router->pending_app_rotation_diff = 0;
+            router->pending_app_rotation_scope = scope;
+        }
+        total = (int64_t)router->pending_app_rotation_diff + diff;
+        if (total > INT32_MAX) {
+            total = INT32_MAX;
+        } else if (total < INT32_MIN) {
+            total = INT32_MIN;
+        }
+        router->pending_app_rotation_diff = (int32_t)total;
+        owner = WATCHER_INPUT_OWNER_APP;
+    } else if (scope.context == WATCHER_INPUT_CONTEXT_LVGL_NAV || scope.context == WATCHER_INPUT_CONTEXT_APP_ACTION) {
+        owner = WATCHER_INPUT_OWNER_LVGL;
+    }
     return make_result(scope, WATCHER_INPUT_EVENT_ROTATE, owner, WATCHER_INPUT_REJECT_NONE, 0, diff);
 }
 
@@ -225,6 +266,27 @@ bool watcher_input_router_consume_app_click(watcher_input_router_t *router, watc
     return true;
 }
 
+bool watcher_input_router_consume_app_rotation(watcher_input_router_t *router, watcher_input_scope_t scope,
+                                               int32_t *out_diff) {
+    if (out_diff != NULL) {
+        *out_diff = 0;
+    }
+    if (router == NULL || out_diff == NULL) {
+        return false;
+    }
+
+    watcher_input_router_set_scope(router, scope);
+    if (scope.context != WATCHER_INPUT_CONTEXT_APP_EVENT || router->pending_app_rotation_diff == 0 ||
+        !scope_is_equal(router->pending_app_rotation_scope, scope)) {
+        router->pending_app_rotation_diff = 0;
+        return false;
+    }
+
+    *out_diff = router->pending_app_rotation_diff;
+    router->pending_app_rotation_diff = 0;
+    return true;
+}
+
 static watcher_input_scope_t current_global_scope(void) {
     watcher_input_scope_provider_t provider = s_scope_provider;
     if (provider != NULL) {
@@ -314,12 +376,23 @@ bool watcher_input_router_global_consume_app_click(void) {
     return consumed;
 }
 
+bool watcher_input_router_global_consume_app_rotation(int32_t *out_diff) {
+    const watcher_input_scope_t scope = current_global_scope();
+    bool consumed;
+    ROUTER_LOCK();
+    ensure_global_initialized(scope);
+    consumed = watcher_input_router_consume_app_rotation(&s_global_router, scope, out_diff);
+    ROUTER_UNLOCK();
+    return consumed;
+}
+
 void watcher_input_router_global_clear_pending(void) {
     const watcher_input_scope_t scope = current_global_scope();
     ROUTER_LOCK();
     ensure_global_initialized(scope);
     watcher_input_router_set_scope(&s_global_router, scope);
     s_global_router.pending_app_clicks = 0;
+    s_global_router.pending_app_rotation_diff = 0;
     ROUTER_UNLOCK();
 }
 
@@ -333,6 +406,8 @@ const char *watcher_input_context_name(watcher_input_context_t context) {
         return "app_action";
     case WATCHER_INPUT_CONTEXT_SYSTEM_ONLY:
         return "system_only";
+    case WATCHER_INPUT_CONTEXT_APP_EVENT:
+        return "app_event";
     default:
         return "unknown";
     }

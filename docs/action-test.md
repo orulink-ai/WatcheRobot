@@ -48,4 +48,4 @@ ESP32 behavior and network commands depend on the active app, BLE, or WebSocket 
 
 - This smoke test does not replace CI.
 - Cross-end protocol contract coverage is incomplete and tracked in GitHub issue #5.
-- Release assets are not published yet, so some event benches may use locally built firmware and generated SD-card assets.
+- If a matching Release package is not available, use locally built firmware and generated SD-card assets.

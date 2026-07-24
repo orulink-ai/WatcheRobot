@@ -1,0 +1,22 @@
+# Copy this file to a local-only device map path, then edit ports per machine.
+# Recommended location on Windows:
+#   %USERPROFILE%\.watche-robot\device-map.toml
+#
+# Point the flashing workflow at it with CODEX_DEVICE_MAP_PATH or
+# tools\run-lane.ps1 -DeviceMapPath <path>.
+
+[devices.s3-a]
+firmware = "s3"
+port = "COM31"
+
+[devices.s3-b]
+firmware = "s3"
+port = "COM30"
+
+[devices.s3-c]
+firmware = "s3"
+port = "COM35"
+
+[devices.stm32-c]
+firmware = "stm32"
+port = "COM18"

@@ -1,6 +1,6 @@
 # Firmware Flashing Guide
 
-This guide is the public flashing entry for event participants. Use release assets when they are available. If no release asset exists yet, use the local build fallback commands.
+This guide is the public flashing entry for WatcheRobot firmware. Use release assets when they are available. If no release asset exists yet, use the local build fallback commands.
 
 ## Toolchain Matrix
 
@@ -40,10 +40,18 @@ When a GitHub Release contains an ESP32 firmware flash ZIP, use the helper:
 ```bash
 python -m pip install -r tools/win_flasher/requirements.txt
 python -m tools.win_flasher list-ports
-python -m tools.win_flasher flash --zip .\WatcheRobot-S3-V2.3.0-esp32s3.zip --port COM7 --monitor
+python -m tools.win_flasher flash --zip .\WatcheRobot-S3-v0.3.2-esp32s3.zip --port COM7 --monitor
 ```
 
-The helper expects a ZIP that contains `flash_args.txt`, `bootloader.bin`, `partition-table.bin`, and the app firmware segment at `0x10000`.
+The helper expects a ZIP that contains `flash_args.txt`, `bootloader.bin`, `partition-table.bin`, and an app firmware segment named `WatcheRobot-S3.bin`.
+
+For interactive Windows flashing, you can also run:
+
+```powershell
+tools\flash-release.cmd --zip .\WatcheRobot-S3-v0.3.2-esp32s3.zip --port COM7 --monitor
+```
+
+If you want `list-releases` to discover downloaded ZIP files automatically, put them under `.local/release-zips/<version>/`.
 
 ## ESP32-S3 Local Build Fallback
 
@@ -59,6 +67,19 @@ idf.py -p <PORT> flash monitor
 ```
 
 Replace `<PORT>` with `COM7`, `/dev/cu.usbserial-*`, or `/dev/ttyUSB0`.
+
+On Windows, the repository also includes a wrapper that resolves ESP-IDF and records bounded monitor output:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\firmware\esp32-s3\tools\flash-monitor.ps1 -Port COM7
+```
+
+For repeated multi-device or automated flashing, copy `tools\flashing\device-map.example.toml` to a local-only path such as `$env:USERPROFILE\.watche-robot\device-map.toml`, fill in local ports, and run:
+
+```powershell
+$env:CODEX_DEVICE_MAP_PATH = "$env:USERPROFILE\.watche-robot\device-map.toml"
+tools\run-lane.cmd -Firmware s3 -Feature smoke -DeviceAlias s3-a
+```
 
 ## STM32F103 Host Tests
 

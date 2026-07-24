@@ -1,6 +1,6 @@
 # ESP-IDF v5.2.1 安装指引
 
-本文面向活动参赛者，目标是在 Windows 或 macOS 上安装并激活 ESP-IDF v5.2.1，用于构建 WatcheRobot ESP32-S3 固件。
+本文用于说明如何在 Windows 或 macOS 上安装并激活 ESP-IDF v5.2.1，用于构建 WatcheRobot ESP32-S3 固件。
 
 官方参考：
 

@@ -4,8 +4,8 @@
 #include "animation_service.h"
 #include "behavior_action_parser.h"
 #include "behavior_animation_reducer.h"
-#include "behavior_catalog_parser.h"
 #include "behavior_catalog_loader.h"
+#include "behavior_catalog_parser.h"
 #include "behavior_executor.h"
 #include "behavior_memory.h"
 #include "behavior_scheduler.h"
@@ -79,6 +79,7 @@ typedef struct {
     bool sound_override_suppressed;
     bool suppress_state_sound_events;
     bool wait_for_local_sfx_completion;
+    bool resources_one_shot;
     bool hold_logged;
     animation_ticket_t animation_ticket;
     uint32_t animation_owner_epoch;
@@ -103,6 +104,7 @@ typedef struct {
     bool has_sound_override;
     bool suppress_sound;
     char action_id[BEHAVIOR_STATE_ID_LEN];
+    bool resources_one_shot;
 } behavior_state_request_t;
 
 static behavior_context_t s_ctx = {0};
@@ -183,7 +185,7 @@ static void behavior_clear_display_request(behavior_display_request_t *request) 
 
 static void behavior_fill_state_request(behavior_state_request_t *request, const char *state_id, const char *text,
                                         int font_size, bool alert_text, const char *anim_id, const char *sound_id,
-                                        const char *action_id) {
+                                        const char *action_id, bool resources_one_shot) {
     if (request == NULL) {
         return;
     }
@@ -205,6 +207,7 @@ static void behavior_fill_state_request(behavior_state_request_t *request, const
         behavior_copy_string(request->sound_id, sizeof(request->sound_id), sound_id);
     }
     behavior_copy_string(request->action_id, sizeof(request->action_id), action_id);
+    request->resources_one_shot = resources_one_shot;
 }
 
 static esp_err_t behavior_submit_state_request(const behavior_state_request_t *request) {
@@ -268,12 +271,15 @@ static void behavior_capture_display_request_locked_ex(behavior_display_request_
     behavior_copy_string(request->text, sizeof(request->text), text);
     behavior_copy_string(request->anim, sizeof(request->anim), anim);
     behavior_copy_string(request->state_id, sizeof(request->state_id), s_ctx.current_state_id);
-    request->playback_mode = s_ctx.current_state != NULL && s_ctx.current_state->expression_count > 0
-                                 ? s_ctx.current_state->expression[0].playback_mode
-                                 : ANIM_PLAYBACK_RESOURCE_DEFAULT;
-    request->repeat_count = s_ctx.current_state != NULL && s_ctx.current_state->expression_count > 0
-                                ? s_ctx.current_state->expression[0].repeat_count
-                              : 0U;
+    request->playback_mode = behavior_scheduler_effective_animation_playback(
+        s_ctx.current_state != NULL && s_ctx.current_state->expression_count > 0
+            ? s_ctx.current_state->expression[0].playback_mode
+            : ANIM_PLAYBACK_RESOURCE_DEFAULT,
+        s_ctx.resources_one_shot);
+    request->repeat_count =
+        !s_ctx.resources_one_shot && s_ctx.current_state != NULL && s_ctx.current_state->expression_count > 0
+            ? s_ctx.current_state->expression[0].repeat_count
+            : 0U;
     request->fade_in_ms = s_ctx.current_state != NULL && s_ctx.current_state->expression_count > 0
                               ? s_ctx.current_state->expression[0].fade_in_ms
                               : 0U;
@@ -569,8 +575,8 @@ static esp_err_t behavior_load_catalog_from_file(behavior_catalog_t *out_catalog
     }
 
     ret = behavior_catalog_load_first_valid(candidates, sizeof(candidates) / sizeof(candidates[0]),
-                                             BEHAVIOR_MAX_FILE_BYTES, behavior_validate_anim_id_for_catalog, NULL,
-                                             out_catalog, &selected_index);
+                                            BEHAVIOR_MAX_FILE_BYTES, behavior_validate_anim_id_for_catalog, NULL,
+                                            out_catalog, &selected_index);
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Behavior catalog source=%s path=%s", candidates[selected_index].label,
                  candidates[selected_index].path);
@@ -611,6 +617,7 @@ static void behavior_reset_runtime_locked(void) {
     s_ctx.sound_override_suppressed = false;
     s_ctx.suppress_state_sound_events = false;
     s_ctx.wait_for_local_sfx_completion = false;
+    s_ctx.resources_one_shot = false;
     s_ctx.hold_logged = false;
     s_ctx.animation_ticket = ANIMATION_TICKET_INVALID;
     s_ctx.animation_owner_epoch = next_owner_epoch;
@@ -769,7 +776,7 @@ static bool behavior_stop_current_action_locked(const char *source) {
 }
 
 static bool behavior_should_loop_action_locked(void) {
-    return behavior_scheduler_action_should_loop(s_ctx.current_state, s_ctx.current_action);
+    return behavior_scheduler_action_should_loop(s_ctx.current_state, s_ctx.current_action, !s_ctx.resources_one_shot);
 }
 
 static uint32_t behavior_action_elapsed_ms_locked(uint32_t now_ms) {
@@ -854,8 +861,9 @@ static void behavior_dispatch_expression_locked(const behavior_expression_event_
     behavior_copy_string(request->text, sizeof(request->text), text);
     behavior_copy_string(request->anim, sizeof(request->anim), anim);
     behavior_copy_string(request->state_id, sizeof(request->state_id), s_ctx.current_state_id);
-    request->playback_mode = event->playback_mode;
-    request->repeat_count = event->repeat_count;
+    request->playback_mode =
+        behavior_scheduler_effective_animation_playback(event->playback_mode, s_ctx.resources_one_shot);
+    request->repeat_count = s_ctx.resources_one_shot ? 0U : event->repeat_count;
     request->fade_in_ms = event->fade_in_ms;
     request->owner_epoch = s_ctx.animation_owner_epoch;
     request->correlation_id = s_ctx.animation_correlation_id;
@@ -890,8 +898,8 @@ static void behavior_dispatch_light_locked(const behavior_light_event_t *event) 
     }
     ret = behavior_executor_apply_light(event);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Light event failed: effect=%s rgb=%u,%u,%u err=%s", event->effect,
-                 (unsigned)event->red, (unsigned)event->green, (unsigned)event->blue, esp_err_to_name(ret));
+        ESP_LOGW(TAG, "Light event failed: effect=%s rgb=%u,%u,%u err=%s", event->effect, (unsigned)event->red,
+                 (unsigned)event->green, (unsigned)event->blue, esp_err_to_name(ret));
     }
 }
 
@@ -1024,6 +1032,26 @@ static void behavior_begin_animation_correlation_locked(void) {
     }
 }
 
+static void behavior_refresh_same_state_overrides_locked(const char *text, int font_size, bool alert_text,
+                                                         const char *anim_id, bool suppress_anim, const char *sound_id,
+                                                         bool suppress_sound,
+                                                         behavior_display_request_t *display_request) {
+    /* Same-state ambient rotation is a new presentation request. The animation
+     * controller rejects it as stale unless the correlation id advances. */
+    behavior_begin_animation_correlation_locked();
+    s_ctx.text_override_valid = (text != NULL);
+    behavior_copy_string(s_ctx.text_override, sizeof(s_ctx.text_override), text);
+    s_ctx.text_override_font_size = font_size;
+    s_ctx.text_override_alert = alert_text;
+    behavior_set_anim_override_locked(anim_id, suppress_anim);
+    s_ctx.suppress_state_sound_events = false;
+    if (behavior_apply_sound_override_locked(sound_id, suppress_sound)) {
+        s_ctx.suppress_state_sound_events = true;
+        s_ctx.next_sound_index = s_ctx.current_state != NULL ? s_ctx.current_state->sound_count : 0;
+    }
+    behavior_refresh_display_locked(display_request);
+}
+
 static void behavior_force_animation_refresh_locked(behavior_display_request_t *display_request) {
     behavior_begin_animation_correlation_locked();
     behavior_capture_display_request_locked_ex(display_request, true);
@@ -1034,7 +1062,7 @@ static void behavior_force_animation_refresh_locked(behavior_display_request_t *
 
 static esp_err_t behavior_schedule_state_locked(const char *state_id, const char *text, int font_size, bool alert_text,
                                                 const char *anim_id, bool suppress_anim, const char *sound_id,
-                                                bool suppress_sound, const char *action_id,
+                                                bool suppress_sound, const char *action_id, bool resources_one_shot,
                                                 behavior_display_request_t *display_request) {
     behavior_state_def_t *state_def = behavior_find_state_locked(state_id);
     behavior_action_def_t *action_def = behavior_find_action_locked(action_id);
@@ -1062,7 +1090,8 @@ static esp_err_t behavior_schedule_state_locked(const char *state_id, const char
         }
 
         effective_state_id = s_ctx.catalog.default_state;
-        if (behavior_is_same_state_action_request_locked(effective_state_id,
+        if (!resources_one_shot && !s_ctx.resources_one_shot &&
+            behavior_is_same_state_action_request_locked(effective_state_id,
                                                          action_def != NULL ? action_def->id : NULL)) {
             bool same_overrides = behavior_is_same_override_request_locked(text, font_size, alert_text, anim_id,
                                                                            suppress_anim, sound_id, suppress_sound);
@@ -1077,17 +1106,8 @@ static esp_err_t behavior_schedule_state_locked(const char *state_id, const char
             if (same_overrides) {
                 return ESP_OK;
             }
-            s_ctx.text_override_valid = (text != NULL);
-            behavior_copy_string(s_ctx.text_override, sizeof(s_ctx.text_override), text);
-            s_ctx.text_override_font_size = font_size;
-            s_ctx.text_override_alert = alert_text;
-            behavior_set_anim_override_locked(anim_id, suppress_anim);
-            s_ctx.suppress_state_sound_events = false;
-            if (behavior_apply_sound_override_locked(sound_id, suppress_sound)) {
-                s_ctx.suppress_state_sound_events = true;
-                s_ctx.next_sound_index = s_ctx.current_state != NULL ? s_ctx.current_state->sound_count : 0;
-            }
-            behavior_capture_display_request_locked(display_request);
+            behavior_refresh_same_state_overrides_locked(text, font_size, alert_text, anim_id, suppress_anim, sound_id,
+                                                         suppress_sound, display_request);
             return ESP_OK;
         }
 
@@ -1116,6 +1136,7 @@ static esp_err_t behavior_schedule_state_locked(const char *state_id, const char
         behavior_set_sound_override_locked(sound_id, suppress_sound);
         s_ctx.suppress_state_sound_events = false;
         s_ctx.wait_for_local_sfx_completion = false;
+        s_ctx.resources_one_shot = resources_one_shot;
         s_ctx.hold_logged = false;
         if (behavior_apply_sound_override_locked(sound_id, suppress_sound)) {
             s_ctx.suppress_state_sound_events = true;
@@ -1128,7 +1149,8 @@ static esp_err_t behavior_schedule_state_locked(const char *state_id, const char
     }
 
     effective_state_id = state_def->id;
-    if (behavior_is_same_state_action_request_locked(effective_state_id, action_def != NULL ? action_def->id : NULL)) {
+    if (!resources_one_shot && !s_ctx.resources_one_shot &&
+        behavior_is_same_state_action_request_locked(effective_state_id, action_def != NULL ? action_def->id : NULL)) {
         bool same_overrides = behavior_is_same_override_request_locked(text, font_size, alert_text, anim_id,
                                                                        suppress_anim, sound_id, suppress_sound);
 
@@ -1142,17 +1164,8 @@ static esp_err_t behavior_schedule_state_locked(const char *state_id, const char
         if (same_overrides) {
             return ESP_OK;
         }
-        s_ctx.text_override_valid = (text != NULL);
-        behavior_copy_string(s_ctx.text_override, sizeof(s_ctx.text_override), text);
-        s_ctx.text_override_font_size = font_size;
-        s_ctx.text_override_alert = alert_text;
-        behavior_set_anim_override_locked(anim_id, suppress_anim);
-        s_ctx.suppress_state_sound_events = false;
-        if (behavior_apply_sound_override_locked(sound_id, suppress_sound)) {
-            s_ctx.suppress_state_sound_events = true;
-            s_ctx.next_sound_index = s_ctx.current_state != NULL ? s_ctx.current_state->sound_count : 0;
-        }
-        behavior_refresh_display_locked(display_request);
+        behavior_refresh_same_state_overrides_locked(text, font_size, alert_text, anim_id, suppress_anim, sound_id,
+                                                     suppress_sound, display_request);
         return ESP_OK;
     }
 
@@ -1180,6 +1193,7 @@ static esp_err_t behavior_schedule_state_locked(const char *state_id, const char
     behavior_set_anim_override_locked(anim_id, suppress_anim);
     behavior_set_sound_override_locked(sound_id, suppress_sound);
     s_ctx.wait_for_local_sfx_completion = false;
+    s_ctx.resources_one_shot = resources_one_shot;
     s_ctx.suppress_state_sound_events = behavior_apply_sound_override_locked(sound_id, suppress_sound);
     s_ctx.hold_logged = false;
     if (s_ctx.suppress_state_sound_events) {
@@ -1237,7 +1251,7 @@ static bool behavior_apply_animation_terminal_transition_locked(behavior_animati
              terminal == BEHAVIOR_ANIMATION_TERMINAL_COMPLETED ? "completed" : "failed",
              completed_animation != NULL ? completed_animation : state->animation_complete_anim, target_state_copy);
     ret = behavior_schedule_state_locked(target_state_copy, text, font_size, alert_text, NULL, false, sound,
-                                         suppress_sound, NULL, display_request);
+                                         suppress_sound, NULL, false, display_request);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Animation terminal transition failed state=%s target=%s err=%s", state->id, target_state_copy,
                  esp_err_to_name(ret));
@@ -1344,7 +1358,8 @@ static void behavior_task(void *arg) {
                         state_request.has_sound_override && state_request.sound_id[0] != '\0' ? state_request.sound_id
                                                                                               : NULL,
                         state_request.suppress_sound,
-                        state_request.action_id[0] != '\0' ? state_request.action_id : NULL, &display_request);
+                        state_request.action_id[0] != '\0' ? state_request.action_id : NULL,
+                        state_request.resources_one_shot, &display_request);
                     if (request_ret == ESP_OK) {
                         ESP_LOGI(TAG, "Applied queued state request state=%s action=%s", state_request.state_id,
                                  state_request.action_id[0] != '\0' ? state_request.action_id : "<none>");
@@ -1410,7 +1425,7 @@ static void behavior_task(void *arg) {
                         } else {
                             esp_err_t fallback_ret =
                                 behavior_schedule_state_locked(s_ctx.catalog.default_state, NULL, 0, false, NULL, false,
-                                                               NULL, false, NULL, &display_request);
+                                                               NULL, false, NULL, false, &display_request);
                             if (fallback_ret != ESP_OK) {
                                 ESP_LOGW(TAG, "Fallback state request failed state=%s err=%s",
                                          s_ctx.catalog.default_state, esp_err_to_name(fallback_ret));
@@ -1579,7 +1594,7 @@ esp_err_t behavior_state_load(void) {
 static esp_err_t behavior_state_set_with_resources_and_action_internal(const char *state_id, const char *text,
                                                                        int font_size, bool alert_text,
                                                                        const char *anim_id, const char *sound_id,
-                                                                       const char *action_id) {
+                                                                       const char *action_id, bool resources_one_shot) {
     behavior_state_request_t request;
 
     if (state_id == NULL || state_id[0] == '\0') {
@@ -1601,12 +1616,15 @@ static esp_err_t behavior_state_set_with_resources_and_action_internal(const cha
         }
     }
 
-    ESP_LOGI(TAG, "Queue state request state=%s action=%s text=%s anim_override=%s sound_override=%s font=%d alert=%d",
-             state_id, action_id != NULL ? action_id : "<none>", text != NULL ? text : "<unchanged>",
-             anim_id != NULL ? anim_id : "<default>", sound_id != NULL ? sound_id : "<default>", font_size,
-             alert_text ? 1 : 0);
+    ESP_LOGI(
+        TAG,
+        "Queue state request state=%s action=%s mode=%s text=%s anim_override=%s sound_override=%s font=%d alert=%d",
+        state_id, action_id != NULL ? action_id : "<none>", resources_one_shot ? "once" : "inherit",
+        text != NULL ? text : "<unchanged>", anim_id != NULL ? anim_id : "<default>",
+        sound_id != NULL ? sound_id : "<default>", font_size, alert_text ? 1 : 0);
 
-    behavior_fill_state_request(&request, state_id, text, font_size, alert_text, anim_id, sound_id, action_id);
+    behavior_fill_state_request(&request, state_id, text, font_size, alert_text, anim_id, sound_id, action_id,
+                                resources_one_shot);
     return behavior_submit_state_request(&request);
 }
 
@@ -1620,7 +1638,7 @@ esp_err_t behavior_state_set_with_text(const char *state_id, const char *text, i
 
 esp_err_t behavior_state_set_with_text_style(const char *state_id, const char *text, int font_size, bool alert_text) {
     return behavior_state_set_with_resources_and_action_internal(state_id, text, font_size, alert_text, NULL, NULL,
-                                                                 NULL);
+                                                                 NULL, false);
 }
 
 esp_err_t behavior_state_set_with_resources(const char *state_id, const char *text, int font_size, const char *anim_id,
@@ -1632,7 +1650,14 @@ esp_err_t behavior_state_set_with_resources_and_action(const char *state_id, con
                                                        const char *anim_id, const char *sound_id,
                                                        const char *action_id) {
     return behavior_state_set_with_resources_and_action_internal(state_id, text, font_size, false, anim_id, sound_id,
-                                                                 action_id);
+                                                                 action_id, false);
+}
+
+esp_err_t behavior_state_set_with_resources_and_action_once(const char *state_id, const char *text, int font_size,
+                                                            const char *anim_id, const char *sound_id,
+                                                            const char *action_id) {
+    return behavior_state_set_with_resources_and_action_internal(state_id, text, font_size, false, anim_id, sound_id,
+                                                                 action_id, true);
 }
 
 esp_err_t behavior_state_set_text(const char *text, int font_size) {

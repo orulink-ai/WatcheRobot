@@ -28,6 +28,10 @@ esp_err_t behavior_state_set_with_resources(const char *state_id, const char *te
 esp_err_t behavior_state_set_with_resources_and_action(const char *state_id, const char *text, int font_size,
                                                        const char *anim_id, const char *sound_id,
                                                        const char *action_id);
+/** Play the requested animation and body action once even when the owning state loops. */
+esp_err_t behavior_state_set_with_resources_and_action_once(const char *state_id, const char *text, int font_size,
+                                                            const char *anim_id, const char *sound_id,
+                                                            const char *action_id);
 esp_err_t behavior_state_set_text(const char *text, int font_size);
 esp_err_t behavior_state_set_text_style(const char *text, int font_size, bool alert_text);
 /**

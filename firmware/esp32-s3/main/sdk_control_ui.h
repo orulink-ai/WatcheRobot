@@ -40,6 +40,7 @@ bool sdk_control_ui_build(sdk_control_ui_t *ui, lv_obj_t *screen);
 void sdk_control_ui_show_pairing(sdk_control_ui_t *ui, const char *pairing_code, bool reconnecting);
 void sdk_control_ui_show_connected(sdk_control_ui_t *ui);
 void sdk_control_ui_show_error(sdk_control_ui_t *ui, const char *headline, const char *detail);
+void sdk_control_ui_show_input_debug(sdk_control_ui_t *ui, const char *line);
 bool sdk_control_ui_is_attached(const sdk_control_ui_t *ui, const lv_obj_t *screen);
 void sdk_control_ui_reset(sdk_control_ui_t *ui);
 

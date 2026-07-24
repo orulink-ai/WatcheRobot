@@ -37,8 +37,7 @@ watcher_sdk_motion_outcome_t watcher_sdk_motion_tracker_on_signal(watcher_sdk_mo
     watcher_sdk_motion_outcome_t outcome = WATCHER_SDK_MOTION_OUTCOME_NONE;
 
     if (!watcher_sdk_motion_tracker_is_active(tracker) ||
-        (command_seq != tracker->command_seq &&
-         !(command_seq == 0U && signal == WATCHER_SDK_MOTION_SIGNAL_FAULT))) {
+        (command_seq != tracker->command_seq && !(command_seq == 0U && signal == WATCHER_SDK_MOTION_SIGNAL_FAULT))) {
         return WATCHER_SDK_MOTION_OUTCOME_NONE;
     }
     switch (signal) {

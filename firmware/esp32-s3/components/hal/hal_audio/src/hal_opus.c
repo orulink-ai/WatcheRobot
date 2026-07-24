@@ -32,8 +32,8 @@ static void hal_opus_observe_encode_stack(size_t packet_bytes) {
 
     s_encode_stack_min_free = min_free;
     if (min_free < HAL_OPUS_STACK_WARN_BYTES) {
-        ESP_LOGW(TAG, "Opus encode stack watermark low: task=%s free=%u frame=%lu packet=%u",
-                 pcTaskGetName(NULL), (unsigned)min_free, (unsigned long)s_encoded_frames, (unsigned)packet_bytes);
+        ESP_LOGW(TAG, "Opus encode stack watermark low: task=%s free=%u frame=%lu packet=%u", pcTaskGetName(NULL),
+                 (unsigned)min_free, (unsigned long)s_encoded_frames, (unsigned)packet_bytes);
     } else {
         ESP_LOGI(TAG, "Opus encode stack watermark: task=%s free=%u frame=%lu packet=%u", pcTaskGetName(NULL),
                  (unsigned)min_free, (unsigned long)s_encoded_frames, (unsigned)packet_bytes);
@@ -108,8 +108,7 @@ static int hal_opus_init_locked(void) {
 
     result = esp_opus_enc_get_frame_size(s_encoder, &frame_size, &output_size);
     if (result != ESP_AUDIO_ERR_OK || frame_size <= 0 || output_size <= 0) {
-        ESP_LOGE(TAG, "failed to query Opus frame size: result=%d frame=%d output=%d", result, frame_size,
-                 output_size);
+        ESP_LOGE(TAG, "failed to query Opus frame size: result=%d frame=%d output=%d", result, frame_size, output_size);
         hal_opus_deinit_locked();
         return -1;
     }
@@ -176,8 +175,8 @@ int hal_opus_encode(const uint8_t *pcm_in, int pcm_len, uint8_t *out_buf, int ou
         return -1;
     }
     if (pcm_len != s_encoder_frame_bytes || out_max_len < s_encoder_output_bytes) {
-        ESP_LOGE(TAG, "invalid Opus frame buffer: pcm=%d/%d out=%d/%d", pcm_len, s_encoder_frame_bytes,
-                 out_max_len, s_encoder_output_bytes);
+        ESP_LOGE(TAG, "invalid Opus frame buffer: pcm=%d/%d out=%d/%d", pcm_len, s_encoder_frame_bytes, out_max_len,
+                 s_encoder_output_bytes);
         xSemaphoreGive(lock);
         return -1;
     }

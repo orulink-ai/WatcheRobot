@@ -168,6 +168,37 @@ static void test_rotation_policy(void) {
            WATCHER_INPUT_OWNER_NONE);
 }
 
+static void test_app_event_rotation_is_owned_and_consumed_by_app(void) {
+    watcher_input_scope_t current = scope(WATCHER_INPUT_CONTEXT_APP_EVENT, 53);
+    watcher_input_router_t router = new_router(current);
+    int32_t diff = 0;
+
+    assert(watcher_input_router_on_rotate(&router, current, 1).owner == WATCHER_INPUT_OWNER_APP);
+    assert(watcher_input_router_on_rotate(&router, current, -3).owner == WATCHER_INPUT_OWNER_APP);
+    assert(watcher_input_router_consume_app_rotation(&router, current, &diff));
+    assert(diff == -2);
+    assert(!watcher_input_router_consume_app_rotation(&router, current, &diff));
+}
+
+static void test_app_event_rotation_is_discarded_on_context_change(void) {
+    watcher_input_scope_t current = scope(WATCHER_INPUT_CONTEXT_APP_EVENT, 54);
+    watcher_input_router_t router = new_router(current);
+    int32_t diff = 0;
+
+    assert(watcher_input_router_on_rotate(&router, current, 2).owner == WATCHER_INPUT_OWNER_APP);
+    assert(!watcher_input_router_consume_app_rotation(&router, scope(WATCHER_INPUT_CONTEXT_APP_EVENT, 55), &diff));
+}
+
+static void test_encoder_count_delta_preserves_all_physical_steps(void) {
+    assert(watcher_input_encoder_count_delta(10, 13, false, false) == 3);
+    assert(watcher_input_encoder_count_delta(10, 7, false, false) == -3);
+    assert(watcher_input_encoder_count_delta(1, 0, false, false) == -1);
+    assert(watcher_input_encoder_count_delta(-1, 0, false, false) == 1);
+    assert(watcher_input_encoder_count_delta(999, 0, true, false) == 1);
+    assert(watcher_input_encoder_count_delta(-999, 0, false, true) == -1);
+    assert(watcher_input_encoder_count_delta(5, 5, false, false) == 0);
+}
+
 static void test_repeated_short_clicks_never_accumulate_consumers(void) {
     watcher_input_router_t router = new_router(scope(WATCHER_INPUT_CONTEXT_LVGL_NAV, 60));
     size_t lvgl_clicks = 0;
@@ -225,6 +256,9 @@ int main(void) {
     test_same_mode_app_switch_discards_pending_click();
     test_short_click_boundaries();
     test_rotation_policy();
+    test_app_event_rotation_is_owned_and_consumed_by_app();
+    test_app_event_rotation_is_discarded_on_context_change();
+    test_encoder_count_delta_preserves_all_physical_steps();
     test_repeated_short_clicks_never_accumulate_consumers();
     puts("watcher input router tests passed");
     return 0;

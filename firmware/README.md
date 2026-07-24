@@ -55,6 +55,56 @@ Main contents:
 - `Tools/`: debug and integration tools.
 - `Documents/`: STM32-side design notes, protocol notes, and test records.
 
+## Flashing and Assets
+
+For first-time reproduction, download these assets from the same [GitHub Release](https://github.com/orulink-ai/WatcheRobot/releases) bundle:
+
+| Content | File |
+| --- | --- |
+| ESP32-S3 firmware | `WatcheRobot-ESP32S3-v0.3.2.zip` |
+| STM32F103 firmware | `WatcheRobot-STM32F103-v0.1.1.zip` |
+| SD-card assets | `WatcheRobot-SDCard-Assets-v0.3.2.zip` |
+| AI flashing skill | `WatcheRobot-Flashing-Skill-v0.1.1.zip` |
+| Manifest and checksums | `WatcheRobot-Bundle-v0.1.1.manifest.json`, `SHA256SUMS.txt` |
+
+Do not mix firmware and SD-card assets from different releases. The complete asset list is maintained in [Downloads](../docs/downloads.md).
+
+### AI-Assisted Flashing
+
+The repository provides an AI-oriented flashing skill: [WatcheRobot Firmware Flashing Skill](../tools/flashing/README.md). The Release also includes the same skill as `WatcheRobot-Flashing-Skill-v0.1.1.zip`. If you use Codex or another AI coding assistant, ask it to read this README or the README inside the ZIP, then let it handle Release asset selection, serial-port detection, ESP32-S3 flashing, SD-card asset preparation, and boot-log checks.
+
+You can say:
+
+```text
+Please read tools/flashing/README.md and help me flash WatcheRobot.
+Use the latest Release ESP32-S3 firmware, STM32F103 firmware, and SD-card assets, detect the current serial port, and check boot logs after flashing.
+```
+
+The commands below are mainly for AI assistants, automation flows, or manual troubleshooting.
+
+ESP32-S3 release ZIP flashing:
+
+```bash
+python -m pip install -r tools/win_flasher/requirements.txt
+python -m tools.win_flasher flash --zip .\WatcheRobot-ESP32S3-v0.3.2.zip --port COM7
+```
+
+On Windows, you can also use:
+
+```powershell
+tools\flash-release.cmd --zip .\WatcheRobot-ESP32S3-v0.3.2.zip --port COM7 --monitor
+```
+
+For repeated multi-device or automated flashing, prefer asking the AI assistant to read [WatcheRobot Firmware Flashing Skill](../tools/flashing/README.md) and execute the flow. The underlying entrypoint is `tools/run-lane.ps1`; the device-map template is `tools/flashing/device-map.example.toml`.
+
+If ESP-IDF is already installed, you can also run this from `firmware/esp32-s3`:
+
+```bash
+idf.py flash monitor
+```
+
+SD-card asset layout and copy instructions are documented in [SD Card Assets](../docs/sd-card-assets.md). Driver notes, port discovery, and platform differences are documented in [Firmware Flashing Guide](../docs/flashing.md).
+
 ## Communication Protocols
 
 The readable protocol overview is maintained in [Communication Protocols](COMMUNICATION_PROTOCOLS.md). This README only keeps entry links to avoid duplicating protocol tables across files.

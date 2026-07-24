@@ -13,6 +13,7 @@ typedef enum {
     WATCHER_INPUT_CONTEXT_LVGL_NAV,
     WATCHER_INPUT_CONTEXT_APP_ACTION,
     WATCHER_INPUT_CONTEXT_SYSTEM_ONLY,
+    WATCHER_INPUT_CONTEXT_APP_EVENT,
 } watcher_input_context_t;
 
 typedef enum {
@@ -63,7 +64,9 @@ typedef struct {
     watcher_input_scope_t scope;
     watcher_input_scope_t press_scope;
     watcher_input_scope_t pending_app_scope;
+    watcher_input_scope_t pending_app_rotation_scope;
     uint32_t press_down_ms;
+    int32_t pending_app_rotation_diff;
     uint8_t pending_app_clicks;
     bool button_pressed;
     bool long_hold_fired;
@@ -73,6 +76,8 @@ typedef struct {
 typedef watcher_input_scope_t (*watcher_input_scope_provider_t)(void *user_ctx);
 
 watcher_input_router_config_t watcher_input_router_default_config(void);
+int32_t watcher_input_encoder_count_delta(int32_t previous_count, int32_t current_count, bool wrapped_high,
+                                          bool wrapped_low);
 void watcher_input_router_init(watcher_input_router_t *router, const watcher_input_router_config_t *config,
                                watcher_input_scope_t initial_scope);
 void watcher_input_router_set_scope(watcher_input_router_t *router, watcher_input_scope_t scope);
@@ -87,6 +92,8 @@ watcher_input_result_t watcher_input_router_on_long_hold(watcher_input_router_t 
 bool watcher_input_router_lvgl_button_pressed(watcher_input_router_t *router, watcher_input_scope_t scope,
                                               bool *cancelled);
 bool watcher_input_router_consume_app_click(watcher_input_router_t *router, watcher_input_scope_t scope);
+bool watcher_input_router_consume_app_rotation(watcher_input_router_t *router, watcher_input_scope_t scope,
+                                               int32_t *out_diff);
 
 void watcher_input_router_global_init(watcher_input_scope_t initial_scope);
 void watcher_input_router_global_set_scope_provider(watcher_input_scope_provider_t provider, void *user_ctx);
@@ -96,6 +103,7 @@ watcher_input_result_t watcher_input_router_global_on_button_up(uint32_t now_ms)
 watcher_input_result_t watcher_input_router_global_on_long_hold(uint32_t now_ms);
 bool watcher_input_router_global_lvgl_button_pressed(bool *cancelled);
 bool watcher_input_router_global_consume_app_click(void);
+bool watcher_input_router_global_consume_app_rotation(int32_t *out_diff);
 void watcher_input_router_global_clear_pending(void);
 
 const char *watcher_input_context_name(watcher_input_context_t context);

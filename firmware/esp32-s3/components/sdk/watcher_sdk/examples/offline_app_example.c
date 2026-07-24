@@ -35,4 +35,3 @@ void example_sdk_app_on_close(void) {
     watcher_sdk_close(s_sdk);
     s_sdk = NULL;
 }
-

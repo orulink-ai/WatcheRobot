@@ -87,9 +87,8 @@ void voice_remote_control_init(voice_remote_control_state_t *state) {
     state->applied_generation = 0U;
 }
 
-voice_remote_action_t voice_remote_control_apply(voice_remote_control_state_t *state,
-                                                  voice_remote_snapshot_t snapshot,
-                                                  bool recording_active) {
+voice_remote_action_t voice_remote_control_apply(voice_remote_control_state_t *state, voice_remote_snapshot_t snapshot,
+                                                 bool recording_active) {
     if (state == NULL || snapshot.generation == state->applied_generation) {
         return VOICE_REMOTE_ACTION_NONE;
     }

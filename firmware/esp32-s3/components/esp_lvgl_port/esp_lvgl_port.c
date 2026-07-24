@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 #include "watcher_input_router.h"
 
 #include "lvgl.h"
@@ -140,6 +141,12 @@ typedef struct {
 *******************************************************************************/
 static lvgl_port_ctx_t lvgl_port_ctx;
 static int lvgl_port_timer_period_ms = 5;
+#ifdef ESP_LVGL_PORT_TOUCH_COMPONENT
+static bool s_touch_diag_active = false;
+static bool s_touch_diag_empty_frame = false;
+static uint16_t s_touch_diag_x = 0;
+static uint16_t s_touch_diag_y = 0;
+#endif
 
 /*******************************************************************************
 * Function definitions
@@ -993,6 +1000,11 @@ static void lvgl_port_pix_monochrome_callback(lv_disp_drv_t *drv, uint8_t *buf, 
 
 #ifdef ESP_LVGL_PORT_TOUCH_COMPONENT
 static void lvgl_port_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
+#if CONFIG_WATCHER_DEBUG_CLI_ENABLE
+    static bool debug_touch_reader_started = false;
+    static bool debug_touch_pressed = false;
+    static uint32_t debug_touch_read_errors = 0;
+#endif
     assert(indev_drv);
     lvgl_port_touch_ctx_t *touch_ctx = (lvgl_port_touch_ctx_t *)indev_drv->user_data;
     assert(touch_ctx->handle);
@@ -1003,18 +1015,75 @@ static void lvgl_port_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *
     uint8_t touchpad_cnt = 0;
 
     /* Read data from touch controller into memory */
-    esp_lcd_touch_read_data(touch_ctx->handle);
+    esp_err_t read_result = esp_lcd_touch_read_data(touch_ctx->handle);
+#if CONFIG_WATCHER_DEBUG_CLI_ENABLE
+    if (!debug_touch_reader_started) {
+        ESP_LOGI(TAG, "debug screen touch reader started sensitivity=%d", (int)touch_ctx->sensitivity);
+        debug_touch_reader_started = true;
+    }
+#endif
+    if (read_result != ESP_OK) {
+        data->state = LV_INDEV_STATE_RELEASED;
+#if CONFIG_WATCHER_DEBUG_CLI_ENABLE
+        debug_touch_read_errors++;
+        if (debug_touch_read_errors == 1 || debug_touch_read_errors % 100 == 0) {
+            ESP_LOGW(TAG, "debug screen touch read failed result=%s count=%lu", esp_err_to_name(read_result),
+                     (unsigned long)debug_touch_read_errors);
+        }
+#endif
+        return;
+    }
 
     /* Read data from touch controller */
     bool touchpad_pressed =
         esp_lcd_touch_get_coordinates(touch_ctx->handle, touchpad_x, touchpad_y, touchpad_strength, &touchpad_cnt, 1);
 
-    if (touchpad_pressed && touchpad_cnt > 0 && touchpad_strength[0] > touch_ctx->sensitivity) {
+    const bool touchpad_has_coordinates = touchpad_pressed && touchpad_cnt > 0;
+    const bool touchpad_accepted = touchpad_has_coordinates && touchpad_strength[0] > touch_ctx->sensitivity;
+
+    if (touchpad_pressed && touchpad_cnt == 0 && !s_touch_diag_empty_frame) {
+        ESP_LOGW(TAG, "Touch raw frame has no coordinates");
+    }
+    s_touch_diag_empty_frame = touchpad_pressed && touchpad_cnt == 0;
+
+    if (touchpad_has_coordinates) {
+        const int delta_x = (int)touchpad_x[0] - (int)s_touch_diag_x;
+        const int delta_y = (int)touchpad_y[0] - (int)s_touch_diag_y;
+        if (!s_touch_diag_active) {
+            ESP_LOGI(TAG, "Touch raw press x=%u y=%u strength=%u accepted=%d threshold=%d", (unsigned)touchpad_x[0],
+                     (unsigned)touchpad_y[0], (unsigned)touchpad_strength[0], touchpad_accepted ? 1 : 0,
+                     (int)touch_ctx->sensitivity);
+        } else if (delta_x >= 12 || delta_x <= -12 || delta_y >= 12 || delta_y <= -12) {
+            ESP_LOGI(TAG, "Touch raw move x=%u y=%u strength=%u", (unsigned)touchpad_x[0], (unsigned)touchpad_y[0],
+                     (unsigned)touchpad_strength[0]);
+        }
+        s_touch_diag_active = true;
+        s_touch_diag_x = touchpad_x[0];
+        s_touch_diag_y = touchpad_y[0];
+    } else if (s_touch_diag_active) {
+        ESP_LOGI(TAG, "Touch raw release");
+        s_touch_diag_active = false;
+    }
+
+    if (touchpad_accepted) {
         data->point.x = touchpad_x[0];
         data->point.y = touchpad_y[0];
         data->state = LV_INDEV_STATE_PRESSED;
+#if CONFIG_WATCHER_DEBUG_CLI_ENABLE
+        if (!debug_touch_pressed) {
+            ESP_LOGI(TAG, "debug screen touch pressed x=%u y=%u strength=%u", (unsigned)touchpad_x[0],
+                     (unsigned)touchpad_y[0], (unsigned)touchpad_strength[0]);
+            debug_touch_pressed = true;
+        }
+#endif
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
+#if CONFIG_WATCHER_DEBUG_CLI_ENABLE
+        if (debug_touch_pressed) {
+            ESP_LOGI(TAG, "debug screen touch released");
+            debug_touch_pressed = false;
+        }
+#endif
     }
 }
 #endif
@@ -1028,12 +1097,12 @@ static void lvgl_port_encoder_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *d
     lvgl_port_encoder_ctx_t *ctx = (lvgl_port_encoder_ctx_t *)indev_drv->user_data;
     assert(ctx);
 
-    int32_t invd = iot_knob_get_count_value(ctx->knob_handle);
-    knob_event_t event = iot_knob_get_event(ctx->knob_handle);
+    const int32_t invd = iot_knob_get_count_value(ctx->knob_handle);
 
-    if (last_v ^ invd) {
+    if (last_v != invd) {
+        const knob_event_t event = iot_knob_get_event(ctx->knob_handle);
+        const int32_t diff = watcher_input_encoder_count_delta(last_v, invd, event == KNOB_H_LIM, event == KNOB_L_LIM);
         last_v = invd;
-        const int32_t diff = (KNOB_LEFT == event) ? (-1) : ((KNOB_RIGHT == event) ? (1) : (0));
         const watcher_input_result_t result = watcher_input_router_global_on_rotate(diff);
         data->enc_diff = result.owner == WATCHER_INPUT_OWNER_LVGL ? diff : 0;
     } else {

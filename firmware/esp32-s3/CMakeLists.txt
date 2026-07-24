@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(PROJECT_VER "V3.1")
+set(PROJECT_VER "v0.3.2")
 
 if(NOT DEFINED APP_CENTER_FIRMWARE_APP)
     if(CMAKE_BINARY_DIR MATCHES "build-phone-control-app")

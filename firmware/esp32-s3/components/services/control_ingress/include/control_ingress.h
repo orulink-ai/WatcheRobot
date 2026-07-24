@@ -53,6 +53,14 @@ typedef struct {
     char image_name[64];
     char action_file[64];
     char sound_file[64];
+    char state_domain[16];
+    char task_id[64];
+    int active_task_count;
+    bool has_active_task_count;
+    bool foreground_active;
+    bool has_foreground_active;
+    bool has_action_file;
+    bool suppress_ui;
     bool defer_ui_until_tts_complete;
 } control_ai_status_request_t;
 
@@ -78,9 +86,12 @@ void control_ingress_suppress_manual_touch_for_ms(uint32_t duration_ms);
 bool control_ingress_is_manual_touch_suppressed(void);
 uint32_t control_ingress_manual_touch_remaining_ms(void);
 esp_err_t control_ingress_submit_ai_status(const control_ai_status_request_t *req);
-esp_err_t control_ingress_flush_deferred_ai_status_after_tts(void);
 esp_err_t control_ingress_submit_state_set(const control_state_set_request_t *req);
 esp_err_t control_ingress_submit_state_text(const control_state_text_request_t *req);
+const char *control_ingress_tts_completion_state(void);
+bool control_ingress_has_active_ai_task(void);
+bool control_ingress_has_foreground_ai_lease(void);
+void control_ingress_clear_active_ai_tasks(void);
 size_t control_ingress_state_stack_high_watermark(void);
 size_t control_ingress_state_stack_size(void);
 
@@ -103,10 +114,8 @@ void control_ingress_set_ops_for_test(const control_ingress_ops_t *ops);
 void control_ingress_reset_ops_for_test(void);
 void control_ingress_normalize_resource_name_for_test(const char *raw, char *out, size_t out_size);
 const char *control_ingress_ai_status_text_for_test(const control_ai_status_request_t *req);
-void control_ingress_reset_deferred_ai_status_for_test(void);
-void control_ingress_reset_state_queue_for_test(void);
-bool control_ingress_has_deferred_ai_status_for_test(void);
-const char *control_ingress_deferred_ai_status_for_test(void);
+esp_err_t control_ingress_apply_ai_status_for_test(const control_ai_status_request_t *req);
+void control_ingress_reset_ai_task_state_for_test(void);
 #endif
 
 #ifdef __cplusplus

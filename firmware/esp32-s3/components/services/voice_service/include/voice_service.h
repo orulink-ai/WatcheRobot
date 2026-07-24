@@ -69,6 +69,18 @@ esp_err_t voice_recorder_request_open(void);
 esp_err_t voice_recorder_request_close(void);
 
 /**
+ * Request task-owned release of the startup audio guard.
+ *
+ * The recorder task applies the release only while the recorder is idle. This
+ * prevents a concurrent recording transition from being overwritten by a
+ * caller-side audio guard clear.
+ *
+ * @return ESP_OK if the request was accepted, or ESP_ERR_INVALID_STATE if the
+ * recorder task is not running.
+ */
+esp_err_t voice_recorder_request_startup_audio_release(void);
+
+/**
  * Process a tick (called periodically to read audio and enqueue upload)
  * Should be called at audio frame rate (e.g., every 60ms for PCM frames)
  *

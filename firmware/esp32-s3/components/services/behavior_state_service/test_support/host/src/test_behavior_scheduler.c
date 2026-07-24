@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
@@ -32,10 +33,21 @@ static void test_action_loop_follows_state_loop_or_hold(void) {
     behavior_state_def_t hold_state = make_state(false, true, 100);
     behavior_state_def_t one_shot_state = make_state(false, false, 100);
 
-    assert(behavior_scheduler_action_should_loop(&loop_state, &action));
-    assert(behavior_scheduler_action_should_loop(&hold_state, &action));
-    assert(!behavior_scheduler_action_should_loop(&one_shot_state, &action));
-    assert(!behavior_scheduler_action_should_loop(&loop_state, NULL));
+    assert(behavior_scheduler_action_should_loop(&loop_state, &action, true));
+    assert(behavior_scheduler_action_should_loop(&hold_state, &action, true));
+    assert(!behavior_scheduler_action_should_loop(&one_shot_state, &action, true));
+    assert(!behavior_scheduler_action_should_loop(&loop_state, NULL, true));
+    assert(!behavior_scheduler_action_should_loop(&loop_state, &action, false));
+    assert(!behavior_scheduler_action_should_loop(&hold_state, &action, false));
+}
+
+static void test_one_shot_resource_policy_overrides_looping_state_animation(void) {
+    assert(behavior_scheduler_effective_animation_playback(ANIM_PLAYBACK_LOOP_UNTIL_REPLACED, false) ==
+           ANIM_PLAYBACK_LOOP_UNTIL_REPLACED);
+    assert(behavior_scheduler_effective_animation_playback(ANIM_PLAYBACK_REPEAT_COUNT, false) ==
+           ANIM_PLAYBACK_REPEAT_COUNT);
+    assert(behavior_scheduler_effective_animation_playback(ANIM_PLAYBACK_LOOP_UNTIL_REPLACED, true) ==
+           ANIM_PLAYBACK_ONCE);
 }
 
 static void test_state_completion_ignores_state_motion_when_action_active(void) {
@@ -301,6 +313,8 @@ int main(void) {
     } tests[] = {
         {"state_motion_is_overridden_by_action", test_state_motion_is_overridden_by_action},
         {"action_loop_follows_state_loop_or_hold", test_action_loop_follows_state_loop_or_hold},
+        {"one_shot_resource_policy_overrides_looping_state_animation",
+         test_one_shot_resource_policy_overrides_looping_state_animation},
         {"state_completion_ignores_state_motion_when_action_active",
          test_state_completion_ignores_state_motion_when_action_active},
         {"state_completion_requires_state_motion_without_action",

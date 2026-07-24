@@ -12,10 +12,8 @@ extern "C" {
 #endif
 
 typedef void (*agent_audio_player_done_cb_t)(void *user_ctx);
-typedef void (*agent_audio_player_started_cb_t)(void *user_ctx);
 
 esp_err_t agent_audio_player_start(agent_audio_player_done_cb_t done_cb, void *user_ctx);
-void agent_audio_player_set_playback_started_callback(agent_audio_player_started_cb_t started_cb, void *user_ctx);
 void agent_audio_player_stop(void);
 esp_err_t agent_audio_player_enqueue(const uint8_t *pcm, size_t len);
 void agent_audio_player_mark_stream_done(void);

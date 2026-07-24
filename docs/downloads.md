@@ -4,15 +4,33 @@ All release artifacts are published through GitHub Releases for `orulink-ai/Watc
 
 ## Current Status
 
-No public GitHub Release is currently listed for this repository. Until the first activity package is published, participants should use the local build and SD-card asset generation fallbacks documented in:
+Release assets are published through GitHub Releases when available. If a matching release package is not available, use the local build and SD-card asset generation fallbacks documented in:
 
 - `README.md`
+- `firmware/README.md`
 - `docs/flashing.md`
 - `docs/sd-card-assets.md`
 
-## Required Assets for the First Public Activity Release
+## Current Bundle
 
-The first public activity release should include:
+The current `watche-v0.1.1` bundle should provide these files together:
+
+| Content | File |
+| --- | --- |
+| ESP32-S3 firmware | `WatcheRobot-ESP32S3-v0.3.2.zip` |
+| STM32F103 firmware | `WatcheRobot-STM32F103-v0.1.1.zip` |
+| SD-card assets | `WatcheRobot-SDCard-Assets-v0.3.2.zip` |
+| AI flashing skill | `WatcheRobot-Flashing-Skill-v0.1.1.zip` |
+| Windows desktop | `Watcher.Desktop_0.2.10_x64-setup.exe` |
+| macOS desktop | `Watcher.Desktop_0.2.10_aarch64.dmg` |
+| Android app | `watcher-android-0.3.8.apk` |
+| Manifest and checksums | `WatcheRobot-Bundle-v0.1.1.manifest.json`, `SHA256SUMS.txt` |
+
+For hardware reproduction, use the ESP32-S3 firmware, STM32F103 firmware, and SD-card assets from the same Release bundle.
+
+## Required Assets for a Public Release
+
+A public release should include:
 
 - ESP32 firmware flash ZIP
 - ESP32 SD-card behavior asset ZIP

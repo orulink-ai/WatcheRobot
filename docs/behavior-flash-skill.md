@@ -1,6 +1,6 @@
 # Behavior Asset Field Checklist
 
-Use this checklist at an event bench when preparing or replacing a WatcheRobot SD card.
+Use this checklist when preparing or replacing a WatcheRobot SD card.
 
 ## Inputs
 

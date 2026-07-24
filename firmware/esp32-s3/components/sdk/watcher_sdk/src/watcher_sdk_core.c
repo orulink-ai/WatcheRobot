@@ -3,8 +3,7 @@
 #include <string.h>
 
 static bool job_is_terminal(watcher_sdk_job_state_t state) {
-    return state == WATCHER_SDK_JOB_COMPLETED || state == WATCHER_SDK_JOB_FAILED ||
-           state == WATCHER_SDK_JOB_CANCELLED;
+    return state == WATCHER_SDK_JOB_COMPLETED || state == WATCHER_SDK_JOB_FAILED || state == WATCHER_SDK_JOB_CANCELLED;
 }
 
 static watcher_sdk_job_entry_t *find_job(watcher_sdk_core_t *core, watcher_sdk_job_id_t job_id) {
@@ -21,8 +20,7 @@ static watcher_sdk_job_entry_t *find_job(watcher_sdk_core_t *core, watcher_sdk_j
     return NULL;
 }
 
-static const watcher_sdk_job_entry_t *find_job_const(const watcher_sdk_core_t *core,
-                                                      watcher_sdk_job_id_t job_id) {
+static const watcher_sdk_job_entry_t *find_job_const(const watcher_sdk_core_t *core, watcher_sdk_job_id_t job_id) {
     return find_job((watcher_sdk_core_t *)core, job_id);
 }
 
@@ -73,8 +71,7 @@ static watcher_sdk_job_id_t next_job_id(watcher_sdk_core_t *core) {
 }
 
 static watcher_sdk_result_t transition_terminal(watcher_sdk_core_t *core, watcher_sdk_job_entry_t *job,
-                                                watcher_sdk_job_state_t target, int error_code,
-                                                bool invoke_cancel) {
+                                                watcher_sdk_job_state_t target, int error_code, bool invoke_cancel) {
     if (core == NULL || job == NULL) {
         return WATCHER_SDK_RESULT_NOT_FOUND;
     }
@@ -187,8 +184,7 @@ watcher_sdk_result_t watcher_sdk_core_cancel(watcher_sdk_core_t *core, watcher_s
     return transition_terminal(core, find_job(core, job_id), WATCHER_SDK_JOB_CANCELLED, 0, true);
 }
 
-watcher_sdk_result_t watcher_sdk_core_cancel_observed(watcher_sdk_core_t *core,
-                                                      watcher_sdk_job_id_t job_id) {
+watcher_sdk_result_t watcher_sdk_core_cancel_observed(watcher_sdk_core_t *core, watcher_sdk_job_id_t job_id) {
     return transition_terminal(core, find_job(core, job_id), WATCHER_SDK_JOB_CANCELLED, 0, false);
 }
 

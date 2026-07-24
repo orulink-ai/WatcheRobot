@@ -74,8 +74,11 @@ int main(int argc, char **argv) {
     failures += expect_file_contains(root, "watcher_app_runtime.h", "WATCHER_APP_LIFECYCLE_DESTROY_ON_CLOSE");
     failures += expect_file_contains(root, "watcher_app_runtime.c",
                                      "WATCHER_APP_RESOURCE_WIFI_ONLY, WATCHER_APP_RESOURCE_SET_WIFI_STA");
-    failures += expect_file_not_contains(root, "app_main.c", "wifi_release_station()");
-    failures += expect_file_contains(root, "app_main.c", "resources |= WATCHER_APP_RESOURCE_SET_WIFI_STA");
+    failures += expect_file_contains(root, "app_main.c",
+                                     "requires_wifi = (resources & WATCHER_APP_RESOURCE_SET_WIFI_STA) != 0;");
+    failures += expect_file_contains(root, "app_main.c", "static esp_err_t app_resource_release_wifi_if_unused");
+    failures += expect_file_contains(root, "app_main.c", "wifi_release_station();");
+    failures += expect_file_not_contains(root, "app_main.c", "resources |= WATCHER_APP_RESOURCE_SET_WIFI_STA");
     failures += expect_file_contains(root, "app_main.c", "launcher_screen_cache_policy_allows");
     failures += expect_file_contains(root, "app_main.c", "evt=task_stack_hwm");
     failures += expect_file_contains(root, "../components/services/behavior_state_service/src/behavior_state_service.c",

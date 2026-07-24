@@ -20,6 +20,7 @@
 #include "sfx_service.h"
 #include "voice_service.h"
 #include "ws_client.h"
+#include "ws_event_ui_policy.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -495,8 +496,7 @@ esp_err_t ws_camera_runtime_deinit(void) {
         xSemaphoreGive(s_camera_ctx.frame_ready_sem);
     }
 
-    if (s_camera_ctx.upload_task != NULL &&
-        !ws_camera_wait_for_upload_task_exit(WS_CAMERA_UPLOAD_TASK_EXIT_WAIT_MS)) {
+    if (s_camera_ctx.upload_task != NULL && !ws_camera_wait_for_upload_task_exit(WS_CAMERA_UPLOAD_TASK_EXIT_WAIT_MS)) {
         ESP_LOGW(TAG, "camera upload task did not exit within %u ms", (unsigned)WS_CAMERA_UPLOAD_TASK_EXIT_WAIT_MS);
         return ESP_ERR_INVALID_STATE;
     }
@@ -847,7 +847,10 @@ const char *ws_ai_status_to_emoji(const char *status, const char *message) {
         ws_contains_nocase(status, "paired") || ws_contains_nocase(message, "paired")) {
         return "bluetooth";
     }
-    if (ws_contains_nocase(status, "observing") || ws_contains_nocase(message, "observing")) {
+    if (ws_contains_nocase(status, "observing") || ws_contains_nocase(message, "observing") ||
+        ws_contains_nocase(status, "custom3") || ws_contains_nocase(message, "custom3") ||
+        ws_contains_nocase(status, "tool_calling") || ws_contains_nocase(message, "tool_calling") ||
+        ws_contains_nocase(status, "tool calling") || ws_contains_nocase(message, "tool calling")) {
         return "custom3";
     }
     if (ws_contains_nocase(status, "listening") || ws_contains_nocase(message, "listening")) {
@@ -857,8 +860,9 @@ const char *ws_ai_status_to_emoji(const char *status, const char *message) {
         return "thinking";
     }
     if (ws_contains_nocase(status, "processing") || ws_contains_nocase(status, "analyzing") ||
-        ws_contains_nocase(message, "processing") || ws_contains_nocase(message, "analyzing")) {
-        return "thinking";
+        ws_contains_nocase(status, "dialogue_pending") || ws_contains_nocase(message, "processing") ||
+        ws_contains_nocase(message, "analyzing") || ws_contains_nocase(message, "dialogue_pending")) {
+        return "processing";
     }
     if (ws_contains_nocase(status, "speaking") || ws_contains_nocase(message, "speaking")) {
         return "speaking";
@@ -885,9 +889,9 @@ void on_sys_ack_handler(const ws_sys_ack_t *msg) {
     ESP_LOGI(TAG, "sys.ack: type=%s command_id=%s code=%d message=%s", msg->type, msg->command_id, msg->code,
              msg->message);
     if (strcmp(msg->type, "sys.client.hello") == 0) {
-        (void)ws_client_apply_audio_uplink_negotiation(
-            msg->audio_uplink_codec, msg->audio_uplink_sample_rate, msg->audio_uplink_channels,
-            msg->audio_uplink_frame_duration_ms, msg->audio_uplink_packetization, msg->audio_uplink_version);
+        (void)ws_client_apply_audio_uplink_negotiation(msg->audio_uplink_codec, msg->audio_uplink_sample_rate,
+                                                       msg->audio_uplink_channels, msg->audio_uplink_frame_duration_ms,
+                                                       msg->audio_uplink_packetization, msg->audio_uplink_version);
         ws_client_mark_hello_acked();
     }
 }
@@ -907,8 +911,7 @@ void on_sys_nack_handler(const ws_sys_nack_t *msg) {
     }
 
     snprintf(req.state_id, sizeof(req.state_id), "%s", "error");
-    snprintf(req.text, sizeof(req.text), "%s",
-             msg->reason[0] != '\0' ? msg->reason : "");
+    snprintf(req.text, sizeof(req.text), "%s", msg->reason[0] != '\0' ? msg->reason : "");
 
     if (req.text[0] != '\0' && control_ingress_submit_state_text(&req) != ESP_OK) {
         ESP_LOGW(TAG, "Failed to enqueue error state update");
@@ -977,7 +980,8 @@ void on_servo_trajectory_play_handler(const ws_servo_trajectory_cmd_t *cmd) {
     size_t valid_frame_count = 0u;
 
     if (cmd == NULL || cmd->frame_count <= 0) {
-        ws_send_sys_nack("ctrl.servo.trajectory.play", cmd != NULL ? cmd->command_id : NULL, "invalid_trajectory_payload");
+        ws_send_sys_nack("ctrl.servo.trajectory.play", cmd != NULL ? cmd->command_id : NULL,
+                         "invalid_trajectory_payload");
         return;
     }
 
@@ -1011,16 +1015,11 @@ void on_servo_trajectory_play_handler(const ws_servo_trajectory_cmd_t *cmd) {
                                       : HAL_SERVO_MOTION_PROFILE_LINEAR;
 
         ESP_LOGI(TAG,
-                 "servo trajectory segment prepared: command_id=%s index=%u/%d axis_mask=0x%02x x_deg_x10=%d y_deg_x10=%d duration_ms=%u profile=%u enqueue_tick_us=%lld",
-                 cmd->command_id,
-                 (unsigned)(valid_frame_count + 1u),
-                 frame_count,
-                 (unsigned)segment->axis_mask,
-                 (int)segment->x_deg_x10,
-                 (int)segment->y_deg_x10,
-                 (unsigned)segment->duration_ms,
-                 (unsigned)segment->motion_profile,
-                 (long long)esp_timer_get_time());
+                 "servo trajectory segment prepared: command_id=%s index=%u/%d axis_mask=0x%02x x_deg_x10=%d "
+                 "y_deg_x10=%d duration_ms=%u profile=%u enqueue_tick_us=%lld",
+                 cmd->command_id, (unsigned)(valid_frame_count + 1u), frame_count, (unsigned)segment->axis_mask,
+                 (int)segment->x_deg_x10, (int)segment->y_deg_x10, (unsigned)segment->duration_ms,
+                 (unsigned)segment->motion_profile, (long long)esp_timer_get_time());
 
         valid_frame_count++;
     }
@@ -1032,11 +1031,8 @@ void on_servo_trajectory_play_handler(const ws_servo_trajectory_cmd_t *cmd) {
 
     ret = hal_servo_play_trajectory(frames, valid_frame_count, HAL_SERVO_MOTION_SOURCE_WS);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "servo trajectory sequence queue failed: command_id=%s segments=%u err=%s",
-                 cmd->command_id,
-                 (unsigned)valid_frame_count,
-                 esp_err_to_name(ret));
+        ESP_LOGW(TAG, "servo trajectory sequence queue failed: command_id=%s segments=%u err=%s", cmd->command_id,
+                 (unsigned)valid_frame_count, esp_err_to_name(ret));
         if (ret == ESP_ERR_INVALID_STATE) {
             ws_send_sys_nack("ctrl.servo.trajectory.play", cmd->command_id, "mcu_link_not_ready");
         } else if (ret == ESP_ERR_TIMEOUT) {
@@ -1048,9 +1044,7 @@ void on_servo_trajectory_play_handler(const ws_servo_trajectory_cmd_t *cmd) {
         return;
     }
 
-    ESP_LOGI(TAG,
-             "servo trajectory play queued: command_id=%s segments=%u",
-             cmd->command_id,
+    ESP_LOGI(TAG, "servo trajectory play queued: command_id=%s segments=%u", cmd->command_id,
              (unsigned)valid_frame_count);
     ws_servo_feedback_reset_report_state(HAL_SERVO_AXIS_MASK_X | HAL_SERVO_AXIS_MASK_Y);
     ws_send_sys_ack("ctrl.servo.trajectory.play", cmd->command_id);
@@ -1560,37 +1554,56 @@ void on_asr_result_handler(const ws_text_event_t *event) {
         return;
     }
 
-    ESP_LOGI(TAG, "ASR result received; local voice state remains unchanged: %s", event->text);
+    ESP_LOGI(TAG, "ASR result: %s", event->text);
+    if (!ws_event_ui_should_apply_asr_result()) {
+        ESP_LOGI(TAG, "ASR result ignored for UI; recorder owns the thinking presentation");
+        return;
+    }
 }
 
 void on_ai_status_handler(const ws_ai_status_t *event) {
     control_ai_status_request_t req = {0};
-    const char *target_state;
-    bool apply_after_tts;
     esp_err_t ret;
 
     if (event == NULL) {
         return;
     }
 
-    target_state = ws_ai_status_to_emoji(event->status, event->message);
-    apply_after_tts = ws_client_is_tts_playing() &&
-                      !(target_state != NULL && strcmp(target_state, "error") == 0);
+    ESP_LOGI(TAG, "AI status: status=%s message=%s image=%s action=%s sound=%s", event->status, event->message,
+             event->image_name, event->action_file, event->sound_file);
 
-    ESP_LOGI(TAG,
-             "AI status received: status=%s message=%s image=%s action=%s sound=%s tts_playing=%d defer=%d",
-             event->status, event->message, event->image_name, event->action_file, event->sound_file,
-             ws_client_is_tts_playing() ? 1 : 0, apply_after_tts ? 1 : 0);
+    if (event->tts_downlink_complete) {
+        ws_client_note_tts_downlink_complete();
+    }
 
     ws_copy_string(req.status, sizeof(req.status), event->status);
     ws_copy_string(req.message, sizeof(req.message), event->message);
     ws_copy_string(req.image_name, sizeof(req.image_name), event->image_name);
     ws_copy_string(req.action_file, sizeof(req.action_file), event->action_file);
     ws_copy_string(req.sound_file, sizeof(req.sound_file), event->sound_file);
-    req.defer_ui_until_tts_complete = apply_after_tts;
-    if (apply_after_tts) {
-        ESP_LOGI(TAG, "Deferring remote AI status until current TTS completes: status=%s", event->status);
+    ws_copy_string(req.state_domain, sizeof(req.state_domain), event->state_domain);
+    ws_copy_string(req.task_id, sizeof(req.task_id), event->task_id);
+    req.active_task_count = event->active_task_count;
+    req.has_active_task_count = event->has_active_task_count;
+    req.foreground_active = event->foreground_active;
+    req.has_foreground_active = event->has_foreground_active;
+    req.has_action_file = event->has_action_file;
+    {
+        const char *target_state = ws_ai_status_to_emoji(event->status, event->message);
+        req.suppress_ui = !ws_event_ui_should_apply_state(target_state) ||
+                          !ws_event_ui_should_apply_task_status(event->state_domain, event->status);
+        req.defer_ui_until_tts_complete = !req.suppress_ui && ws_client_is_tts_playing() &&
+                                          (target_state == NULL || strcmp(target_state, "speaking") != 0);
+        if (req.suppress_ui) {
+            ESP_LOGI(TAG, "AI status UI suppressed by device presentation policy: status=%s domain=%s target=%s",
+                     event->status, event->state_domain, target_state != NULL ? target_state : "<none>");
+        }
+        if (req.defer_ui_until_tts_complete) {
+            ESP_LOGI(TAG, "AI status UI deferred while speaking: status=%s target=%s", event->status,
+                     target_state != NULL ? target_state : "<none>");
+        }
     }
+
     ret = control_ingress_submit_ai_status(&req);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to enqueue AI status update: %s", esp_err_to_name(ret));
@@ -1598,12 +1611,27 @@ void on_ai_status_handler(const ws_ai_status_t *event) {
 }
 
 void on_ai_thinking_handler(const ws_ai_thinking_t *event) {
+    control_state_text_request_t req = {0};
+    bool tts_playing;
+
     if (event == NULL) {
         return;
     }
 
     ESP_LOGI(TAG, "AI thinking: kind=%s content=%s", event->kind, event->content);
-    ESP_LOGD(TAG, "Ignoring AI thinking event for local voice state");
+    tts_playing = ws_client_is_tts_playing();
+    /* Thinking events also carry LLM deltas and brain progress logs. The recorder
+     * owns the one local transition into the thinking face, so remote progress must
+     * neither restart it nor preempt physical TTS playout. */
+    if (!ws_event_ui_should_apply_thinking(event->kind, tts_playing)) {
+        ESP_LOGI(TAG, "AI thinking event ignored for UI: kind=%s tts_playing=%d", event->kind, tts_playing ? 1 : 0);
+        return;
+    }
+    snprintf(req.state_id, sizeof(req.state_id), "%s", "thinking");
+    req.text[0] = '\0';
+    if (control_ingress_submit_state_text(&req) != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to enqueue thinking state update");
+    }
 }
 
 void on_ai_reply_handler(const ws_text_event_t *event) {
@@ -1637,9 +1665,9 @@ void on_transfer_handler(const ws_transfer_cmd_t *cmd) {
         ws_fill_app_package_transfer(cmd, &transfer);
         if (s_app_package_handler.commit == NULL || s_app_package_handler.commit(&transfer) != 0) {
             ws_send_sys_nack(cmd->message_type, transfer.command_id, "app_package_commit_failed");
-            ws_send_app_package_status(transfer.command_id, transfer.app_id, transfer.name, transfer.version,
-                                       "install_failed",
-                                       ws_app_package_error_message("commit failed: check size, SHA-256, manifest, and permissions"));
+            ws_send_app_package_status(
+                transfer.command_id, transfer.app_id, transfer.name, transfer.version, "install_failed",
+                ws_app_package_error_message("commit failed: check size, SHA-256, manifest, and permissions"));
         } else {
             ws_send_sys_ack(cmd->message_type, transfer.command_id);
         }
@@ -1651,8 +1679,8 @@ void on_transfer_handler(const ws_transfer_cmd_t *cmd) {
             s_app_package_handler.abort(&command, cmd->reason);
         }
         ws_send_sys_ack(cmd->message_type, command.command_id);
-        ws_send_app_package_status(command.command_id, command.app_id, command.name, command.version,
-                                   "install_failed", cmd->reason[0] != '\0' ? cmd->reason : "aborted");
+        ws_send_app_package_status(command.command_id, command.app_id, command.name, command.version, "install_failed",
+                                   cmd->reason[0] != '\0' ? cmd->reason : "aborted");
         return;
     }
     if (strcmp(cmd->message_type, "app.package.list") == 0) {
@@ -1668,9 +1696,10 @@ void on_transfer_handler(const ws_transfer_cmd_t *cmd) {
         ws_fill_app_package_transfer(cmd, &transfer);
         if (s_app_package_handler.install == NULL || s_app_package_handler.install(&transfer) != 0) {
             ws_send_sys_nack(cmd->message_type, transfer.command_id, "app_package_install_failed");
-            ws_send_app_package_status(transfer.command_id, transfer.app_id, transfer.name, transfer.version,
-                                       "install_failed",
-                                       ws_app_package_error_message("install failed: check compatibility, HTTPS URL, size, SHA-256, and signature"));
+            ws_send_app_package_status(
+                transfer.command_id, transfer.app_id, transfer.name, transfer.version, "install_failed",
+                ws_app_package_error_message(
+                    "install failed: check compatibility, HTTPS URL, size, SHA-256, and signature"));
         } else {
             ws_send_sys_ack(cmd->message_type, transfer.command_id);
         }
@@ -1686,12 +1715,12 @@ void on_transfer_handler(const ws_transfer_cmd_t *cmd) {
         } else if ((open_ret = s_app_package_handler.open(&command)) != 0) {
             if (open_ret == ESP_ERR_NOT_FOUND) {
                 ws_send_sys_nack(cmd->message_type, command.command_id, "app_package_not_installed");
-                ws_send_app_package_status(command.command_id, command.app_id, command.name, command.version, "uninstalled",
-                                           "package is no longer installed on this device");
+                ws_send_app_package_status(command.command_id, command.app_id, command.name, command.version,
+                                           "uninstalled", "package is no longer installed on this device");
             } else {
                 ws_send_sys_nack(cmd->message_type, command.command_id, "app_package_open_failed");
-                ws_send_app_package_status(command.command_id, command.app_id, command.name, command.version, "open_failed",
-                                           "open failed");
+                ws_send_app_package_status(command.command_id, command.app_id, command.name, command.version,
+                                           "open_failed", "open failed");
             }
         } else {
             ws_send_sys_ack(cmd->message_type, command.command_id);

@@ -17,7 +17,6 @@ typedef struct {
     bool shutdown_pending;
     uint64_t listening_started_ms;
     bool listening_speech_seen;
-    bool audio_playback_pending;
 } agent_runtime_ctx_t;
 
 static agent_runtime_ctx_t s_agent_runtime;
@@ -41,7 +40,6 @@ static void enter_failed(agent_runtime_error_t error, const char *text) {
 static void enter_listening(uint64_t now_ms) {
     s_agent_runtime.listening_started_ms = now_ms;
     s_agent_runtime.listening_speech_seen = false;
-    s_agent_runtime.audio_playback_pending = false;
     notify_stage(AGENT_RUNTIME_STAGE_LISTENING, AGENT_RUNTIME_ERROR_NONE, "");
 }
 
@@ -112,7 +110,6 @@ static void stop_resources(const char *reason, bool cancel_response) {
         s_agent_runtime.ops.set_behavior_feedback_enabled(true, s_agent_runtime.ops.user_ctx);
     }
     s_agent_runtime.resources_started = false;
-    s_agent_runtime.audio_playback_pending = false;
 }
 
 static bool message_mentions_pipeline_busy(const char *message) {
@@ -207,7 +204,6 @@ void agent_runtime_open(uint64_t now_ms, const char *reason) {
     s_agent_runtime.shutdown_pending = false;
     s_agent_runtime.listening_started_ms = 0;
     s_agent_runtime.listening_speech_seen = false;
-    s_agent_runtime.audio_playback_pending = false;
     notify_stage(AGENT_RUNTIME_STAGE_PENDING, AGENT_RUNTIME_ERROR_NONE, "Connecting Agent");
 }
 
@@ -337,17 +333,16 @@ void agent_runtime_on_realtime_audio(const uint8_t *pcm, size_t len) {
         s_agent_runtime.stage == AGENT_RUNTIME_STAGE_WAKING || pcm == NULL || len == 0) {
         return;
     }
-    if (s_agent_runtime.stage != AGENT_RUNTIME_STAGE_SPEAKING && !s_agent_runtime.audio_playback_pending) {
+    if (s_agent_runtime.stage != AGENT_RUNTIME_STAGE_SPEAKING) {
         force_recorder_idle_if_recording("agent audio response start");
         if (s_agent_runtime.ops.recorder_pause_wake_word != NULL) {
             s_agent_runtime.ops.recorder_pause_wake_word(s_agent_runtime.ops.user_ctx);
         }
-        s_agent_runtime.audio_playback_pending = true;
+        notify_stage(AGENT_RUNTIME_STAGE_SPEAKING, AGENT_RUNTIME_ERROR_NONE, "");
     }
     if (s_agent_runtime.ops.audio_player_enqueue != NULL &&
         s_agent_runtime.ops.audio_player_enqueue(pcm, len, s_agent_runtime.ops.user_ctx) != ESP_OK) {
         s_agent_runtime.shutdown_pending = true;
-        s_agent_runtime.audio_playback_pending = false;
         enter_failed(AGENT_RUNTIME_ERROR_AUDIO_QUEUE_FULL, "Agent audio queue full");
     }
 }
@@ -360,18 +355,6 @@ void agent_runtime_on_realtime_audio_done(void) {
 
 void agent_runtime_on_realtime_response_done(void) {
     agent_runtime_on_realtime_audio_done();
-}
-
-void agent_runtime_on_audio_playback_started(void) {
-    if (s_agent_runtime.stage == AGENT_RUNTIME_STAGE_STOPPED || s_agent_runtime.stage == AGENT_RUNTIME_STAGE_SLEEPING ||
-        s_agent_runtime.stage == AGENT_RUNTIME_STAGE_WAKING) {
-        return;
-    }
-
-    s_agent_runtime.audio_playback_pending = false;
-    if (s_agent_runtime.stage != AGENT_RUNTIME_STAGE_SPEAKING) {
-        notify_stage(AGENT_RUNTIME_STAGE_SPEAKING, AGENT_RUNTIME_ERROR_NONE, "");
-    }
 }
 
 void agent_runtime_on_realtime_speech_started(void) {
@@ -411,7 +394,6 @@ void agent_runtime_on_realtime_closed(void) {
 }
 
 void agent_runtime_on_audio_playback_done(void) {
-    s_agent_runtime.audio_playback_pending = false;
     if (s_agent_runtime.stage == AGENT_RUNTIME_STAGE_SPEAKING ||
         s_agent_runtime.stage == AGENT_RUNTIME_STAGE_THINKING) {
         if (s_agent_runtime.ops.recorder_resume_wake_word_for_sleep != NULL) {

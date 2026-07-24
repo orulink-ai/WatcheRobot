@@ -1,8 +1,8 @@
 #include "launcher_factory_home.h"
 
+#include "factory_home_ui/ui.h"
 #include <stdint.h>
 #include <string.h>
-#include "factory_home_ui/ui.h"
 
 static lv_obj_t *s_page_home = NULL;
 static lv_obj_t *s_mainlist = NULL;
@@ -211,8 +211,7 @@ static void scroll_anim_enable(void) {
 
 void launcher_factory_home_build(lv_obj_t *screen,
                                  const launcher_factory_home_entry_t entries[LAUNCHER_FACTORY_HOME_ENTRY_COUNT],
-                                 size_t entry_count,
-                                 const launcher_factory_home_callbacks_t *callbacks) {
+                                 size_t entry_count, const launcher_factory_home_callbacks_t *callbacks) {
     lv_obj_t *battery_warn_img = NULL;
 
     if (screen == NULL || entries == NULL || entry_count == 0) {
@@ -230,6 +229,8 @@ void launcher_factory_home_build(lv_obj_t *screen,
     }
 
     lv_obj_clear_flag(s_page_home, LV_OBJ_FLAG_SCROLLABLE);
+    /* Keep gestures on the page that owns the navigation handler. */
+    lv_obj_clear_flag(s_page_home, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_set_style_bg_color(s_page_home, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(s_page_home, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_img_src(s_page_home, &ui_img_page_main_png, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -451,10 +452,8 @@ void launcher_factory_home_click_focused(void) {
     }
 }
 
-void launcher_factory_home_update_status(const char *time_text,
-                                         const char *battery_text,
-                                         launcher_home_battery_state_t battery_state,
-                                         bool wifi_connected,
+void launcher_factory_home_update_status(const char *time_text, const char *battery_text,
+                                         launcher_home_battery_state_t battery_state, bool wifi_connected,
                                          bool ble_connected) {
     if (s_maintime != NULL && time_text != NULL) {
         lv_label_set_text(s_maintime, time_text);
@@ -486,8 +485,7 @@ void launcher_factory_home_update_status(const char *time_text,
         lv_img_set_src(s_mainwifi, wifi_connected ? &ui_img_wifi_3_png : &ui_img_no_wifi_png);
         lv_obj_set_style_img_recolor(s_mainwifi, lv_color_hex(wifi_connected ? 0xA9DE2C : 0x000000),
                                      LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_style_img_recolor_opa(s_mainwifi, wifi_connected ? 255 : 0,
-                                         LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_img_recolor_opa(s_mainwifi, wifi_connected ? 255 : 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     }
     if (s_mainble != NULL) {
         lv_obj_set_style_img_recolor(s_mainble, lv_color_hex(ble_connected ? 0xA9DE2C : 0x171515),

@@ -23,15 +23,15 @@
     },
     "used_flash_non_ram": {
       "description": "Flash code and read-only data",
-      "baseline": 3401243,
-      "max_growth": 131072,
-      "hard_max": 3600000
+      "baseline": 3892591,
+      "max_growth": 8192,
+      "hard_max": 3900783
     },
     "total_size": {
       "description": "ESP-IDF aggregate linked image size",
-      "baseline": 3550045,
-      "max_growth": 131072,
-      "hard_max": 3670016
+      "baseline": 4041409,
+      "max_growth": 8192,
+      "hard_max": 4049601
     }
   }
 }

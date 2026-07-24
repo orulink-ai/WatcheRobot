@@ -26,6 +26,12 @@ typedef enum {
     SDK_CONTROL_EMBLEM_CLOSE,
 } sdk_control_emblem_icon_t;
 
+static void enable_event_bubble(lv_obj_t *object) {
+    if (object != NULL) {
+        lv_obj_add_flag(object, LV_OBJ_FLAG_EVENT_BUBBLE);
+    }
+}
+
 static const lv_point_t s_check_points[] = {
     {0, 22},
     {16, 38},
@@ -41,6 +47,7 @@ static const lv_point_t s_close_stroke_b_points[] = {
 };
 
 static void clear_container_style(lv_obj_t *object) {
+    enable_event_bubble(object);
     lv_obj_set_style_pad_all(object, 0, 0);
     lv_obj_set_style_border_width(object, 0, 0);
     lv_obj_set_style_outline_width(object, 0, 0);
@@ -51,6 +58,7 @@ static void clear_container_style(lv_obj_t *object) {
 static lv_obj_t *create_centered_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color) {
     lv_obj_t *label = lv_label_create(parent);
 
+    enable_event_bubble(label);
     lv_obj_set_width(label, 350);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
@@ -122,8 +130,7 @@ static void set_emblem_icon(sdk_control_ui_t *ui, uint32_t color, sdk_control_em
 static void set_emblem(sdk_control_ui_t *ui, uint32_t color, sdk_control_emblem_icon_t icon, int size, int y) {
     const bool amber = color == SDK_CONTROL_UI_AMBER;
     const uint32_t emblem_top = amber ? SDK_CONTROL_UI_AMBER_EMBLEM_TOP : SDK_CONTROL_UI_GREEN_EMBLEM_TOP;
-    const uint32_t emblem_bottom =
-        amber ? SDK_CONTROL_UI_AMBER_EMBLEM_BOTTOM : SDK_CONTROL_UI_GREEN_EMBLEM_BOTTOM;
+    const uint32_t emblem_bottom = amber ? SDK_CONTROL_UI_AMBER_EMBLEM_BOTTOM : SDK_CONTROL_UI_GREEN_EMBLEM_BOTTOM;
 
     lv_obj_set_size(ui->emblem, size, size);
     lv_obj_align(ui->emblem, LV_ALIGN_TOP_MID, 0, y);
@@ -204,6 +211,7 @@ bool sdk_control_ui_build(sdk_control_ui_t *ui, lv_obj_t *screen) {
     ui->emblem = lv_obj_create(screen);
     clear_container_style(ui->emblem);
     ui->icon_prompt = lv_label_create(ui->emblem);
+    enable_event_bubble(ui->icon_prompt);
     lv_obj_set_style_text_font(ui->icon_prompt, &ui_font_semibold28, 0);
     ui->icon_prompt_bar = lv_obj_create(ui->emblem);
     clear_container_style(ui->icon_prompt_bar);
@@ -212,6 +220,8 @@ bool sdk_control_ui_build(sdk_control_ui_t *ui, lv_obj_t *screen) {
     lv_obj_set_style_bg_opa(ui->icon_prompt_bar, LV_OPA_COVER, 0);
     ui->icon_stroke_a = lv_line_create(ui->emblem);
     ui->icon_stroke_b = lv_line_create(ui->emblem);
+    enable_event_bubble(ui->icon_stroke_a);
+    enable_event_bubble(ui->icon_stroke_b);
 
     ui->headline = create_centered_label(screen, &ui_font_semibold28, SDK_CONTROL_UI_WHITE);
     ui->caption = create_centered_label(screen, &lv_font_montserrat_20, SDK_CONTROL_UI_MUTED);
@@ -226,6 +236,7 @@ bool sdk_control_ui_build(sdk_control_ui_t *ui, lv_obj_t *screen) {
     lv_obj_set_style_bg_opa(ui->status_dot, LV_OPA_COVER, 0);
     lv_obj_align(ui->status_dot, LV_ALIGN_LEFT_MID, 24, 0);
     ui->status = lv_label_create(ui->status_pill);
+    enable_event_bubble(ui->status);
     lv_obj_set_style_text_font(ui->status, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(ui->status, lv_color_hex(0xE9EDEA), 0);
     lv_obj_align(ui->status, LV_ALIGN_CENTER, 14, 0);
@@ -312,6 +323,17 @@ void sdk_control_ui_show_error(sdk_control_ui_t *ui, const char *headline, const
     show_status_pill(ui, "Python SDK unavailable", 286, 274, SDK_CONTROL_UI_AMBER);
     lv_label_set_text(ui->detail, detail != NULL ? detail : "Please reopen the app");
     lv_obj_align(ui->detail, LV_ALIGN_TOP_MID, 0, 331);
+    set_hidden(ui->detail, false);
+}
+
+void sdk_control_ui_show_input_debug(sdk_control_ui_t *ui, const char *line) {
+    const char *safe_line = line != NULL ? line : "Input: --";
+
+    if (ui == NULL || !ui->built || ui->state != SDK_CONTROL_UI_CONNECTED) {
+        return;
+    }
+    lv_label_set_text(ui->detail, safe_line);
+    lv_obj_align(ui->detail, LV_ALIGN_TOP_MID, 0, 374);
     set_hidden(ui->detail, false);
 }
 

@@ -12,7 +12,7 @@ Use this document to find the source of truth for each public WatcheRobot compon
 | ESP32 behavior assets | `firmware/esp32-s3/tools/generate_anim_assets.py` | `PROJECT_VERSION`, currently `V2.3.0` on this branch | Must match the firmware release package when publishing. |
 | STM32F103 firmware | `firmware/stm32-f103/` | Snapshot and Git SHA | No public semantic firmware version is finalized in this repository yet. |
 | Hardware PCB package | filenames under `hardware/pcb/` | dated exports, mostly 2026-06-11 to 2026-06-18 | BOM, CPL, schematic, layout, and Gerber files should be kept in sync by board. |
-| Mechanical model | `hardware/3d-models/exports/` | dated STEP filename | The current STEP is close to GitHub's 100 MB single-file limit. |
+| Mechanical model | `hardware/3d-models/exports/WatcherRobot-mian.stp` | current STEP export | Current public mechanical assembly model. |
 | App, Server, Desktop | GitHub Release assets when available | release asset version | Source code is not part of this repository. |
 
 ## Release Version Rules

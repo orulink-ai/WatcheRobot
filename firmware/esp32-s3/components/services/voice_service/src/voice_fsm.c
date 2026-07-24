@@ -13,8 +13,9 @@
 #include "hal_wake_word.h"
 #include "sensecap-watcher.h"
 #include "sfx_service.h"
-#include "voice_service.h"
+#include "voice_listening_ui_policy.h"
 #include "voice_remote_control_core.h"
+#include "voice_service.h"
 #include "voice_upload_guard.h"
 #include "voice_wake_lifecycle.h"
 #include "ws_client.h"
@@ -83,11 +84,12 @@ static volatile TickType_t g_button_suppressed_until_tick = 0;
 static bool g_recording_triggered_by_wake_word = false;
 static portMUX_TYPE g_remote_mailbox_lock = portMUX_INITIALIZER_UNLOCKED;
 static voice_remote_mailbox_state_t g_remote_mailbox = {
-    .target = {
-        .recording_desired = false,
-        .recording_permitted = true,
-        .generation = 1U,
-    },
+    .target =
+        {
+            .recording_desired = false,
+            .recording_permitted = true,
+            .generation = 1U,
+        },
     .accepting_remote = false,
     .suspend_requested_generation = 0U,
 };
@@ -97,16 +99,20 @@ static voice_remote_control_state_t g_remote_control = {
     .applied_generation = 0U,
 };
 static uint32_t g_remote_suspend_applied_generation = 0U;
+static bool g_startup_audio_release_pending = false;
 static StaticSemaphore_t g_remote_suspend_serial_buffer;
 static SemaphoreHandle_t g_remote_suspend_serial = NULL;
 static StaticSemaphore_t g_remote_suspend_ack_buffer;
 static SemaphoreHandle_t g_remote_suspend_ack = NULL;
 static bool g_behavior_feedback_enabled = true;
 static voice_upload_guard_t g_upload_guard = {0};
+static bool g_upload_error_recovery_pending = false;
+static TickType_t g_upload_error_recover_at = 0;
 
 /* Audio buffer for PCM data (16kHz, 16-bit, 60ms frame = 1920 bytes) */
 #define PCM_FRAME_SIZE 1920
 #define VOICE_SUSPEND_APPLY_WAIT_MS 300
+#define VOICE_UPLOAD_ERROR_RECOVERY_MS 2500
 
 static uint8_t g_pcm_buf[PCM_FRAME_SIZE];
 
@@ -232,6 +238,7 @@ static void voice_remote_prepare_session(void) {
     portENTER_CRITICAL(&g_remote_mailbox_lock);
     voice_remote_mailbox_prepare_session(&g_remote_mailbox);
     g_remote_suspend_applied_generation = 0U;
+    g_startup_audio_release_pending = false;
     portEXIT_CRITICAL(&g_remote_mailbox_lock);
 }
 
@@ -244,7 +251,28 @@ static void voice_remote_open_session(void) {
 static void voice_remote_close_session(void) {
     portENTER_CRITICAL(&g_remote_mailbox_lock);
     voice_remote_mailbox_close_session(&g_remote_mailbox);
+    g_startup_audio_release_pending = false;
     portEXIT_CRITICAL(&g_remote_mailbox_lock);
+}
+
+static void voice_release_startup_audio_guard_if_idle(void) {
+    bool should_release = false;
+
+    if (g_state != VOICE_STATE_IDLE) {
+        return;
+    }
+
+    portENTER_CRITICAL(&g_remote_mailbox_lock);
+    if (g_startup_audio_release_pending) {
+        g_startup_audio_release_pending = false;
+        should_release = true;
+    }
+    portEXIT_CRITICAL(&g_remote_mailbox_lock);
+
+    if (should_release) {
+        sfx_service_set_voice_audio_busy(false);
+        ESP_LOGD(TAG, "Released startup audio guard from idle voice task");
+    }
 }
 
 static void voice_remote_acknowledge_pending_suspend(void) {
@@ -267,6 +295,8 @@ static void voice_reset_runtime_state(void) {
     g_recording_triggered_by_wake_word = false;
     voice_remote_control_init(&g_remote_control);
     voice_upload_guard_reset(&g_upload_guard, 0U);
+    g_upload_error_recovery_pending = false;
+    g_upload_error_recover_at = 0;
 #ifdef CONFIG_ENABLE_WAKE_WORD
     g_wake_lifecycle_configured = false;
 #endif
@@ -458,8 +488,14 @@ static const voice_wake_lifecycle_ops_t s_wake_lifecycle_ops = {
 };
 #endif
 
-static void log_cloud_not_ready(void) {
-    ESP_LOGW(TAG, "Cloud is not ready; local voice state remains unchanged (connected=%d)", ws_client_is_connected());
+static void show_cloud_not_ready_state(void) {
+    if (!g_behavior_feedback_enabled) {
+        return;
+    }
+
+    bool connected = ws_client_is_connected() != 0;
+    behavior_state_set_with_text(connected ? "processing" : "error", connected ? "Cloud Handshake..." : "Cloud Offline",
+                                 0);
 }
 
 #if CONFIG_WATCHER_LOG_HEAP_DIAGNOSTICS
@@ -537,7 +573,8 @@ static void show_listening_ui(void) {
     const bool wake_transition_in_progress =
         current_behavior_state != NULL && strcmp(current_behavior_state, "listening_wake") == 0;
     const bool skip_wake_intro = current_display_is_awake_idle_variant(&current_emoji);
-    const bool use_wake_intro = wake_transition_in_progress || current_display_is_sleep_standby(current_emoji);
+    const bool use_wake_intro = voice_listening_ui_should_use_wake_intro(
+        current_behavior_state, current_display_is_sleep_standby(current_emoji));
     const char *listening_state = use_wake_intro ? "listening_wake" : "listening";
 
     bool full_anim_headroom = has_listening_ui_headroom(&free_internal, &largest_internal, &largest_dma);
@@ -714,8 +751,21 @@ void voice_recorder_get_stats(voice_stats_t *out_stats) {
     }
 }
 
-static void log_waiting_for_server_response(void) {
-    ESP_LOGI(TAG, "Audio turn ended; local voice state remains unchanged while waiting for the server");
+static void show_thinking_expression_without_body_action(void) {
+    esp_err_t ret;
+
+    if (!g_behavior_feedback_enabled) {
+        return;
+    }
+
+    /* The thinking face is useful feedback after the user closes the microphone,
+     * but the matching body action is intentionally withheld until it is redesigned. */
+    ret = behavior_state_set_with_resources("thinking", "", 0, "thinking", "");
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to show thinking expression: %s", esp_err_to_name(ret));
+        return;
+    }
+    ESP_LOGI(TAG, "Thinking expression shown without body action, sound, or text");
 }
 
 /* ------------------------------------------------------------------ */
@@ -725,13 +775,14 @@ static void log_waiting_for_server_response(void) {
 static int start_recording(void) {
     ws_client_audio_queue_stats_t queue_stats = {0};
 
+    g_upload_error_recovery_pending = false;
     if (!g_remote_control.recording_permitted) {
         ESP_LOGI(TAG, "Recording start deferred until animation gate opens");
         return -1;
     }
     if (!voice_transport_is_ready()) {
         ESP_LOGW(TAG, "start_recording blocked: ws session not ready (connected=%d)", ws_client_is_connected());
-        log_cloud_not_ready();
+        show_cloud_not_ready_state();
         g_stats.error_count++;
         return -1;
     }
@@ -792,7 +843,7 @@ static int stop_recording(void) {
             g_stats.error_count++;
             /* Still transition to idle */
         }
-        log_waiting_for_server_response();
+        show_thinking_expression_without_body_action();
     } else {
         ESP_LOGW(TAG, "Skipping audio end marker: ws session not ready (connected=%d)", ws_client_is_connected());
         (void)behavior_state_refresh_animation();
@@ -821,6 +872,29 @@ static const char *voice_upload_abort_reason(voice_upload_guard_result_t result)
     case VOICE_UPLOAD_CONTINUE:
     default:
         return "none";
+    }
+}
+
+static void schedule_upload_error_recovery(void) {
+    g_upload_error_recover_at = xTaskGetTickCount() + pdMS_TO_TICKS(VOICE_UPLOAD_ERROR_RECOVERY_MS);
+    g_upload_error_recovery_pending = true;
+}
+
+static void maybe_recover_upload_error(void) {
+    TickType_t now;
+
+    if (!g_upload_error_recovery_pending) {
+        return;
+    }
+    now = xTaskGetTickCount();
+    if ((int32_t)(now - g_upload_error_recover_at) < 0) {
+        return;
+    }
+
+    g_upload_error_recovery_pending = false;
+    if (g_state == VOICE_STATE_IDLE && strcmp(behavior_state_get_current(), "error") == 0) {
+        ESP_LOGI(TAG, "Recovering transient upload error UI to standby");
+        (void)behavior_state_cancel();
     }
 }
 
@@ -853,8 +927,11 @@ static void abort_recording_after_upload_failure(voice_upload_guard_result_t res
     g_recording_triggered_by_wake_word = false;
     voice_upload_guard_reset(&g_upload_guard, 0U);
     sfx_service_set_voice_audio_busy(false);
-    ESP_LOGW(TAG, "Audio upload failed; local voice state remains unchanged: reason=%s",
-             voice_upload_abort_reason(result));
+    if (g_behavior_feedback_enabled) {
+        behavior_state_set_with_text(
+            "error", result == VOICE_UPLOAD_ABORT_CLOUD_LOST ? "Cloud Offline" : "Audio Upload Failed", 0);
+        schedule_upload_error_recovery();
+    }
 }
 
 void voice_recorder_suspend_cloud_audio(void) {
@@ -898,6 +975,17 @@ esp_err_t voice_recorder_request_close(void) {
     return submit_remote_recording_target(false);
 }
 
+esp_err_t voice_recorder_request_startup_audio_release(void) {
+    if (!g_task_running || g_voice_task_handle == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    portENTER_CRITICAL(&g_remote_mailbox_lock);
+    g_startup_audio_release_pending = true;
+    portEXIT_CRITICAL(&g_remote_mailbox_lock);
+    return ESP_OK;
+}
+
 void voice_recorder_set_recording_permitted(bool permitted) {
     bool changed = voice_remote_publish_permitted(permitted);
     if (changed) {
@@ -909,7 +997,7 @@ static void handle_short_press_toggle(void) {
     if (g_state == VOICE_STATE_IDLE) {
         if (!voice_transport_is_ready()) {
             ESP_LOGW(TAG, "Short press ignored: ws session not ready (connected=%d)", ws_client_is_connected());
-            log_cloud_not_ready();
+            show_cloud_not_ready_state();
             return;
         }
 
@@ -919,7 +1007,7 @@ static void handle_short_press_toggle(void) {
         if (g_state == VOICE_STATE_RECORDING) {
             show_listening_ui();
         } else {
-            log_cloud_not_ready();
+            show_cloud_not_ready_state();
         }
         return;
     }
@@ -927,7 +1015,6 @@ static void handle_short_press_toggle(void) {
     if (g_state == VOICE_STATE_RECORDING) {
         ESP_LOGI(TAG, "Short press - stopping recording");
         voice_recorder_process_event(VOICE_EVENT_BUTTON_SHORT_CLICK);
-        log_waiting_for_server_response();
     }
 }
 
@@ -970,12 +1057,11 @@ static void handle_remote_control_snapshot(void) {
         if (g_state == VOICE_STATE_RECORDING) {
             show_listening_ui();
         } else {
-            log_cloud_not_ready();
+            show_cloud_not_ready_state();
         }
     } else if (action == VOICE_REMOTE_ACTION_STOP) {
         ESP_LOGI(TAG, "Remote microphone target idle - stopping recording");
         (void)stop_recording();
-        log_waiting_for_server_response();
     }
 }
 
@@ -989,7 +1075,7 @@ static void handle_wake_word_event(void) {
         show_listening_ui();
     } else {
         g_recording_triggered_by_wake_word = false;
-        log_cloud_not_ready();
+        show_cloud_not_ready_state();
     }
 }
 #endif
@@ -1029,6 +1115,8 @@ int voice_recorder_tick(void) {
     int send_ret;
     ws_client_audio_queue_stats_t queue_stats = {0};
     voice_upload_guard_result_t upload_result;
+
+    maybe_recover_upload_error();
 
 #ifdef CONFIG_ENABLE_WAKE_WORD
     static uint32_t wake_idle_frame_count = 0;
@@ -1180,7 +1268,6 @@ int voice_recorder_tick(void) {
         ESP_LOGI(TAG, "VAD triggered stop - silence timeout");
         /* Stop recording due to silence timeout */
         voice_recorder_process_event(VOICE_EVENT_TIMEOUT);
-        log_waiting_for_server_response();
         return 0; /* Recording stopped, don't send this frame */
     }
 #endif
@@ -1219,6 +1306,7 @@ static void voice_process_pending_events(void) {
     voice_event_t event = VOICE_EVENT_NONE;
 
     handle_remote_control_snapshot();
+    voice_release_startup_audio_guard_if_idle();
     while (g_event_queue != NULL && xQueueReceive(g_event_queue, &event, 0) == pdTRUE) {
         if (event == VOICE_EVENT_BUTTON_SHORT_CLICK) {
             handle_short_press_toggle();
@@ -1253,8 +1341,8 @@ static bool voice_wait_for_task_exit(uint32_t timeout_ms) {
 }
 
 static void voice_recorder_task(void *arg) {
-    ESP_LOGI(TAG, "Voice recorder task started: stack_size=%u stack_hwm=%u",
-             (unsigned)CONFIG_VOICE_TASK_STACK_SIZE, (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    ESP_LOGI(TAG, "Voice recorder task started: stack_size=%u stack_hwm=%u", (unsigned)CONFIG_VOICE_TASK_STACK_SIZE,
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     while (g_task_running) {
         voice_process_pending_events();

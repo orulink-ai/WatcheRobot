@@ -19,4 +19,4 @@ Each release should include:
 - `SHA256SUMS.txt`
 - all required downloadable artifacts
 
-The first public activity release must include at least the ESP32 firmware flash ZIP, SD-card behavior asset ZIP, `SHA256SUMS.txt`, release notes, and compatibility notes. Large binaries, firmware ZIPs, APKs, installers, DMGs, Gerber ZIPs, and hardware package ZIPs must be uploaded as release assets.
+A public release must include at least the ESP32 firmware flash ZIP, SD-card behavior asset ZIP, `SHA256SUMS.txt`, release notes, and compatibility notes. Large binaries, firmware ZIPs, APKs, installers, DMGs, Gerber ZIPs, and hardware package ZIPs must be uploaded as release assets.

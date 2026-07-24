@@ -43,8 +43,7 @@ voice_remote_suspend_request_t voice_remote_mailbox_request_suspend(voice_remote
 
 void voice_remote_control_init(voice_remote_control_state_t *state);
 
-voice_remote_action_t voice_remote_control_apply(voice_remote_control_state_t *state,
-                                                  voice_remote_snapshot_t snapshot,
-                                                  bool recording_active);
+voice_remote_action_t voice_remote_control_apply(voice_remote_control_state_t *state, voice_remote_snapshot_t snapshot,
+                                                 bool recording_active);
 
 #endif

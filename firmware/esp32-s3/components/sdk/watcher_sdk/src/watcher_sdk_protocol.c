@@ -42,8 +42,8 @@ static bool json_int_range(cJSON *object, const char *key, int minimum, int maxi
     return true;
 }
 
-static bool json_optional_int_range(cJSON *object, const char *key, int minimum, int maximum,
-                                    int default_value, int *out_value) {
+static bool json_optional_int_range(cJSON *object, const char *key, int minimum, int maximum, int default_value,
+                                    int *out_value) {
     cJSON *item = cJSON_GetObjectItem(object, key);
 
     if (item == NULL) {
@@ -211,24 +211,24 @@ watcher_sdk_protocol_result_t watcher_sdk_protocol_parse(const char *json, size_
         break;
     case WATCHER_SDK_PROTOCOL_ANIMATION_PLAY:
         resource_id = json_string(data, "animation_id");
-        if (!copy_bounded_string(out_command->data.resource.resource_id,
-                                 sizeof(out_command->data.resource.resource_id), resource_id, false)) {
+        if (!copy_bounded_string(out_command->data.resource.resource_id, sizeof(out_command->data.resource.resource_id),
+                                 resource_id, false)) {
             cJSON_Delete(root);
             return WATCHER_SDK_PROTOCOL_INVALID_ARGUMENT;
         }
         break;
     case WATCHER_SDK_PROTOCOL_MOTION_ACTION_PLAY:
         resource_id = json_string(data, "action_id");
-        if (!copy_bounded_string(out_command->data.resource.resource_id,
-                                 sizeof(out_command->data.resource.resource_id), resource_id, false)) {
+        if (!copy_bounded_string(out_command->data.resource.resource_id, sizeof(out_command->data.resource.resource_id),
+                                 resource_id, false)) {
             cJSON_Delete(root);
             return WATCHER_SDK_PROTOCOL_INVALID_ARGUMENT;
         }
         break;
     case WATCHER_SDK_PROTOCOL_AUDIO_PLAY:
         resource_id = json_string(data, "sound_id");
-        if (!copy_bounded_string(out_command->data.resource.resource_id,
-                                 sizeof(out_command->data.resource.resource_id), resource_id, false)) {
+        if (!copy_bounded_string(out_command->data.resource.resource_id, sizeof(out_command->data.resource.resource_id),
+                                 resource_id, false)) {
             cJSON_Delete(root);
             return WATCHER_SDK_PROTOCOL_INVALID_ARGUMENT;
         }
@@ -443,9 +443,9 @@ watcher_sdk_protocol_result_t watcher_sdk_protocol_build_nack(const char *messag
     return print_json(root, out_json, out_size);
 }
 
-watcher_sdk_protocol_result_t watcher_sdk_protocol_build_session_ack(const char *message_type,
-                                                                     const char *command_id, uint32_t session_id,
-                                                                     char *out_json, size_t out_size) {
+watcher_sdk_protocol_result_t watcher_sdk_protocol_build_session_ack(const char *message_type, const char *command_id,
+                                                                     uint32_t session_id, char *out_json,
+                                                                     size_t out_size) {
     cJSON *root = cJSON_CreateObject();
     cJSON *data;
 
@@ -467,8 +467,12 @@ watcher_sdk_protocol_result_t watcher_sdk_protocol_build_ready(const char *devic
     cJSON *root = cJSON_CreateObject();
     cJSON *data;
     cJSON *capabilities;
-    static const char *names[] = {"behavior", "animation", "motion", "audio", "audio.stream", "light",
-                                  "microphone", "camera.capture"};
+    static const char *names[] = {"behavior",         "animation",
+                                  "motion",           "audio",
+                                  "audio.stream",     "light",
+                                  "microphone",       "camera.capture",
+                                  "input.back_touch", "input.screen_touch",
+                                  "input.roller"};
     size_t index;
 
     if (root == NULL || device_id == NULL) {
@@ -507,8 +511,7 @@ static const char *job_state_name(watcher_sdk_job_state_t state) {
 }
 
 static const char *domain_name(watcher_sdk_domain_t domain) {
-    static const char *names[] = {"none", "behavior", "animation", "motion", "audio", "light", "microphone",
-                                  "camera"};
+    static const char *names[] = {"none", "behavior", "animation", "motion", "audio", "light", "microphone", "camera"};
     return domain >= WATCHER_SDK_DOMAIN_NONE && domain < WATCHER_SDK_DOMAIN_COUNT ? names[domain] : "none";
 }
 
@@ -529,6 +532,101 @@ watcher_sdk_protocol_result_t watcher_sdk_protocol_build_operation_event(const w
     cJSON_AddStringToObject(data, "state", job_state_name(event->state));
     if (event->error_code != 0) {
         cJSON_AddNumberToObject(data, "error_code", event->error_code);
+    }
+    return print_json(root, out_json, out_size);
+}
+
+static const char *input_source_name(watcher_sdk_input_source_t source) {
+    switch (source) {
+    case WATCHER_SDK_INPUT_BACK_TOUCH:
+        return "back_touch";
+    case WATCHER_SDK_INPUT_SCREEN_TOUCH:
+        return "screen_touch";
+    case WATCHER_SDK_INPUT_ROLLER:
+        return "roller";
+    case WATCHER_SDK_INPUT_UNKNOWN:
+    default:
+        return NULL;
+    }
+}
+
+static const char *input_action_name(watcher_sdk_input_action_t action) {
+    switch (action) {
+    case WATCHER_SDK_INPUT_ACTION_PRESS:
+        return "press";
+    case WATCHER_SDK_INPUT_ACTION_RELEASE:
+        return "release";
+    case WATCHER_SDK_INPUT_ACTION_LONG_PRESS:
+        return "long_press";
+    case WATCHER_SDK_INPUT_ACTION_TAP:
+        return "tap";
+    case WATCHER_SDK_INPUT_ACTION_ROTATE:
+        return "rotate";
+    case WATCHER_SDK_INPUT_ACTION_UNKNOWN:
+    default:
+        return NULL;
+    }
+}
+
+static bool input_event_is_valid(const watcher_sdk_input_event_t *event) {
+    if (event == NULL) {
+        return false;
+    }
+    switch (event->source) {
+    case WATCHER_SDK_INPUT_BACK_TOUCH:
+        return event->action == WATCHER_SDK_INPUT_ACTION_PRESS || event->action == WATCHER_SDK_INPUT_ACTION_RELEASE ||
+               event->action == WATCHER_SDK_INPUT_ACTION_LONG_PRESS;
+    case WATCHER_SDK_INPUT_SCREEN_TOUCH:
+        return event->action == WATCHER_SDK_INPUT_ACTION_TAP && event->x >= 0 && event->y >= 0;
+    case WATCHER_SDK_INPUT_ROLLER:
+        return event->action == WATCHER_SDK_INPUT_ACTION_ROTATE && event->delta != 0;
+    case WATCHER_SDK_INPUT_UNKNOWN:
+    default:
+        return false;
+    }
+}
+
+watcher_sdk_protocol_result_t watcher_sdk_protocol_build_input_event(const watcher_sdk_input_event_t *event,
+                                                                     char *out_json, size_t out_size) {
+    cJSON *root;
+    cJSON *data;
+    const char *source;
+    const char *action;
+
+    if (!input_event_is_valid(event)) {
+        return WATCHER_SDK_PROTOCOL_INVALID_ARGUMENT;
+    }
+    source = input_source_name(event->source);
+    action = input_action_name(event->action);
+    if (source == NULL || action == NULL) {
+        return WATCHER_SDK_PROTOCOL_INVALID_ARGUMENT;
+    }
+
+    root = cJSON_CreateObject();
+    if (root == NULL) {
+        return WATCHER_SDK_PROTOCOL_NO_MEMORY;
+    }
+    cJSON_AddStringToObject(root, "type", "evt.sdk.input");
+    cJSON_AddNumberToObject(root, "code", 0);
+    data = cJSON_AddObjectToObject(root, "data");
+    cJSON_AddStringToObject(data, "source", source);
+    cJSON_AddStringToObject(data, "action", action);
+    cJSON_AddNumberToObject(data, "timestamp_ms", event->timestamp_ms);
+    switch (event->source) {
+    case WATCHER_SDK_INPUT_BACK_TOUCH:
+        cJSON_AddNumberToObject(data, "touch_id", event->touch_id);
+        break;
+    case WATCHER_SDK_INPUT_SCREEN_TOUCH:
+        cJSON_AddNumberToObject(data, "x", event->x);
+        cJSON_AddNumberToObject(data, "y", event->y);
+        break;
+    case WATCHER_SDK_INPUT_ROLLER:
+        cJSON_AddNumberToObject(data, "delta", event->delta);
+        break;
+    case WATCHER_SDK_INPUT_UNKNOWN:
+    default:
+        cJSON_Delete(root);
+        return WATCHER_SDK_PROTOCOL_INVALID_ARGUMENT;
     }
     return print_json(root, out_json, out_size);
 }

@@ -223,9 +223,7 @@ static void test_button_toggle_and_barge_in(void) {
     expect_true(!g_env.recording, "button closes recording");
     expect_true(g_env.last_stage == AGENT_RUNTIME_STAGE_THINKING, "close enters thinking");
     agent_runtime_on_realtime_audio(pcm, sizeof(pcm));
-    expect_true(g_env.last_stage == AGENT_RUNTIME_STAGE_THINKING, "queued audio keeps waiting state");
-    agent_runtime_on_audio_playback_started();
-    expect_true(g_env.last_stage == AGENT_RUNTIME_STAGE_SPEAKING, "playback start enters speaking");
+    expect_true(g_env.last_stage == AGENT_RUNTIME_STAGE_SPEAKING, "audio enters speaking");
     agent_runtime_handle_button(105);
     expect_true(g_env.audio_abort_count == 1, "barge-in aborts audio");
     expect_true(g_env.realtime_cancel_count >= 1, "barge-in cancels response");
@@ -260,9 +258,7 @@ static void test_response_audio_closes_stale_recorder_before_playback(void) {
     agent_runtime_on_realtime_audio(pcm, sizeof(pcm));
     expect_true(!g_env.recording, "response audio closes stale recorder");
     expect_true(g_env.recorder_suspend_count == 1, "response audio synchronously suspends recorder");
-    expect_true(g_env.last_stage == AGENT_RUNTIME_STAGE_LISTENING, "queued response audio does not claim playback");
-    agent_runtime_on_audio_playback_started();
-    expect_true(g_env.last_stage == AGENT_RUNTIME_STAGE_SPEAKING, "response playback enters speaking");
+    expect_true(g_env.last_stage == AGENT_RUNTIME_STAGE_SPEAKING, "response audio enters speaking");
 }
 
 static void test_server_vad_stopped_closes_recorder(void) {

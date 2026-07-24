@@ -229,9 +229,7 @@ static esp_err_t sdk_camera_prepare(watcher_sdk_context_t *context) {
         error = camera_service_configure(context->camera.width, context->camera.height, context->camera.quality,
                                          &applied_width, &applied_height);
     }
-    for (int frame_index = 0;
-         error == ESP_OK && frame_index < WATCHER_SDK_CAMERA_WARM_UP_FRAMES;
-         ++frame_index) {
+    for (int frame_index = 0; error == ESP_OK && frame_index < WATCHER_SDK_CAMERA_WARM_UP_FRAMES; ++frame_index) {
         error = camera_service_capture_once();
         if (error == ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(WATCHER_SDK_CAMERA_WARM_UP_SETTLE_MS));
@@ -263,8 +261,8 @@ static void sdk_camera_capture_task(void *user_context) {
         error = camera_service_capture_once();
     }
     if (error != ESP_OK) {
-        ESP_LOGW(TAG, "camera capture session %lu failed: %s",
-                 (unsigned long)context->camera_session_id, esp_err_to_name(error));
+        ESP_LOGW(TAG, "camera capture session %lu failed: %s", (unsigned long)context->camera_session_id,
+                 esp_err_to_name(error));
     }
 
     context->camera_session_id = WATCHER_SDK_SESSION_INVALID;
@@ -404,8 +402,7 @@ static void sdk_process_motion_events(watcher_sdk_context_t *context, uint32_t n
             (void)watcher_sdk_core_fail(&context->core, job_id, sdk_motion_failure_code(&event));
         }
     }
-    if (sdk_motion_event_take_dropped() > 0U &&
-        watcher_sdk_motion_tracker_is_active(&context->motion_tracker)) {
+    if (sdk_motion_event_take_dropped() > 0U && watcher_sdk_motion_tracker_is_active(&context->motion_tracker)) {
         watcher_sdk_job_id_t job_id = watcher_sdk_motion_tracker_job_id(&context->motion_tracker);
         sdk_clear_motion_tracking(context);
         (void)watcher_sdk_core_fail(&context->core, job_id, ESP_ERR_NO_MEM);
@@ -489,11 +486,9 @@ void watcher_sdk_tick(watcher_sdk_context_t *context) {
                 context->animation_job_id = WATCHER_SDK_JOB_INVALID;
             }
         }
-        if (context->behavior_job_id != WATCHER_SDK_JOB_INVALID &&
-            event_type == ANIMATION_EVENT_COMPLETED &&
+        if (context->behavior_job_id != WATCHER_SDK_JOB_INVALID && event_type == ANIMATION_EVENT_COMPLETED &&
             strcmp(animation_event.state_id, context->behavior_id) == 0) {
-            if (context->behavior_repeat_remaining > 1U &&
-                behavior_state_set(context->behavior_id) == ESP_OK) {
+            if (context->behavior_repeat_remaining > 1U && behavior_state_set(context->behavior_id) == ESP_OK) {
                 context->behavior_repeat_remaining--;
                 context->behavior_started_ms = now_ms;
             } else {
@@ -503,8 +498,7 @@ void watcher_sdk_tick(watcher_sdk_context_t *context) {
             }
         }
         if (context->behavior_job_id != WATCHER_SDK_JOB_INVALID && event_type == ANIMATION_EVENT_FAILED) {
-            (void)watcher_sdk_core_fail(&context->core, context->behavior_job_id,
-                                        (int)animation_event.event.failure);
+            (void)watcher_sdk_core_fail(&context->core, context->behavior_job_id, (int)animation_event.event.failure);
             context->behavior_job_id = WATCHER_SDK_JOB_INVALID;
         }
     }
@@ -519,8 +513,7 @@ bool watcher_sdk_poll_event(watcher_sdk_context_t *context, watcher_sdk_event_t 
 }
 
 watcher_sdk_job_state_t watcher_job_get_state(watcher_sdk_context_t *context, watcher_sdk_job_id_t job_id) {
-    return sdk_context_is_open(context) ? watcher_sdk_core_get_state(&context->core, job_id)
-                                        : WATCHER_SDK_JOB_UNKNOWN;
+    return sdk_context_is_open(context) ? watcher_sdk_core_get_state(&context->core, job_id) : WATCHER_SDK_JOB_UNKNOWN;
 }
 
 watcher_sdk_result_t watcher_job_cancel(watcher_sdk_context_t *context, watcher_sdk_job_id_t job_id) {
@@ -530,8 +523,7 @@ watcher_sdk_result_t watcher_job_cancel(watcher_sdk_context_t *context, watcher_
         return WATCHER_SDK_RESULT_INVALID_STATE;
     }
     result = watcher_sdk_core_cancel(&context->core, job_id);
-    if (result == WATCHER_SDK_RESULT_OK &&
-        watcher_sdk_motion_tracker_job_id(&context->motion_tracker) == job_id) {
+    if (result == WATCHER_SDK_RESULT_OK && watcher_sdk_motion_tracker_job_id(&context->motion_tracker) == job_id) {
         sdk_clear_motion_tracking(context);
     }
     return result;
@@ -641,14 +633,13 @@ watcher_sdk_result_t watcher_motion_move_to(watcher_sdk_context_t *context, cons
         (void)watcher_sdk_core_fail(&context->core, job_id, error);
         return sdk_from_esp_err(error);
     }
-    watcher_sdk_motion_tracker_bind(&context->motion_tracker, command_seq, job_id, now_ms,
-                                    target->duration_ms);
+    watcher_sdk_motion_tracker_bind(&context->motion_tracker, command_seq, job_id, now_ms, target->duration_ms);
     *out_job_id = job_id;
     return WATCHER_SDK_RESULT_OK;
 }
 
-watcher_sdk_result_t watcher_motion_set_target(watcher_sdk_context_t *context, bool has_pan, int pan_deg,
-                                               bool has_tilt, int tilt_deg) {
+watcher_sdk_result_t watcher_motion_set_target(watcher_sdk_context_t *context, bool has_pan, int pan_deg, bool has_tilt,
+                                               int tilt_deg) {
     control_servo_request_t request = {
         .has_x = has_pan,
         .has_y = has_tilt,
@@ -790,8 +781,8 @@ watcher_sdk_result_t watcher_light_play_effect(watcher_sdk_context_t *context,
     if (options->repeat_count > 0U) {
         duration_ms = (uint32_t)options->period_ms * options->repeat_count;
     }
-    result = watcher_sdk_core_start_direct(&context->core, WATCHER_SDK_DOMAIN_LIGHT, sdk_now_ms(), duration_ms,
-                                           &job_id);
+    result =
+        watcher_sdk_core_start_direct(&context->core, WATCHER_SDK_DOMAIN_LIGHT, sdk_now_ms(), duration_ms, &job_id);
     if (result != WATCHER_SDK_RESULT_OK) {
         return result;
     }
@@ -845,8 +836,7 @@ static int sdk_microphone_transport_end(void *user_context) {
     return 0;
 }
 
-watcher_sdk_result_t watcher_microphone_open(watcher_sdk_context_t *context,
-                                             const watcher_microphone_config_t *config,
+watcher_sdk_result_t watcher_microphone_open(watcher_sdk_context_t *context, const watcher_microphone_config_t *config,
                                              watcher_sdk_session_id_t *out_session_id) {
     voice_transport_t transport = {0};
     esp_err_t error;
@@ -884,8 +874,7 @@ watcher_sdk_result_t watcher_microphone_open(watcher_sdk_context_t *context,
     return WATCHER_SDK_RESULT_OK;
 }
 
-watcher_sdk_result_t watcher_microphone_close(watcher_sdk_context_t *context,
-                                              watcher_sdk_session_id_t session_id) {
+watcher_sdk_result_t watcher_microphone_close(watcher_sdk_context_t *context, watcher_sdk_session_id_t session_id) {
     esp_err_t error;
     if (!sdk_context_is_open(context) || session_id == WATCHER_SDK_SESSION_INVALID ||
         session_id != context->microphone_session_id) {

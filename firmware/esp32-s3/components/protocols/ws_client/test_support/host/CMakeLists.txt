@@ -38,3 +38,25 @@ add_executable(ws_audio_codec_negotiation_host_tests
 )
 target_include_directories(ws_audio_codec_negotiation_host_tests PRIVATE ../../src)
 add_test(NAME ws_audio_codec_negotiation_host_tests COMMAND ws_audio_codec_negotiation_host_tests)
+
+add_executable(ws_event_ui_policy_host_tests
+    "${WS_CLIENT_COMPONENT_DIR}/src/ws_event_ui_policy.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_ws_event_ui_policy.c"
+)
+
+target_include_directories(ws_event_ui_policy_host_tests PRIVATE
+    "${WS_CLIENT_COMPONENT_DIR}/src"
+)
+
+add_test(NAME ws_event_ui_policy_host_tests COMMAND ws_event_ui_policy_host_tests)
+
+add_executable(ws_tts_stream_policy_host_tests
+    "${WS_CLIENT_COMPONENT_DIR}/src/ws_tts_stream_policy.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_ws_tts_stream_policy.c"
+)
+
+target_include_directories(ws_tts_stream_policy_host_tests PRIVATE
+    "${WS_CLIENT_COMPONENT_DIR}/src"
+)
+
+add_test(NAME ws_tts_stream_policy_host_tests COMMAND ws_tts_stream_policy_host_tests)

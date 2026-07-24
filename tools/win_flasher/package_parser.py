@@ -8,7 +8,8 @@ from zipfile import ZipFile
 from .models import FlashSegment, ParsedFlashPackage
 
 REQUIRED_BINARIES = {"bootloader.bin", "partition-table.bin"}
-VERSION_IN_NAME = re.compile(r"(v\d+\.\d+\.\d+)", re.IGNORECASE)
+VERSION_IN_NAME = re.compile(r"(v\d+\.\d+(?:\.\d+)?)", re.IGNORECASE)
+APP_BINARY_NAME = "watcherobot-s3.bin"
 
 
 class PackageParseError(ValueError):
@@ -119,8 +120,8 @@ def parse_flash_package(package_path: Path) -> ParsedFlashPackage:
         if missing:
             raise PackageParseError(f"ZIP 缺少必需二进制文件: {', '.join(missing)}")
 
-        if not any(segment.offset == 0x10000 and segment.file_name.lower().endswith(".bin") for segment in segments):
-            raise PackageParseError("ZIP 缺少主应用固件段（期望在 0x10000）。")
+        if not any(segment.file_name.lower() == APP_BINARY_NAME for segment in segments):
+            raise PackageParseError("ZIP 缺少主应用固件段（期望 WatcheRobot-S3.bin）。")
 
         if not segments:
             raise PackageParseError("flash_args.txt 未定义任何烧录 segment。")

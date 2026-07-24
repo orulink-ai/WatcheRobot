@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .models import ReleaseEntry
 
-VERSION_PATTERN = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$", re.IGNORECASE)
+VERSION_PATTERN = re.compile(r"^v(\d+)\.(\d+)(?:\.(\d+))?$", re.IGNORECASE)
 
 
 def get_repo_root() -> Path:
@@ -21,7 +21,8 @@ def parse_version_key(version: str) -> tuple[int, int, int]:
     match = VERSION_PATTERN.fullmatch(version)
     if not match:
         raise ValueError(f"Invalid release version: {version}")
-    return tuple(int(part) for part in match.groups())
+    major, minor, patch = match.groups()
+    return (int(major), int(minor), int(patch or 0))
 
 
 def _score_zip(version: str, zip_path: Path) -> tuple[int, int, str]:

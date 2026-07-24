@@ -43,3 +43,14 @@ target_include_directories(voice_upload_guard_host_tests PRIVATE
 )
 
 add_test(NAME voice_upload_guard_host_tests COMMAND voice_upload_guard_host_tests)
+
+add_executable(voice_listening_ui_policy_host_tests
+    "${VOICE_COMPONENT_DIR}/src/voice_listening_ui_policy.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_voice_listening_ui_policy.c"
+)
+
+target_include_directories(voice_listening_ui_policy_host_tests PRIVATE
+    "${VOICE_COMPONENT_DIR}/src"
+)
+
+add_test(NAME voice_listening_ui_policy_host_tests COMMAND voice_listening_ui_policy_host_tests)

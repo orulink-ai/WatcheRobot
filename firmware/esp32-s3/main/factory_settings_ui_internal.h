@@ -8,6 +8,9 @@
 #include "factory_settings_scroll_curve.h"
 #include "factory_settings_ui.h"
 
+/* GB2312 Wi-Fi SSID glyphs with the built-in common-CJK font as fallback. */
+LV_FONT_DECLARE(watcher_font_wifi_cjk16);
+
 #define SETTINGS_FOCUS_MAX 12
 #define SETTINGS_GREEN 0xA9DE2C
 #define SETTINGS_SOUND_SELECTION_COLOR 0x8FC31F

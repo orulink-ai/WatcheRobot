@@ -28,6 +28,7 @@ set(WATCHER_MAIN_SRCS
         "factory_home_ui/fonts/ui_font_font_bold.c"
         "factory_home_ui/fonts/ui_font_semibold28.c"
         "factory_home_ui/fonts/ui_font_semibold42.c"
+        "factory_home_ui/fonts/watcher_font_wifi_cjk16.c"
         "factory_home_ui/images/ui_img_battery_charging_png.c"
         "factory_home_ui/images/ui_img_battery_frame_png.c"
         "factory_home_ui/images/ui_img_battery_warn_png.c"

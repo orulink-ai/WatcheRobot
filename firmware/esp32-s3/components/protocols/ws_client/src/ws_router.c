@@ -83,8 +83,7 @@ static void fill_sys_ack(cJSON *root, ws_sys_ack_t *ack) {
         cJSON *negotiated = get_object(data, "negotiated");
         cJSON *audio_uplink = negotiated != NULL ? get_object(negotiated, "audio_uplink") : NULL;
         if (audio_uplink != NULL) {
-            copy_string(ack->audio_uplink_codec, sizeof(ack->audio_uplink_codec),
-                        get_string(audio_uplink, "codec"));
+            copy_string(ack->audio_uplink_codec, sizeof(ack->audio_uplink_codec), get_string(audio_uplink, "codec"));
             copy_string(ack->audio_uplink_packetization, sizeof(ack->audio_uplink_packetization),
                         get_string(audio_uplink, "packetization"));
             ack->audio_uplink_sample_rate = get_int(audio_uplink, "sample_rate", 0);
@@ -219,8 +218,7 @@ static void fill_servo_trajectory_cmd(cJSON *root, ws_servo_trajectory_cmd_t *cm
         }
         {
             const char *profile = get_string(frame, "profile");
-            if (profile != NULL &&
-                ((profile[0] == 'e' || profile[0] == 'E') || strcmp(profile, "1") == 0)) {
+            if (profile != NULL && ((profile[0] == 'e' || profile[0] == 'E') || strcmp(profile, "1") == 0)) {
                 out->motion_profile = 1u;
             }
         }
@@ -324,14 +322,40 @@ static void fill_text_event(cJSON *root, ws_text_event_t *event) {
 
 static void fill_ai_status(cJSON *root, ws_ai_status_t *event) {
     cJSON *data = get_object(root, "data");
+    cJSON *detail;
+    cJSON *active_task_count;
+    cJSON *foreground_active;
+    cJSON *action_file;
+    const char *tts_downlink;
 
     memset(event, 0, sizeof(*event));
     if (data) {
         copy_string(event->status, sizeof(event->status), get_string(data, "status"));
         copy_string(event->message, sizeof(event->message), get_string(data, "message"));
         copy_string(event->image_name, sizeof(event->image_name), get_string(data, "image_name"));
-        copy_string(event->action_file, sizeof(event->action_file), get_string(data, "action_file"));
+        action_file = cJSON_GetObjectItem(data, "action_file");
+        if (cJSON_IsString(action_file)) {
+            event->has_action_file = true;
+            copy_string(event->action_file, sizeof(event->action_file), action_file->valuestring);
+        }
         copy_string(event->sound_file, sizeof(event->sound_file), get_string(data, "sound_file"));
+        detail = get_object(data, "detail");
+        if (detail) {
+            copy_string(event->state_domain, sizeof(event->state_domain), get_string(detail, "state_domain"));
+            copy_string(event->task_id, sizeof(event->task_id), get_string(detail, "task_id"));
+            active_task_count = cJSON_GetObjectItem(detail, "active_task_count");
+            if (cJSON_IsNumber(active_task_count)) {
+                event->active_task_count = active_task_count->valueint;
+                event->has_active_task_count = true;
+            }
+            foreground_active = cJSON_GetObjectItem(detail, "foreground_active");
+            if (cJSON_IsBool(foreground_active)) {
+                event->foreground_active = cJSON_IsTrue(foreground_active);
+                event->has_foreground_active = true;
+            }
+            tts_downlink = get_string(detail, "tts_downlink");
+            event->tts_downlink_complete = tts_downlink != NULL && strcmp(tts_downlink, "complete") == 0;
+        }
     }
 }
 

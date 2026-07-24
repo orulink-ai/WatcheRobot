@@ -71,9 +71,7 @@ def _choose_release_zip() -> Path:
     latest = entries[0] if entries else None
 
     if latest is None:
-        manual_path = Prompt.ask(
-            "No local release ZIP found. Download one from GitHub Releases or enter a ZIP path"
-        )
+        manual_path = Prompt.ask("No scanned release ZIP found. Enter a ZIP path")
         return Path(manual_path).expanduser().resolve()
 
     _show_release_table(entries)
@@ -200,7 +198,7 @@ def command_flash(args: argparse.Namespace) -> int:
         else:
             latest = get_latest_release(get_repo_root())
             if latest is None:
-                raise FlashingError("未找到本地发行 ZIP。请从 GitHub Releases 下载后使用 --zip 显式指定。")
+                raise FlashingError("未扫描到 release ZIP，请使用 --zip 显式指定。")
             zip_path = latest.zip_path
 
         package = parse_flash_package(zip_path)

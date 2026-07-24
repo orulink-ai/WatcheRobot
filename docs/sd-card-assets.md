@@ -67,7 +67,7 @@ cd firmware/esp32-s3
 python tools/sync_anim_sdcard.py --source-dir release/V2.3.0/sdcard/anim --target-root /Volumes/WATCHER_SD
 ```
 
-Use `--no-clean` only when you intentionally want to preserve existing files. The default clean copy is safer for event benches.
+Use `--no-clean` only when you intentionally want to preserve existing files. The default clean copy is safer for repeatable setup.
 
 ## Verification Checklist
 

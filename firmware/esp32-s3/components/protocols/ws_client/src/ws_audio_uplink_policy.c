@@ -3,8 +3,7 @@
 static void update_pressure_from_queue(ws_audio_uplink_policy_t *policy, size_t pending_frames,
                                        uint64_t oldest_age_us) {
     if (policy != NULL &&
-        (pending_frames >= WS_AUDIO_UPLINK_HIGH_WATER_FRAMES ||
-         oldest_age_us >= WS_AUDIO_UPLINK_PRESSURE_AGE_US)) {
+        (pending_frames >= WS_AUDIO_UPLINK_HIGH_WATER_FRAMES || oldest_age_us >= WS_AUDIO_UPLINK_PRESSURE_AGE_US)) {
         policy->pressure = true;
         policy->recovery_samples = 0U;
     }
@@ -18,20 +17,19 @@ void ws_audio_uplink_policy_reset(ws_audio_uplink_policy_t *policy) {
     policy->recovery_samples = 0U;
 }
 
-bool ws_audio_uplink_should_flush(ws_audio_uplink_policy_t *policy, size_t pending_frames,
-                                  bool end_pending, uint64_t oldest_age_us) {
+bool ws_audio_uplink_should_flush(ws_audio_uplink_policy_t *policy, size_t pending_frames, bool end_pending,
+                                  uint64_t oldest_age_us) {
     if (pending_frames == 0U) {
         return false;
     }
 
     update_pressure_from_queue(policy, pending_frames, oldest_age_us);
-    return (policy != NULL && policy->pressure) ||
-           pending_frames >= WS_AUDIO_UPLINK_BASE_BATCH_FRAMES || end_pending ||
+    return (policy != NULL && policy->pressure) || pending_frames >= WS_AUDIO_UPLINK_BASE_BATCH_FRAMES || end_pending ||
            oldest_age_us >= WS_AUDIO_UPLINK_MAX_WAIT_US;
 }
 
-size_t ws_audio_uplink_batch_frames(ws_audio_uplink_policy_t *policy, size_t pending_frames,
-                                    bool end_pending, uint64_t oldest_age_us) {
+size_t ws_audio_uplink_batch_frames(ws_audio_uplink_policy_t *policy, size_t pending_frames, bool end_pending,
+                                    uint64_t oldest_age_us) {
     size_t target_frames = WS_AUDIO_UPLINK_BASE_BATCH_FRAMES;
 
     if (pending_frames == 0U) {
@@ -46,9 +44,8 @@ size_t ws_audio_uplink_batch_frames(ws_audio_uplink_policy_t *policy, size_t pen
     return pending_frames < target_frames ? pending_frames : target_frames;
 }
 
-void ws_audio_uplink_observe_send(ws_audio_uplink_policy_t *policy, size_t batch_frames,
-                                  size_t pending_frames, uint64_t frame_interval_us,
-                                  uint64_t send_time_us) {
+void ws_audio_uplink_observe_send(ws_audio_uplink_policy_t *policy, size_t batch_frames, size_t pending_frames,
+                                  uint64_t frame_interval_us, uint64_t send_time_us) {
     if (policy == NULL) {
         return;
     }

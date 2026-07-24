@@ -8,7 +8,9 @@
 
 <p>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License: GPL-3.0"></a>
-  <img src="https://img.shields.io/badge/Version-0.1.0-brightgreen" alt="Version 0.1.0">
+  <img src="https://img.shields.io/badge/Package-0.1.0-brightgreen" alt="Package 0.1.0">
+  <img src="https://img.shields.io/badge/ESP32--S3-v0.3.2-green" alt="ESP32-S3 firmware v0.3.2">
+  <img src="https://img.shields.io/badge/STM32F103-0.1.1-green" alt="STM32F103 firmware 0.1.1">
   <img src="https://img.shields.io/badge/ESP--IDF-v5.2.1-green" alt="ESP-IDF v5.2.1">
   <img src="https://img.shields.io/badge/Hardware-Gerber%20%7C%20BOM%20%7C%20CPL-orange" alt="Hardware: Gerber, BOM, CPL">
 </p>
@@ -19,87 +21,62 @@
 
 ## 项目概览
 
-WatcheRobot 是一个桌面机器人项目，当前公开资料围绕 ESP32-S3 主控、STM32F103 协处理器、自研 PCB 模块、SD 卡行为资源和整机机械装配资料组织。
+WatcheRobot 是一个面向桌面交互场景的开源机器人项目，整机由 SenseCAP Watcher、ESP32-S3、STM32F103 协处理器、自研 PCB、机械结构件和 SD 卡行为资源组成，支持从硬件复现、固件烧录到行为资源调试的完整验证流程。
 
-这个仓库面向活动参赛者和开源开发者，目标是让没有历史上下文的人可以 Clone/Fork 后快速理解目录、准备工具链、刷写固件或生成行为资源、验证第一个动作，并通过 GitHub 提交改动。
+本仓库开放 WatcheRobot 的嵌入式固件、硬件生产资料、机械装配模型、烧录工具、行为资源说明和 Python SDK 入口。你可以基于这些内容复现整机，也可以单独复用其中的硬件设计、固件协议、运动控制、资源组织方式或主机侧控制能力。
 
-产品 App、服务端运行包、桌面端安装包在可用时通过 GitHub Releases 分发，源码不包含在本仓库中。
+通过 Python SDK，开发者可以在主机侧控制 WatcheRobot 的 ESP32-S3，调用摄像头、麦克风、喇叭，以及内置表情和动效等能力。更多接口和示例请查看 [Python SDK 说明](python-sdk/README.zh-CN.md)。
 
-## 10 分钟快速开始
+## 快速开始
 
-参赛者最短路径：
+这部分用于帮助你从零拿到仓库、准备工具，并完成一次最小可验证的启动流程。
+如果你只是想快速体验，优先使用 GitHub Releases 中提供的预编译固件和资源包；如果你需要修改固件或二次开发，再从源码构建。
 
-1. Clone 或 Fork 仓库。
-2. 安装当前平台所需的基础工具。
-3. 优先下载 Release 资产；若尚未发布，则使用本地构建作为 fallback。
-4. 刷写 ESP32-S3，并准备 SD 卡行为资源。
-5. 上电，按 smoke test 验证第一个动作。
-6. 如需提交改动，创建规范分支并打开 PR。
-
-### 1. Clone
+### 1. 获取仓库
 
 ```bash
 git clone https://github.com/orulink-ai/WatcheRobot.git
 cd WatcheRobot
+git submodule update --init --recursive
 ```
 
-如果你准备提交 PR，请先 Fork。分支命名和 PR 规则见 [CONTRIBUTING_zh.md](CONTRIBUTING_zh.md)。
+如果你计划提交改动，建议先 Fork 仓库，再从自己的 Fork 创建分支。
 
-### 2. 安装工具
+### 2. 准备工具
 
-| 平台 | 最小工具 |
+| 用途 | 工具 |
 | --- | --- |
-| Windows | Git、Python 3.11+、开发板对应 USB 串口驱动、本地构建时需要 ESP-IDF v5.2.1 |
-| macOS | Git、Python 3.11+、必要时安装 USB 串口驱动、本地构建时需要 ESP-IDF v5.2.1 |
-| Linux | Git、Python 3.11+、`dialout` 或等价串口权限、本地构建时需要 ESP-IDF v5.2.1 |
+| 基础环境 | Git、Python 3.11+ |
+| ESP32-S3 烧录 | USB 串口驱动、ESP-IDF v5.2.1 或仓库内烧录工具 |
+| STM32F103 构建/测试 | CMake、本地 C/C++ 编译工具链 |
+| SD 卡资源 | FAT32 格式 SD 卡、行为资源文件 |
+| 硬件验证 | 串口工具、万用表或基础硬件调试工具 |
 
-Windows 和 macOS 的 ESP-IDF v5.2.1 从零安装、激活和验证步骤见 [ESP-IDF 安装指引](docs/esp-idf-setup_zh.md)。
-串口驱动、端口识别、ESP32/STM32 刷写和平台差异见 [docs/flashing.md](docs/flashing.md)。
+ESP-IDF 安装见 [ESP-IDF 安装指引](docs/esp-idf-setup_zh.md)。如果只是复现或体验，优先从 [GitHub Releases](https://github.com/orulink-ai/WatcheRobot/releases) 下载预编译固件、SD 卡资源和客户端安装包。
 
-### 3. 获取固件和行为资源
+### 3. 获取固件和资源
 
-活动现场优先使用 GitHub Release 资产。当前首个公开活动 Release 尚未发布，因此文档保留本地构建和资源生成路径。
+推荐优先从 [GitHub Releases](https://github.com/orulink-ai/WatcheRobot/releases) 下载同一个套装中的资源。首次复现至少需要 ESP32-S3 固件、STM32F103 固件和 SD 卡资源，不要混用不同版本的资产；Release 中也提供 AI 烧录 Skill 压缩包，可交给 AI 助手读取后协助烧录。
 
-ESP32-S3 本地构建 fallback：
+当前 `watche-v0.1.1` 套装的资源清单见 [下载说明](docs/downloads.md)。
 
-```bash
-cd firmware/esp32-s3
-idf.py set-target esp32s3
-idf.py build
-```
+### 4. 烧录固件并准备 SD 卡
 
-STM32F103 主机侧测试 fallback：
+拿到 Release 资源后，需要先完成 STM32F103 固件烧录、ESP32-S3 固件烧录和 SD 卡资源写入，再进行启动验证。具体步骤请参考 [Firmware 说明：烧录和资源](firmware/README_zh.md#烧录和资源)。
 
-```bash
-cd firmware/stm32-f103
-cmake --preset HostDebug
-cmake --build --preset HostDebug
-ctest --preset HostDebug
-```
+如果希望由 AI 助手协助烧录，可以下载 Release 中的 `WatcheRobot-Flashing-Skill-v0.1.1.zip`，或直接让 AI 阅读 [WatcheRobot 固件烧录 Skill](tools/flashing/README_zh.md)。这个 Skill 会引导 AI 选择同版本资源、识别串口、执行烧录并检查启动日志。
 
-### 4. 刷写并准备 SD 卡
+### 5. 验证第一次启动
 
-当 ESP32 release ZIP 可用时，Windows 可使用仓库内刷写工具：
+上电后按 [首次启动验证清单](docs/action-test.md) 检查：
 
-```bash
-python -m pip install -r tools/win_flasher/requirements.txt
-python -m tools.win_flasher flash --zip .\WatcheRobot-S3-V2.3.0-esp32s3.zip --port COM7
-```
+- ESP32-S3 能正常启动并输出日志
+- SD 卡资源能被识别
+- 舵机或执行器能完成一次基础动作
+- 灯效或屏幕资源能正常显示
+- 串口或通信入口能返回基础状态信息
 
-macOS/Linux 或本地 ESP-IDF 构建场景，可在 `firmware/esp32-s3` 下使用 `idf.py flash monitor`。
-
-SD 卡行为资源流程见 [docs/sd-card-assets.md](docs/sd-card-assets.md)。活动现场可直接使用 [docs/behavior-flash-skill.md](docs/behavior-flash-skill.md) 作为操作 checklist。
-
-### 5. 验证第一个动作
-
-按 [docs/action-test.md](docs/action-test.md) 检查：
-
-- ESP32 启动日志和屏幕启动
-- SD 卡 `anim/` 行为资源
-- BLE 或 WebSocket 命令入口
-- 一个舵机动作
-- 一个灯效动作
-- 硬件可用时验证一次触摸事件
+完成以上步骤后，说明最小硬件、固件和资源链路已经跑通。后续可以继续查看固件、硬件、SDK 或资源文档进行二次开发。
 
 ## 目录结构
 
@@ -116,12 +93,15 @@ hardware/
   3d-models/      机械模型导出文件
   assembly/       后续装配图片或装配文档
 
+python-sdk/
+  README.md       Python SDK 子仓库，包含主机侧集成代码、示例和测试
+
 docs/
   esp-idf-setup_zh.md     Windows/macOS ESP-IDF v5.2.1 安装指引
   flashing.md             固件刷写和工具链说明
   sd-card-assets.md       SD 卡行为资源说明
-  behavior-flash-skill.md 活动现场行为资源操作 checklist
-  action-test.md          第一个动作 smoke test
+  behavior-flash-skill.md 行为资源操作 checklist
+  action-test.md          首次启动验证清单
   sdk.md                  公开 SDK 和协议边界
   versions.md             版本来源和追踪规则
   downloads.md            Release 资产说明
@@ -130,18 +110,18 @@ docs/
   governance.md           仓库边界说明
 
 tools/
-  esp32-flasher/  ESP32 Release 刷写命令参考
-  win_flasher/    Windows ESP32 Release ZIP 刷写工具
+  ...             发布、资源生成和固件辅助工具
 ```
 
-## 参赛者文档入口
+## 项目文档
 
 - [ESP-IDF 安装指引](docs/esp-idf-setup_zh.md)
 - [刷写说明](docs/flashing.md)
 - [SD 卡行为资源](docs/sd-card-assets.md)
-- [行为资源现场 checklist](docs/behavior-flash-skill.md)
-- [第一个动作 smoke test](docs/action-test.md)
+- [行为资源 checklist](docs/behavior-flash-skill.md)
+- [首次启动验证](docs/action-test.md)
 - [SDK 和协议边界](docs/sdk.md)
+- [Python SDK](python-sdk/README.zh-CN.md)
 - [版本追踪](docs/versions.md)
 - [贡献指南](CONTRIBUTING_zh.md)
 - [安全策略](SECURITY.md)
@@ -151,6 +131,7 @@ tools/
 本仓库公开：
 
 - 嵌入式固件源码
+- 根目录 `python-sdk/` 子模块中的 Python SDK 源码
 - PCB 和机械结构公开资料
 - 公开烧录与发布工具
 - 公开 Release 文档
@@ -164,18 +145,13 @@ tools/
 
 Release 资产类型和当前发布状态见 [docs/downloads.md](docs/downloads.md)。
 
-## 当前文档缺口
-
-- GitHub Releases 尚未发布，因此部分 Quick Start 路径使用本地构建 fallback。
-- 跨端协议契约测试缺口见 [GitHub issue #5](https://github.com/orulink-ai/WatcheRobot/issues/5)。
-- 当前 BOM 已包含型号、规格、供应商、供应商料号和可替代料字段；可购买链接和活动现场备用件数量见 [hardware/pcb/spares.md](hardware/pcb/spares.md) 继续补齐。
-
 ## 技术栈
 
 | 领域 | 主要技术 |
 | --- | --- |
 | ESP32-S3 固件 | ESP-IDF v5.2.1, FreeRTOS, LVGL |
 | STM32F103 固件 | STM32 HAL, CMake, 主机侧 C 测试 |
+| Python SDK | Python 包、示例、主机侧测试 |
 | 硬件 | EasyEDA Pro, Gerber, BOM, CPL, STEP |
 | 发布工具 | Python, Windows 烧录工具 |
 

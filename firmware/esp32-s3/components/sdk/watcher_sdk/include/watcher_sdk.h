@@ -58,8 +58,7 @@ typedef struct {
     void *user_context;
 } watcher_microphone_config_t;
 
-typedef void (*watcher_camera_image_cb_t)(const uint8_t *jpeg, size_t size, uint32_t timestamp_ms,
-                                          void *user_context);
+typedef void (*watcher_camera_image_cb_t)(const uint8_t *jpeg, size_t size, uint32_t timestamp_ms, void *user_context);
 
 typedef struct {
     int width;
@@ -86,8 +85,8 @@ watcher_sdk_result_t watcher_animation_stop(watcher_sdk_context_t *context);
 
 watcher_sdk_result_t watcher_motion_move_to(watcher_sdk_context_t *context, const watcher_motion_target_t *target,
                                             watcher_sdk_job_id_t *out_job_id);
-watcher_sdk_result_t watcher_motion_set_target(watcher_sdk_context_t *context, bool has_pan, int pan_deg,
-                                               bool has_tilt, int tilt_deg);
+watcher_sdk_result_t watcher_motion_set_target(watcher_sdk_context_t *context, bool has_pan, int pan_deg, bool has_tilt,
+                                               int tilt_deg);
 watcher_sdk_result_t watcher_motion_play_action(watcher_sdk_context_t *context, const char *action_id,
                                                 watcher_sdk_job_id_t *out_job_id);
 watcher_sdk_result_t watcher_motion_stop(watcher_sdk_context_t *context);
@@ -102,11 +101,9 @@ watcher_sdk_result_t watcher_light_play_effect(watcher_sdk_context_t *context,
                                                watcher_sdk_job_id_t *out_job_id);
 watcher_sdk_result_t watcher_light_off(watcher_sdk_context_t *context);
 
-watcher_sdk_result_t watcher_microphone_open(watcher_sdk_context_t *context,
-                                             const watcher_microphone_config_t *config,
+watcher_sdk_result_t watcher_microphone_open(watcher_sdk_context_t *context, const watcher_microphone_config_t *config,
                                              watcher_sdk_session_id_t *out_session_id);
-watcher_sdk_result_t watcher_microphone_close(watcher_sdk_context_t *context,
-                                              watcher_sdk_session_id_t session_id);
+watcher_sdk_result_t watcher_microphone_close(watcher_sdk_context_t *context, watcher_sdk_session_id_t session_id);
 
 watcher_sdk_result_t watcher_camera_capture(watcher_sdk_context_t *context,
                                             const watcher_camera_capture_config_t *config,

@@ -59,8 +59,6 @@ static uint32_t s_enqueue_timeout_count = 0;
 static uint32_t s_enqueue_invalid_count = 0;
 static agent_audio_player_done_cb_t s_done_cb = NULL;
 static void *s_done_ctx = NULL;
-static agent_audio_player_started_cb_t s_started_cb = NULL;
-static void *s_started_ctx = NULL;
 static const uint8_t s_silence[AGENT_AUDIO_SILENCE_CHUNK_BYTES] = {0};
 
 static void reset_queues(void) {
@@ -79,12 +77,6 @@ static void reset_queues(void) {
 static void notify_done_once(void) {
     if (s_done_cb != NULL) {
         s_done_cb(s_done_ctx);
-    }
-}
-
-static void notify_started_once(void) {
-    if (s_started_cb != NULL) {
-        s_started_cb(s_started_ctx);
     }
 }
 
@@ -119,8 +111,6 @@ static void worker_task(void *arg) {
                 hal_audio_set_sample_rate(AGENT_AUDIO_PLAY_SAMPLE_RATE);
                 if (hal_audio_start() != 0) {
                     ESP_LOGW(TAG, "failed to start agent playback path");
-                } else {
-                    notify_started_once();
                 }
                 s_playing = true;
             }
@@ -216,17 +206,10 @@ void agent_audio_player_stop(void) {
     }
     s_done_cb = NULL;
     s_done_ctx = NULL;
-    s_started_cb = NULL;
-    s_started_ctx = NULL;
     s_stream_done = false;
     s_playing = false;
     s_enqueue_timeout_count = 0;
     s_enqueue_invalid_count = 0;
-}
-
-void agent_audio_player_set_playback_started_callback(agent_audio_player_started_cb_t started_cb, void *user_ctx) {
-    s_started_cb = started_cb;
-    s_started_ctx = user_ctx;
 }
 
 esp_err_t agent_audio_player_enqueue(const uint8_t *pcm, size_t len) {

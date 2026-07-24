@@ -111,8 +111,8 @@ typedef bool (*ws_client_text_handler_t)(const char *json, size_t json_len, void
  * Optional application-owned gate for inbound TTS frames. Applications use
  * this to bind the binary data plane to an authenticated control session.
  */
-typedef bool (*ws_client_tts_frame_guard_t)(uint8_t flags, uint16_t stream_id, uint32_t sequence,
-                                            size_t payload_len, void *context);
+typedef bool (*ws_client_tts_frame_guard_t)(uint8_t flags, uint16_t stream_id, uint32_t sequence, size_t payload_len,
+                                            void *context);
 
 /**
  * Initialize WebSocket client
@@ -125,6 +125,12 @@ int ws_client_init(void);
  * @return 0 on success, -1 on error
  */
 int ws_client_set_server_url(const char *url);
+
+/**
+ * Set the temporary SDK Control pairing code included in the next
+ * sys.client.hello message. Pass NULL to clear it for non-SDK sessions.
+ */
+void ws_client_set_session_pairing_code(const char *pairing_code);
 
 /**
  * Get current server URL
@@ -236,8 +242,8 @@ void ws_client_mark_server_response(void);
 void ws_client_mark_hello_acked(void);
 
 /** Apply the server-selected microphone uplink codec before accepting hello. */
-bool ws_client_apply_audio_uplink_negotiation(const char *codec, int sample_rate, int channels,
-                                              int frame_duration_ms, const char *packetization, int version);
+bool ws_client_apply_audio_uplink_negotiation(const char *codec, int sample_rate, int channels, int frame_duration_ms,
+                                              const char *packetization, int version);
 
 /** Return the codec selected for the current WebSocket connection. */
 ws_audio_uplink_codec_t ws_client_get_audio_uplink_codec(void);
@@ -353,6 +359,13 @@ void ws_handle_tts_binary(const uint8_t *data, int len);
  * Call this when the LAST audio frame is received.
  */
 void ws_tts_complete(void);
+
+/**
+ * Record the server's textual TTS completion notice. If the binary LAST frame
+ * is lost, this arms a bounded fallback so the speaking presentation cannot
+ * remain active indefinitely.
+ */
+void ws_client_note_tts_downlink_complete(void);
 
 /**
  * Abort any in-progress or queued TTS playback.

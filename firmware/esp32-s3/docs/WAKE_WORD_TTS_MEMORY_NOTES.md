@@ -25,8 +25,10 @@ This note records the current memory guardrails for running WakeNet wake-word de
   - `anim_id == ""` keeps the current animation and applies a text-only state/display update.
   - `sound_id == ""` suppresses local SFX for that state request.
 - `evt.ai.status.sound_file` is preserved when non-empty so desktop expression
-  presets can play their requested local SFX; omitted `sound_file` still maps to
-  `sound_id == ""` to suppress implicit state-default sounds.
+  presets can play their requested local SFX. All `evt.ai.status` sources, including
+  BLE and WebSocket/desktop, inherit the mapped behavior state's default SFX when
+  `sound_file` is omitted or explicitly empty. The current wire contract has no
+  explicit mute value.
 - Low-memory listening UI first attempts full listening state, then text-only listening state, and finally skips UI refresh if heap is critically fragmented.
 - Ready-idle standby variants defer animation changes while internal/DMA largest blocks are below the configured thresholds; persistent pressure falls back to text-only standby instead of forcing an animation handoff.
 
